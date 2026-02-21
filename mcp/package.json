@@ -1,0 +1,13 @@
+{
+  "name": "browserforce-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing Chrome browser control via BrowserForce",
+  "main": "src/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "playwright-core": "^1.52.0",
+    "zod": "^3.24.0"
+  }
+}

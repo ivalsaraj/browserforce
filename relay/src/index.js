@@ -1,0 +1,734 @@
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { WebSocketServer, WebSocket } = require('ws');
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const DEFAULT_PORT = 19222;
+const COMMAND_TIMEOUT_MS = 30000;
+const PING_INTERVAL_MS = 5000;
+
+const BF_DIR = path.join(os.homedir(), '.browserforce');
+const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
+const CDP_URL_FILE = path.join(BF_DIR, 'cdp-url');
+
+// ─── Token Persistence ──────────────────────────────────────────────────────
+
+function getOrCreateAuthToken() {
+  try {
+    fs.mkdirSync(BF_DIR, { recursive: true });
+    if (fs.existsSync(TOKEN_FILE)) {
+      const token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+      if (token.length > 0) return token;
+    }
+  } catch { /* fall through to generate */ }
+
+  const token = crypto.randomBytes(32).toString('base64url');
+  try { fs.writeFileSync(TOKEN_FILE, token, { mode: 0o600 }); } catch {}
+  return token;
+}
+
+function writeCdpUrlFile(cdpUrl) {
+  try {
+    fs.mkdirSync(BF_DIR, { recursive: true });
+    fs.writeFileSync(CDP_URL_FILE, cdpUrl, { mode: 0o600 });
+  } catch (e) {
+    console.error('[relay] Failed to write CDP URL file:', e.message);
+  }
+}
+
+// ─── RelayServer ─────────────────────────────────────────────────────────────
+
+class RelayServer {
+  constructor(port = DEFAULT_PORT) {
+    this.port = port;
+    this.authToken = getOrCreateAuthToken();
+
+    // Extension connection (single slot)
+    this.ext = null;
+    this.extMsgId = 0;
+    this.extPending = new Map(); // id -> { resolve, reject, timer }
+    this.pingTimer = null;
+
+    // CDP clients
+    this.clients = new Set();
+
+    // Target tracking
+    this.targets = new Map();      // sessionId -> { tabId, targetId, targetInfo }
+    this.tabToSession = new Map(); // tabId -> sessionId
+    this.childSessions = new Map(); // childSessionId -> { tabId, parentSessionId }
+    this.sessionCounter = 0;
+
+    // State
+    this.autoAttachEnabled = false;
+    this.autoAttachParams = null;
+  }
+
+  start() {
+    const server = http.createServer((req, res) => this._handleHttp(req, res));
+
+    this.extWss = new WebSocketServer({ noServer: true });
+    this.cdpWss = new WebSocketServer({ noServer: true });
+
+    server.on('upgrade', (req, socket, head) => this._handleUpgrade(req, socket, head));
+    this.extWss.on('connection', (ws) => this._onExtConnect(ws));
+    this.cdpWss.on('connection', (ws) => this._onCdpConnect(ws));
+
+    server.listen(this.port, '127.0.0.1', () => {
+      const cdpUrl = `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`;
+      writeCdpUrlFile(cdpUrl);
+      console.log('');
+      console.log('  BrowserForce');
+      console.log('  ────────────────────────────────────────');
+      console.log(`  Status:   http://127.0.0.1:${this.port}/`);
+      console.log(`  CDP:      ${cdpUrl}`);
+      console.log(`  Config:   ${BF_DIR}/`);
+      console.log('  ────────────────────────────────────────');
+      console.log('');
+      console.log('  Waiting for extension to connect...');
+      console.log('');
+    });
+
+    this.server = server;
+    return this;
+  }
+
+  // ─── HTTP ────────────────────────────────────────────────────────────────
+
+  _handleHttp(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    if (url.pathname === '/') {
+      res.end(JSON.stringify({
+        status: 'ok',
+        extension: !!this.ext,
+        targets: this.targets.size,
+        clients: this.clients.size,
+      }));
+      return;
+    }
+
+    if (url.pathname === '/json/version') {
+      res.end(JSON.stringify({
+        Browser: 'BrowserForce/1.0',
+        'Protocol-Version': '1.3',
+        webSocketDebuggerUrl: `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`,
+      }));
+      return;
+    }
+
+    if (url.pathname === '/json/list' || url.pathname === '/json') {
+      const list = [...this.targets.values()].map((t) => ({
+        id: t.targetId,
+        title: t.targetInfo?.title || '',
+        url: t.targetInfo?.url || '',
+        type: 'page',
+        webSocketDebuggerUrl: `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`,
+      }));
+      res.end(JSON.stringify(list));
+      return;
+    }
+
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  // ─── WebSocket Upgrade ───────────────────────────────────────────────────
+
+  _handleUpgrade(req, socket, head) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (url.pathname === '/extension') {
+      // Validate origin
+      const origin = req.headers.origin || '';
+      if (!origin.startsWith('chrome-extension://')) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      // Single slot
+      if (this.ext) {
+        socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      this.extWss.handleUpgrade(req, socket, head, (ws) => {
+        this.extWss.emit('connection', ws, req);
+      });
+      return;
+    }
+
+    if (url.pathname === '/cdp') {
+      const token = url.searchParams.get('token');
+      if (token !== this.authToken) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      this.cdpWss.handleUpgrade(req, socket, head, (ws) => {
+        this.cdpWss.emit('connection', ws, req);
+      });
+      return;
+    }
+
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
+  }
+
+  // ─── Extension Connection ────────────────────────────────────────────────
+
+  _onExtConnect(ws) {
+    console.log('[relay] Extension connected');
+    this.ext = { ws };
+
+    ws.on('message', (data) => {
+      try {
+        this._handleExtMessage(JSON.parse(data.toString()));
+      } catch (e) {
+        console.error('[relay] Extension message parse error:', e.message);
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('[relay] Extension disconnected');
+      this._cleanupExtension();
+    });
+
+    ws.on('error', (err) => {
+      console.error('[relay] Extension WS error:', err.message);
+    });
+
+    // Ping keepalive
+    this.pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ method: 'ping' }));
+      }
+    }, PING_INTERVAL_MS);
+  }
+
+  _cleanupExtension() {
+    this.ext = null;
+    clearInterval(this.pingTimer);
+    this.pingTimer = null;
+
+    // Reject all pending extension commands
+    for (const [id, pending] of this.extPending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Extension disconnected'));
+    }
+    this.extPending.clear();
+
+    // Notify CDP clients: all targets gone
+    for (const [sessionId, target] of this.targets) {
+      this._broadcastCdp({
+        method: 'Target.detachedFromTarget',
+        params: { sessionId, targetId: target.targetId },
+      });
+    }
+    this.targets.clear();
+    this.tabToSession.clear();
+    this.childSessions.clear();
+  }
+
+  _handleExtMessage(msg) {
+    // Response to a command we sent
+    if (msg.id !== undefined && this.extPending.has(msg.id)) {
+      const pending = this.extPending.get(msg.id);
+      this.extPending.delete(msg.id);
+      clearTimeout(pending.timer);
+
+      if (msg.error) {
+        pending.reject(new Error(msg.error));
+      } else {
+        pending.resolve(msg.result);
+      }
+      return;
+    }
+
+    // Events from extension
+    if (msg.method === 'pong') return;
+
+    if (msg.method === 'cdpEvent') {
+      this._handleCdpEventFromExt(msg.params);
+      return;
+    }
+
+    if (msg.method === 'tabDetached') {
+      this._handleTabDetached(msg.params);
+      return;
+    }
+
+    if (msg.method === 'tabUpdated') {
+      this._handleTabUpdated(msg.params);
+      return;
+    }
+  }
+
+  /** Send command to extension, returns promise */
+  _sendToExt(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      if (!this.ext || this.ext.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error('Extension not connected'));
+        return;
+      }
+
+      const id = ++this.extMsgId;
+      const timer = setTimeout(() => {
+        this.extPending.delete(id);
+        reject(new Error(`Extension command '${method}' timed out after ${COMMAND_TIMEOUT_MS}ms`));
+      }, COMMAND_TIMEOUT_MS);
+
+      this.extPending.set(id, { resolve, reject, timer });
+      this.ext.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  // ─── CDP Events from Extension ──────────────────────────────────────────
+
+  _handleCdpEventFromExt({ tabId, method, params, childSessionId }) {
+    const sessionId = this.tabToSession.get(tabId);
+    if (!sessionId) return;
+
+    // Track child sessions (iframes / OOPIFs)
+    if (method === 'Target.attachedToTarget' && params?.sessionId) {
+      this.childSessions.set(params.sessionId, { tabId, parentSessionId: sessionId });
+    }
+    if (method === 'Target.detachedFromTarget' && params?.sessionId) {
+      this.childSessions.delete(params.sessionId);
+    }
+
+    // Route: child session events go under the parent's sessionId
+    const outerSessionId = childSessionId
+      ? (this.childSessions.get(childSessionId)?.parentSessionId || sessionId)
+      : sessionId;
+
+    this._broadcastCdp({ method, params, sessionId: outerSessionId });
+  }
+
+  _handleTabDetached({ tabId, reason }) {
+    const sessionId = this.tabToSession.get(tabId);
+    if (!sessionId) return;
+
+    const target = this.targets.get(sessionId);
+
+    // Clean up child sessions for this tab
+    for (const [childId, child] of this.childSessions) {
+      if (child.tabId === tabId) this.childSessions.delete(childId);
+    }
+
+    this.targets.delete(sessionId);
+    this.tabToSession.delete(tabId);
+
+    this._broadcastCdp({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId, targetId: target?.targetId },
+    });
+
+    console.log(`[relay] Tab ${tabId} detached (${reason})`);
+  }
+
+  _handleTabUpdated({ tabId, url, title }) {
+    const sessionId = this.tabToSession.get(tabId);
+    if (!sessionId) return;
+
+    const target = this.targets.get(sessionId);
+    if (!target) return;
+
+    if (url) target.targetInfo.url = url;
+    if (title) target.targetInfo.title = title;
+
+    this._broadcastCdp({
+      method: 'Target.targetInfoChanged',
+      params: {
+        targetInfo: {
+          targetId: target.targetId,
+          type: 'page',
+          title: target.targetInfo.title || '',
+          url: target.targetInfo.url || '',
+          attached: true,
+        },
+      },
+    });
+  }
+
+  // ─── CDP Client Connection ──────────────────────────────────────────────
+
+  _onCdpConnect(ws) {
+    console.log('[relay] CDP client connected');
+    this.clients.add(ws);
+
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        this._handleCdpClientMessage(ws, msg);
+      } catch (e) {
+        console.error('[relay] CDP client message error:', e.message);
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('[relay] CDP client disconnected');
+      this.clients.delete(ws);
+    });
+
+    ws.on('error', (err) => {
+      console.error('[relay] CDP client WS error:', err.message);
+    });
+  }
+
+  async _handleCdpClientMessage(ws, msg) {
+    const { id, method, params, sessionId } = msg;
+
+    try {
+      let result;
+      if (sessionId) {
+        result = await this._forwardToTab(sessionId, method, params);
+      } else {
+        result = await this._handleBrowserCommand(ws, id, method, params);
+      }
+      if (result !== undefined) {
+        const response = { id, result };
+        if (sessionId) response.sessionId = sessionId;
+        ws.send(JSON.stringify(response));
+      }
+    } catch (err) {
+      const response = {
+        id,
+        error: { code: -32000, message: err.message },
+      };
+      if (sessionId) response.sessionId = sessionId;
+      ws.send(JSON.stringify(response));
+    }
+  }
+
+  async _handleBrowserCommand(ws, msgId, method, params) {
+    switch (method) {
+      case 'Browser.getVersion':
+        return {
+          protocolVersion: '1.3',
+          product: 'BrowserForce/1.0',
+          userAgent: 'BrowserForce',
+          jsVersion: '',
+        };
+
+      case 'Target.setDiscoverTargets':
+        // Emit targetCreated for all known targets
+        for (const [, target] of this.targets) {
+          ws.send(JSON.stringify({
+            method: 'Target.targetCreated',
+            params: {
+              targetInfo: {
+                targetId: target.targetId,
+                type: 'page',
+                title: target.targetInfo?.title || '',
+                url: target.targetInfo?.url || '',
+                attached: true,
+              },
+            },
+          }));
+        }
+        return {};
+
+      case 'Target.setAutoAttach':
+        this.autoAttachEnabled = true;
+        this.autoAttachParams = params;
+        // Respond immediately, then attach tabs asynchronously
+        ws.send(JSON.stringify({ id: msgId, result: {} }));
+        this._autoAttachAllTabs(ws).catch((e) => {
+          console.error('[relay] Auto-attach error:', e.message);
+        });
+        return undefined; // Already sent response
+
+      case 'Target.getTargets':
+        return {
+          targetInfos: [...this.targets.values()].map((t) => ({
+            targetId: t.targetId,
+            type: 'page',
+            title: t.targetInfo?.title || '',
+            url: t.targetInfo?.url || '',
+            attached: true,
+          })),
+        };
+
+      case 'Target.getTargetInfo': {
+        if (params?.targetId) {
+          for (const target of this.targets.values()) {
+            if (target.targetId === params.targetId) {
+              return {
+                targetInfo: {
+                  targetId: target.targetId,
+                  type: 'page',
+                  title: target.targetInfo?.title || '',
+                  url: target.targetInfo?.url || '',
+                  attached: true,
+                },
+              };
+            }
+          }
+        }
+        // No targetId or unrecognized targetId → return browser target
+        return {
+          targetInfo: {
+            targetId: params?.targetId || 'browser',
+            type: 'browser',
+            title: '',
+            url: '',
+            attached: true,
+          },
+        };
+      }
+
+      case 'Target.attachToTarget': {
+        // Find already-attached target by targetId
+        for (const [sessionId, target] of this.targets) {
+          if (target.targetId === params.targetId) {
+            return { sessionId };
+          }
+        }
+        throw new Error(`Target ${params.targetId} not found or not attached`);
+      }
+
+      case 'Target.createTarget':
+        return this._createTarget(ws, params);
+
+      case 'Target.closeTarget':
+        return this._closeTarget(params);
+
+      case 'Browser.setDownloadBehavior':
+        return {};
+
+      case 'Target.getBrowserContexts':
+        return { browserContextIds: [] };
+
+      default:
+        // Unknown browser-level commands get a no-op response
+        return {};
+    }
+  }
+
+  // ─── Tab Management ─────────────────────────────────────────────────────
+
+  async _autoAttachAllTabs(ws) {
+    if (!this.ext) return;
+
+    const { tabs } = await this._sendToExt('listTabs');
+    console.log(`[relay] Discovered ${tabs.length} tab(s) (lazy — debugger deferred until first use)`);
+
+    for (const tab of tabs) {
+      // Skip if already tracked
+      if (this.tabToSession.has(tab.tabId)) {
+        const sessionId = this.tabToSession.get(tab.tabId);
+        const target = this.targets.get(sessionId);
+        this._sendAttachedEvent(ws, sessionId, target);
+        continue;
+      }
+
+      const sessionId = `s${++this.sessionCounter}`;
+      const targetId = `tab-${tab.tabId}`;
+      const targetInfo = { targetId, type: 'page', title: tab.title, url: tab.url };
+
+      this.targets.set(sessionId, {
+        tabId: tab.tabId,
+        targetId,
+        targetInfo,
+        debuggerAttached: false,
+        attachPromise: null,
+      });
+      this.tabToSession.set(tab.tabId, sessionId);
+
+      this._sendAttachedEvent(ws, sessionId, { targetId, targetInfo });
+    }
+
+    console.log(`[relay] ${this.targets.size} target(s) registered. Debugger attaches on first use.`);
+  }
+
+  /** Attach debugger to a tab on demand (lazy). Race-safe via attachPromise. */
+  async _ensureDebuggerAttached(target, sessionId) {
+    if (target.debuggerAttached) return;
+
+    // If another command already triggered attachment, wait for it
+    if (target.attachPromise) {
+      await target.attachPromise;
+      return;
+    }
+
+    target.attachPromise = (async () => {
+      console.log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (${target.targetInfo?.url})`);
+      const result = await this._sendToExt('attachTab', {
+        tabId: target.tabId,
+        sessionId,
+      });
+      if (result.targetId) target.targetId = result.targetId;
+      if (result.targetInfo) target.targetInfo = result.targetInfo;
+      target.debuggerAttached = true;
+      target.attachPromise = null;
+    })();
+
+    await target.attachPromise;
+  }
+
+  _sendAttachedEvent(ws, sessionId, target) {
+    ws.send(JSON.stringify({
+      method: 'Target.attachedToTarget',
+      params: {
+        sessionId,
+        targetInfo: {
+          targetId: target.targetId,
+          type: 'page',
+          title: target.targetInfo?.title || '',
+          url: target.targetInfo?.url || '',
+          attached: true,
+        },
+        waitingForDebugger: false,
+      },
+    }));
+  }
+
+  async _createTarget(ws, params) {
+    const sessionId = `s${++this.sessionCounter}`;
+    const result = await this._sendToExt('createTab', {
+      url: params.url || 'about:blank',
+      sessionId,
+    });
+
+    this.targets.set(sessionId, {
+      tabId: result.tabId,
+      targetId: result.targetId,
+      targetInfo: result.targetInfo,
+      debuggerAttached: true, // createTab attaches debugger immediately
+      attachPromise: null,
+    });
+    this.tabToSession.set(result.tabId, sessionId);
+
+    // Broadcast attachedToTarget to ALL clients
+    this._broadcastCdp({
+      method: 'Target.attachedToTarget',
+      params: {
+        sessionId,
+        targetInfo: {
+          targetId: result.targetId,
+          type: 'page',
+          title: result.targetInfo?.title || '',
+          url: result.targetInfo?.url || params.url || 'about:blank',
+          attached: true,
+        },
+        waitingForDebugger: false,
+      },
+    });
+
+    return { targetId: result.targetId };
+  }
+
+  async _closeTarget(params) {
+    let tabId;
+    let sessionId;
+
+    for (const [sid, target] of this.targets) {
+      if (target.targetId === params.targetId) {
+        tabId = target.tabId;
+        sessionId = sid;
+        break;
+      }
+    }
+
+    if (!tabId) throw new Error('Target not found');
+
+    await this._sendToExt('closeTab', { tabId });
+
+    // Clean up child sessions
+    for (const [childId, child] of this.childSessions) {
+      if (child.tabId === tabId) this.childSessions.delete(childId);
+    }
+
+    this.targets.delete(sessionId);
+    this.tabToSession.delete(tabId);
+
+    this._broadcastCdp({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId, targetId: params.targetId },
+    });
+
+    return { success: true };
+  }
+
+  // ─── CDP Command Forwarding ─────────────────────────────────────────────
+
+  async _forwardToTab(sessionId, method, params) {
+    // Main session
+    const target = this.targets.get(sessionId);
+    if (target) {
+      // Lazy attach: connect debugger on first CDP command
+      if (!target.debuggerAttached) {
+        await this._ensureDebuggerAttached(target, sessionId);
+      }
+      return this._sendToExt('cdpCommand', {
+        tabId: target.tabId,
+        method,
+        params: params || {},
+      });
+    }
+
+    // Child session (iframe / OOPIF)
+    const child = this.childSessions.get(sessionId);
+    if (child) {
+      // Ensure parent tab's debugger is attached
+      const parentSessionId = this.tabToSession.get(child.tabId);
+      const parentTarget = parentSessionId && this.targets.get(parentSessionId);
+      if (parentTarget && !parentTarget.debuggerAttached) {
+        await this._ensureDebuggerAttached(parentTarget, parentSessionId);
+      }
+      return this._sendToExt('cdpCommand', {
+        tabId: child.tabId,
+        method,
+        params: params || {},
+        childSessionId: sessionId,
+      });
+    }
+
+    throw new Error(`Session '${sessionId}' not found`);
+  }
+
+  // ─── Broadcast ──────────────────────────────────────────────────────────
+
+  _broadcastCdp(msg) {
+    const data = JSON.stringify(msg);
+    for (const client of this.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(data);
+      }
+    }
+  }
+
+  stop() {
+    clearInterval(this.pingTimer);
+    this.server?.close();
+  }
+}
+
+// ─── Exports ─────────────────────────────────────────────────────────────────
+
+module.exports = { RelayServer, DEFAULT_PORT, BF_DIR, TOKEN_FILE, CDP_URL_FILE };
+
+// ─── CLI Entry ───────────────────────────────────────────────────────────────
+
+if (require.main === module) {
+  const port = parseInt(process.env.RELAY_PORT || process.argv[2] || DEFAULT_PORT, 10);
+  const relay = new RelayServer(port);
+  relay.start();
+
+  process.on('SIGINT', () => {
+    console.log('\n[relay] Shutting down...');
+    relay.stop();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    relay.stop();
+    process.exit(0);
+  });
+}

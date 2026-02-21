@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="bf-popup">
+    <header>
+      <h1>BrowserForce</h1>
+      <div id="bf-status" class="status disconnected">
+        <span class="dot"></span>
+        <span id="bf-status-text">Disconnected</span>
+      </div>
+    </header>
+
+    <section class="field">
+      <label for="bf-relay-url">Relay URL</label>
+      <div class="input-row">
+        <input type="text" id="bf-relay-url" placeholder="ws://127.0.0.1:19222/extension">
+        <button id="bf-save-url">Save</button>
+      </div>
+    </section>
+
+    <section class="field">
+      <label>Controlled Tabs <span id="bf-tab-count" class="badge">0</span></label>
+      <div id="bf-tabs-list" class="tabs-list">
+        <div class="empty">No tabs attached</div>
+      </div>
+    </section>
+
+    <section class="field">
+      <label>Memory</label>
+      <div id="bf-memory" class="memory-stats">
+        <span class="memory-na">—</span>
+      </div>
+    </section>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
