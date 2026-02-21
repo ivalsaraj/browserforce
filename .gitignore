@@ -6,3 +6,4 @@ node_modules/
 *.pid
 .npm
 pnpm-debug.log*
+.worktrees/
