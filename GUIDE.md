@@ -112,15 +112,28 @@ The extension icon turns green — you're connected.
 
 **Option A: OpenClaw**
 
-Install the BrowserForce skill:
+Most OpenClaw users chat with their agent from Telegram or WhatsApp. Copy-paste this into your terminal:
 
 ```bash
-npx -y skills add ivalsaraj/browserforce
+npm install -g browserforce && npx -y skills add ivalsaraj/browserforce
 ```
 
-The skill teaches your agent to use BrowserForce CLI commands via Bash. Your agent can now browse the web as you — no login flows, no captchas.
+This installs BrowserForce and teaches your OpenClaw agent how to use it. Then start the relay (keep it running):
 
-Or add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
+```bash
+browserforce serve
+```
+
+**Verify it works** — send this to your agent:
+
+> Go to https://example.com and tell me the page title
+
+If your agent browses to the page and responds with the title, you're all set. Your agent can now browse as you — no login flows, no captchas — even from WhatsApp or Telegram.
+
+<details>
+<summary><b>Alternative: MCP server</b> (advanced)</summary>
+
+If you prefer MCP over the skill, add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -143,6 +156,8 @@ Or add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
   }
 }
 ```
+
+</details>
 
 **Option B: Claude Desktop / Claude Code (via MCP)**
 
