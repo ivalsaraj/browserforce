@@ -350,3 +350,119 @@ export const A11Y_CLIENT_CODE = `
   globalThis.__bf_a11y = { renderA11yLabels: renderA11yLabels, hideA11yLabels: hideA11yLabels };
 })();
 `;
+
+// ─── CDP Helpers ──────────────────────────────────────────────────────────────
+
+const MAX_CONCURRENCY = 24;
+const BOX_MODEL_TIMEOUT_MS = 5000;
+const MAX_SCREENSHOT_DIMENSION = 1568;
+
+export async function resolveScopeBackendNodeId(cdp, selector) {
+  if (!selector) return null;
+  const { root } = await cdp.send('DOM.getDocument');
+  const { nodeId } = await cdp.send('DOM.querySelector', {
+    nodeId: root.nodeId, selector,
+  });
+  if (!nodeId) {
+    throw new Error(`Selector "${selector}" did not match any element on the page`);
+  }
+  const { node } = await cdp.send('DOM.describeNode', { nodeId });
+  return node.backendNodeId;
+}
+
+export async function getLabelBoxes(cdp, refs) {
+  const sema = new Semaphore(MAX_CONCURRENCY);
+  const results = await Promise.all(
+    refs.map(async (ref) => {
+      if (!ref.backendNodeId) return null;
+      await sema.acquire();
+      try {
+        const response = await Promise.race([
+          cdp.send('DOM.getBoxModel', { backendNodeId: ref.backendNodeId }),
+          new Promise(resolve => setTimeout(() => resolve(null), BOX_MODEL_TIMEOUT_MS)),
+        ]);
+        if (!response) return null;
+        const box = buildBoxFromQuad(response.model.border);
+        if (box.width <= 0 || box.height <= 0) return null;
+        return { ref: ref.ref, role: ref.role, box };
+      } catch {
+        return null;
+      } finally {
+        sema.release();
+      }
+    })
+  );
+  return results.filter(Boolean);
+}
+
+export async function injectA11yClient(page) {
+  const exists = await page.evaluate(() => typeof globalThis.__bf_a11y !== 'undefined');
+  if (!exists) {
+    await page.evaluate(A11Y_CLIENT_CODE);
+  }
+}
+
+export async function showLabels(page, labels) {
+  return page.evaluate((entries) => globalThis.__bf_a11y.renderA11yLabels(entries), labels);
+}
+
+export async function hideLabels(page) {
+  await page.evaluate(() => {
+    const timerKey = '__bf_labels_timer__';
+    if (window[timerKey]) {
+      window.clearTimeout(window[timerKey]);
+      window[timerKey] = null;
+    }
+    document.getElementById('__bf_labels__')?.remove();
+  });
+}
+
+// ─── Main Orchestrator ────────────────────────────────────────────────────────
+
+export async function screenshotWithLabels(page, { selector, interactiveOnly = true } = {}) {
+  let cdp;
+  let labelsInjected = false;
+
+  try {
+    cdp = await page.context().newCDPSession(page);
+
+    const scopeId = selector
+      ? await resolveScopeBackendNodeId(cdp, selector)
+      : null;
+
+    const { nodes } = await cdp.send('Accessibility.getFullAXTree');
+    const { text, refs } = buildSnapshotFromCdpNodes(nodes, scopeId);
+
+    const interactiveRefs = interactiveOnly
+      ? refs.filter(r => INTERACTIVE_ROLES.has(r.role))
+      : refs;
+
+    const labels = await getLabelBoxes(cdp, interactiveRefs);
+
+    await injectA11yClient(page);
+    labelsInjected = true;
+    const labelCount = await showLabels(page, labels);
+
+    const maxDim = MAX_SCREENSHOT_DIMENSION;
+    const viewport = await page.evaluate((max) => ({
+      width: Math.min(window.innerWidth, max),
+      height: Math.min(window.innerHeight, max),
+    }), maxDim);
+
+    const screenshot = await page.screenshot({
+      type: 'jpeg',
+      quality: 80,
+      scale: 'css',
+      clip: { x: 0, y: 0, ...viewport },
+    });
+
+    return { screenshot, snapshot: text, labelCount };
+  } finally {
+    if (labelsInjected) {
+      try { await hideLabels(page); } catch { /* page may have navigated */ }
+    }
+    if (cdp) {
+      try { await cdp.detach(); } catch { /* session may already be detached */ }
+    }
+  }
+}
