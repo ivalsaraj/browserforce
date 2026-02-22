@@ -342,7 +342,8 @@ async function checkRestriction(method, params, tabId) {
     return buildRestrictionError(
       `Navigation to "${params?.url || 'unknown'}" is not allowed`,
       `URL is locked to ${lockedUrl}`,
-      settings
+      settings,
+      { lockedUrl }
     );
   }
 
@@ -358,7 +359,7 @@ async function checkRestriction(method, params, tabId) {
   return null; // allowed
 }
 
-function buildRestrictionError(action, reason, settings) {
+function buildRestrictionError(action, reason, settings, { lockedUrl } = {}) {
   if (restrictionExplained) {
     return `BLOCKED: ${action} (${reason}).`;
   }
@@ -368,7 +369,8 @@ function buildRestrictionError(action, reason, settings) {
   const lines = [`BLOCKED: ${action}.`, ''];
   lines.push('This browser session has active restrictions set by the user:');
   if (settings.lockUrl) {
-    lines.push('- URL is locked — do not navigate away. page.reload() is allowed.');
+    const urlNote = lockedUrl ? ` to ${lockedUrl}` : '';
+    lines.push(`- URL is locked${urlNote} — do not navigate away. page.reload() is allowed.`);
   }
   if (settings.noNewTabs) {
     lines.push('- New tab creation is disabled — work only with attached tab(s).');
