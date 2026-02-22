@@ -51,31 +51,77 @@ function writeCdpUrlFile(cdpUrl) {
 const DEFAULT_BROWSER_CONTEXT_ID = 'bf-default-context';
 
 // Commands Playwright sends automatically to every page during initialization.
-// We return synthetic {} for these on unattached tabs so we never call
-// chrome.debugger.attach() until the AI actually uses the tab.
-// This preserves dark mode and avoids the "controlled by automated software" bar
-// on every open tab.
+// We intercept these on unattached tabs and return synthetic responses so
+// chrome.debugger.attach() is never called until the AI actually uses the tab.
+// This preserves dark mode and avoids the "controlled by automated software"
+// bar appearing on every open tab.
 const INIT_ONLY_METHODS = new Set([
+  // Runtime
   'Runtime.enable', 'Runtime.disable', 'Runtime.runIfWaitingForDebugger',
-  'Page.enable', 'Page.disable', 'Page.setLifecycleEventsEnabled',
+  'Runtime.addBinding',
+  // Page lifecycle + scripting
+  'Page.enable', 'Page.disable',
+  'Page.getFrameTree',                         // needs shaped response — see syntheticInitResponse()
+  'Page.setLifecycleEventsEnabled',
   'Page.setInterceptFileChooserDialog', 'Page.setPrerenderingAllowed',
+  'Page.setBypassCSP',
+  'Page.addScriptToEvaluateOnNewDocument',     // needs shaped response — returns { identifier }
+  'Page.removeScriptToEvaluateOnNewDocument',
+  'Page.createIsolatedWorld',                  // Playwright uses _sendMayFail — response ignored
+  'Page.setFontFamilies',
+  // Network / Fetch
   'Fetch.enable', 'Fetch.disable',
   'Network.enable', 'Network.disable', 'Network.setBypassServiceWorker',
   'Network.setExtraHTTPHeaders', 'Network.setCacheDisabled',
+  // Target
   'Target.setAutoAttach', 'Target.setDiscoverTargets',
+  // Logging
   'Log.enable', 'Log.disable',
+  'Console.enable', 'Console.disable',
+  // CSS / DOM
   'CSS.enable', 'CSS.disable',
   'DOM.enable', 'DOM.disable',
   'Inspector.enable',
+  // Workers
   'ServiceWorker.enable', 'ServiceWorker.disable',
-  'Console.enable', 'Console.disable',
+  // Debugger
   'Debugger.enable', 'Debugger.disable',
+  // Security
   'Security.enable', 'Security.disable',
+  'Security.setIgnoreCertificateErrors',
+  // Performance
   'Performance.enable', 'Performance.disable',
+  // Emulation — init and optional overrides Playwright sets up front
   'Emulation.setEmulatedMedia', 'Emulation.setDeviceMetricsOverride',
   'Emulation.setTouchEmulationEnabled', 'Emulation.setDefaultBackgroundColorOverride',
-  'Emulation.setAutomationOverride',
+  'Emulation.setAutomationOverride', 'Emulation.setFocusEmulationEnabled',
+  'Emulation.setScriptExecutionDisabled',
+  'Emulation.setLocaleOverride', 'Emulation.setTimezoneOverride',
+  'Emulation.setUserAgentOverride', 'Emulation.setGeolocationOverride',
 ]);
+
+// Return a well-shaped synthetic response for init commands that need more than {}.
+function syntheticInitResponse(method, target) {
+  switch (method) {
+    case 'Page.getFrameTree':
+      // Playwright reads frameTree.frame.id and frameTree.frame.url
+      return {
+        frameTree: {
+          frame: {
+            id: target.targetId || `frame-${target.tabId}`,
+            url: target.targetInfo?.url || 'about:blank',
+            securityOrigin: '',
+            mimeType: 'text/html',
+          },
+        },
+      };
+    case 'Page.addScriptToEvaluateOnNewDocument':
+      // Playwright stores the identifier to remove the script later
+      return { identifier: `bf-stub-${target.tabId}-${Date.now()}` };
+    default:
+      return {};
+  }
+}
 
 class RelayServer {
   constructor(port = DEFAULT_PORT) {
@@ -597,7 +643,7 @@ class RelayServer {
     }
 
     target.attachPromise = (async () => {
-      log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (${target.targetInfo?.url})`);
+      log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (triggered by: ${target._triggerMethod || '?'}) ${target.targetInfo?.url}`);
       const result = await this._sendToExt('attachTab', {
         tabId: target.tabId,
         sessionId,
@@ -718,8 +764,9 @@ class RelayServer {
         // actually uses the tab — preserves dark mode and avoids the automation
         // info bar on every open tab.
         if (INIT_ONLY_METHODS.has(method)) {
-          return {};
+          return syntheticInitResponse(method, target);
         }
+        target._triggerMethod = method;
         await this._ensureDebuggerAttached(target, sessionId);
       }
       return this._sendToExt('cdpCommand', {
