@@ -1,5 +1,5 @@
 // BrowserForce — MCP Server
-// 2-tool architecture: execute (run Playwright code) + reset (reconnect)
+// 3-tool architecture: execute (run Playwright code) + reset (reconnect) + screenshot_with_labels (visual a11y labels)
 // Connects to the relay via Playwright's CDP client.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -9,6 +9,7 @@ import { chromium } from 'playwright-core';
 import {
   getCdpUrl, CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
+import { screenshotWithLabels } from './a11y-labels.js';
 
 // ─── Console Log Capture ─────────────────────────────────────────────────────
 
@@ -344,6 +345,78 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: 'text', text: `Reset failed: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ─── Screenshot with Labels Tool ──────────────────────────────────────────────
+
+const SCREENSHOT_LABELS_PROMPT = `Take a screenshot with Vimium-style accessibility labels on interactive elements.
+
+Returns TWO content items:
+1. JPEG screenshot with color-coded labels (e1, e2, e3...) on buttons, links, inputs, etc.
+2. Text accessibility snapshot with matching refs and role/name locators
+
+Labels are color-coded by role:
+- Yellow: links
+- Orange: buttons, menu items, tabs
+- Red/pink: text inputs, search boxes
+- Green: checkboxes, radio buttons
+- Blue: sliders, spinbuttons, media
+- Purple: switches
+
+Use this tool when:
+- You need to understand the visual layout of a page
+- Text snapshot alone can't convey spatial relationships
+- You need to verify element positions (dashboards, grids, maps)
+- You need both visual context AND element refs for interaction
+
+After getting the screenshot, use the refs to interact via the execute tool:
+  await state.page.locator('role=button[name="Submit"]').click();
+
+Parameters:
+- selector: CSS selector to scope labels to part of the page (e.g., '#main', '.sidebar'). Main frame only.
+- interactiveOnly: Only label interactive elements like buttons/links/inputs (default: true)
+
+Limitations:
+- Main frame only — does not label elements inside cross-origin iframes
+- Locators are role/name based — no data-testid matching`;
+
+server.tool(
+  'screenshot_with_labels',
+  SCREENSHOT_LABELS_PROMPT,
+  {
+    selector: z.string().optional().describe('CSS selector to scope labels to a subtree of the main frame'),
+    interactiveOnly: z.boolean().optional().describe('Only label interactive elements (default: true)'),
+  },
+  async ({ selector, interactiveOnly = true }) => {
+    await ensureBrowser();
+    const ctx = getContext();
+    const pages = ctx.pages();
+    const page = pages[0] || null;
+    if (!page) {
+      return {
+        content: [{ type: 'text', text: 'Error: No pages available. Open a tab first.' }],
+        isError: true,
+      };
+    }
+
+    try {
+      const { screenshot, snapshot, labelCount } = await screenshotWithLabels(page, {
+        selector,
+        interactiveOnly,
+      });
+      return {
+        content: [
+          { type: 'image', data: screenshot.toString('base64'), mimeType: 'image/jpeg' },
+          { type: 'text', text: `Labels: ${labelCount} interactive elements\n\n${snapshot}` },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error: ${err.message}` }],
         isError: true,
       };
     }

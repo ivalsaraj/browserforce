@@ -56,7 +56,7 @@ describe('Tool Definitions', () => {
     assert.equal(result, '');
   });
 
-  it('registers exactly 2 tools: execute and reset', () => {
+  it('registers exactly 3 tools: execute, reset, screenshot_with_labels', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -69,8 +69,8 @@ describe('Tool Definitions', () => {
       toolNames.push(match[1]);
     }
 
-    assert.equal(toolNames.length, 2, `Should have exactly 2 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
-    assert.deepEqual(toolNames.sort(), ['execute', 'reset']);
+    assert.equal(toolNames.length, 3, `Should have exactly 3 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
+    assert.deepEqual(toolNames.sort(), ['execute', 'reset', 'screenshot_with_labels']);
   });
 
   it('tools have non-empty descriptions', () => {
@@ -137,6 +137,33 @@ describe('Tool Definitions', () => {
     const paramsMatch = afterReset.match(/,\s*\{\s*\}\s*,/);
     assert.ok(paramsMatch, 'reset should have empty params {}');
   });
+
+  it('screenshot_with_labels tool has optional selector and interactiveOnly params', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const toolBlock = source.split("'screenshot_with_labels'")[1]?.split('server.tool(')[0] || '';
+    assert.ok(toolBlock.includes('z.string().optional()'), 'should have optional string param (selector)');
+    assert.ok(toolBlock.includes('z.boolean().optional()'), 'should have optional boolean param (interactiveOnly)');
+    assert.ok(toolBlock.includes('selector:'), 'should have selector param');
+    assert.ok(toolBlock.includes('interactiveOnly:'), 'should have interactiveOnly param');
+  });
+
+  it('screenshot_with_labels tool has descriptive prompt', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('SCREENSHOT_LABELS_PROMPT'), 'should reference SCREENSHOT_LABELS_PROMPT');
+    assert.ok(source.includes('const SCREENSHOT_LABELS_PROMPT'), 'SCREENSHOT_LABELS_PROMPT should be defined');
+    const promptIdx = source.indexOf('const SCREENSHOT_LABELS_PROMPT');
+    const promptBlock = source.slice(promptIdx, source.indexOf("server.tool(\n  'screenshot_with_labels'"));
+    assert.ok(promptBlock.includes('color-coded'), 'prompt should mention color coding');
+    assert.ok(promptBlock.includes('snapshot'), 'prompt should mention snapshot');
+  });
 });
 
 // ─── MCP Response Format ─────────────────────────────────────────────────────
@@ -172,6 +199,22 @@ describe('MCP Response Format', () => {
     assert.equal(parsed.length, 2);
     assert.equal(parsed[0].index, 0);
     assert.equal(parsed[1].url, 'https://github.com');
+  });
+
+  it('screenshot_with_labels multi-content format is valid', () => {
+    const fakeBase64 = Buffer.from('fake-jpeg-data').toString('base64');
+    const response = {
+      content: [
+        { type: 'image', data: fakeBase64, mimeType: 'image/jpeg' },
+        { type: 'text', text: 'Labels: 5 interactive elements\n\n- button "Submit" [ref=e1]' },
+      ],
+    };
+    assert.equal(response.content.length, 2);
+    assert.equal(response.content[0].type, 'image');
+    assert.equal(response.content[0].mimeType, 'image/jpeg');
+    assert.equal(response.content[1].type, 'text');
+    assert.ok(response.content[1].text.includes('Labels:'));
+    assert.ok(response.content[1].text.includes('[ref='));
   });
 });
 
