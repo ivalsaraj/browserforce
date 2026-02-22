@@ -21,7 +21,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 │                                                                      │
 │  ┌─────────────────────────────┐  ┌───────────────────────────────┐ │
 │  │  MCP Client (Claude, etc.)  │  │  Direct Playwright Client     │ │
-│  │  Uses bf_* tools            │  │  chromium.connectOverCDP()    │ │
+│  │  Uses execute/reset tools    │  │  chromium.connectOverCDP()    │ │
 │  └──────────┬──────────────────┘  └──────────┬────────────────────┘ │
 │             │ MCP/stdio                      │ CDP/WebSocket        │
 └─────────────┼────────────────────────────────┼──────────────────────┘
@@ -29,7 +29,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
               ▼                                │
 ┌──────────────────────────────────┐           │
 │  MCP Server (mcp/src/index.js)   │           │
-│  - 16 browser control tools      │           │
+│  - 2 tools: execute + reset     │           │
 │  - Playwright-core CDP client    ├───────────┘
 │  - Auto-discovers relay token    │
 └──────────────┬───────────────────┘
@@ -203,7 +203,7 @@ When reviewing changes to this project:
 | `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
 | `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
-| `mcp/src/index.js` | ~660 | MCP server — 16 tools via Playwright-core `connectOverCDP` |
+| `mcp/src/index.js` | ~300 | MCP server — execute + reset tools via Playwright-core `connectOverCDP` |
 
 ## Agent Roles
 
@@ -224,7 +224,7 @@ Run with: `node --test relay/test/relay-server.test.js` and `node --test mcp/tes
 
 3. **Extension code can't be unit-tested directly**: It uses Chrome APIs (`chrome.debugger`, `chrome.tabs`, etc.) that don't exist outside Chrome. Test extension logic indirectly via relay integration tests.
 
-4. **Tab indices are unstable**: Closing tab 0 shifts all subsequent indices down. Always call `list_tabs` before using `click`/`navigate` with a `tabIndex`.
+4. **Tab indices are unstable**: Closing tab 0 shifts all subsequent indices down. Always call `context.pages()` to get the current list before targeting a tab by index.
 
 5. **Relay port collision**: Default port 19222. If tests fail with EADDRINUSE, kill stale processes: `lsof -ti:19222 | xargs kill -9`.
 
