@@ -125,8 +125,8 @@ Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
             {
               "name": "browserforce",
               "transport": "stdio",
-              "command": "browserforce",
-              "args": ["mcp"]
+              "command": "npx",
+              "args": ["-y", "browserforce", "mcp"]
             }
           ]
         }
@@ -154,8 +154,8 @@ Add to your Claude config:
 {
   "mcpServers": {
     "browserforce": {
-      "command": "browserforce",
-      "args": ["mcp"]
+      "command": "npx",
+      "args": ["-y", "browserforce", "mcp"]
     }
   }
 }

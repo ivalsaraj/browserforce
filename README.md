@@ -64,7 +64,7 @@ Extension icon turns green — you're connected.
 
 ### OpenClaw
 
-Install BrowserForce, then add it as an MCP server in `~/.openclaw/openclaw.json`:
+Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -77,8 +77,8 @@ Install BrowserForce, then add it as an MCP server in `~/.openclaw/openclaw.json
             {
               "name": "browserforce",
               "transport": "stdio",
-              "command": "browserforce",
-              "args": ["mcp"]
+              "command": "npx",
+              "args": ["-y", "browserforce", "mcp"]
             }
           ]
         }
@@ -98,8 +98,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "browserforce": {
-      "command": "browserforce",
-      "args": ["mcp"]
+      "command": "npx",
+      "args": ["-y", "browserforce", "mcp"]
     }
   }
 }
@@ -113,8 +113,8 @@ Add to `~/.claude/mcp.json`:
 {
   "mcpServers": {
     "browserforce": {
-      "command": "browserforce",
-      "args": ["mcp"]
+      "command": "npx",
+      "args": ["-y", "browserforce", "mcp"]
     }
   }
 }
@@ -322,4 +322,4 @@ RELAY_PORT=19333 browserforce serve
 | Extension keeps reconnecting | Normal — MV3 kills idle workers; it auto-recovers |
 | Port in use | `lsof -ti:19222 \| xargs kill -9` |
 
-> **Want the full walkthrough?** Read the [User Guide](GUIDE.md) for a plain-English explanation of what this does and how to get started.
+> **Want the full walkthrough?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for a plain-English explanation of what this does and how to get started.
