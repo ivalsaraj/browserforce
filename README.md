@@ -1,30 +1,24 @@
 # BrowserForce
 
-**Give your AI agent your real Chrome browser.** Your logins, your cookies, your extensions — already there.
+> "a lion doesn't concern itself with token counting" — [@steipete](https://x.com/steipete), creator of [OpenClaw](https://github.com/openclaw/openclaw)
 
-Other browser tools spawn a fresh Chrome — no logins, no extensions, instantly flagged by bot detectors. BrowserForce connects to **your running browser** instead. One Chrome extension, full Playwright API, everything you're already logged into.
+**Fully autonomous browser control for AI agents.** Your logins, your cookies, your extensions — already there. No manual tab clicking. Your agent browses as you, even from WhatsApp.
+
+Other tools make you click each tab, spawn a fresh Chrome, or only work with one AI client. BrowserForce connects to **your running browser** and auto-attaches to all tabs. One Chrome extension, full Playwright API, completely hands-off.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
-
-| | OpenClaw's built-in browser | BrowserForce |
-|---|---|---|
-| Browser | Spawns dedicated Chrome | **Uses your Chrome** |
-| Login state | Fresh — must log in every time | Already logged in |
-| Extensions | None | Your existing ones |
-| 2FA / Captchas | Blocked | Already passed (you did it) |
-| Bot detection | Easily detected | Runs in your real profile |
-| Cookies & sessions | Empty | Yours |
 
 ## Comparison
 
 | | Playwright MCP | Playwriter | Claude Extension | Antigravity | BrowserForce |
 |---|---|---|---|---|---|
+| Tab access | N/A (new browser) | Click each tab | Click each tab | Click each tab | **All tabs, automatic** |
 | Browser | Spawns new Chrome | Your Chrome | Your Chrome | Your Chrome | **Your Chrome** |
+| Autonomous | Yes | No (manual click) | No (manual click) | No (manual click) | **Yes (fully autonomous)** |
 | Tools | Many dedicated tools | 1 `execute` tool | Built-in | Many dedicated tools | **1 `execute` tool** |
 | Agent support | Any MCP client | Any MCP client | Claude only | Custom | **Any MCP client** |
 | Context method | Screenshots | A11y snapshots | Screenshots | Screenshots | **A11y snapshots** |
 | Playwright API | Partial | Full | No | No | **Full** |
-| State persistence | Per session | Per session | No | Per session | **Per session** |
 
 ## Setup
 
