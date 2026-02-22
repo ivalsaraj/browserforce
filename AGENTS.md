@@ -1,5 +1,14 @@
 # BrowserForce — Agent Guidelines
 
+## Playwriter Reference
+
+**Before writing any new code, always check how [playwriter](../playwriter) solves the same problem.** Playwriter is the reference implementation for a browser extension + CDP relay + MCP server stack. It lives at `~/Documents/projects/playwriter`.
+
+Rules:
+- **Don't reinvent what playwriter already solved.** Read the relevant playwriter source file first.
+- **Only add code for new requirements or problems playwriter hasn't already solved.**
+- Reference files: `playwriter/src/cdp-relay.ts`, `playwriter/src/executor.ts`, `playwriter/src/mcp.ts`, `playwriter/src/relay-client.ts`
+
 ## Project Overview
 
 BrowserForce bridges AI agents to a user's real Chrome browser via a transparent CDP proxy. Three components: **relay server** (Node.js CDP proxy), **Chrome extension** (MV3 service worker using `chrome.debugger`), and **MCP server** (exposes Playwright-based tools via Model Context Protocol).
@@ -104,23 +113,76 @@ These are NOT forwarded to the extension — handled locally:
 
 Everything else → forwarded to extension as `cdpCommand`.
 
+## Critical Patterns
+
+### Runtime.enable Trick
+
+When Playwright sends `Runtime.enable`, the extension must call `Runtime.disable` → 50ms sleep → `Runtime.enable` to force Chrome to re-emit `executionContextCreated` events. Without this, Playwright hangs waiting for contexts.
+
+**Location**: `extension/background.js`, `cdpCommand()` function.
+
+### MV3 Service Worker Keepalive
+
+Chrome kills MV3 service workers after ~30s of inactivity. The relay sends `ping` every 5 seconds. The extension responds with `pong`. Backup: `chrome.alarms` at 30-second intervals wakes the worker for reconnection.
+
+### Lazy Debugger Attachment
+
+When the agent sends `Target.setAutoAttach`, the relay responds with `{}` immediately, lists all tabs from the extension, and sends `Target.attachedToTarget` events — but does NOT call `chrome.debugger.attach()` on any tab. The debugger is attached lazily on the first CDP command targeting that tab via `_ensureDebuggerAttached()`. This avoids attaching debuggers to 50+ tabs at once (each consuming Chrome memory and showing the automation infobar). Race-safe via `attachPromise` per target.
+
+**Location**: `relay/src/index.js`, `_autoAttachAllTabs()`, `_ensureDebuggerAttached()`, `_forwardToTab()`.
+
+### INIT_ONLY_METHODS Interception
+
+Playwright eagerly sends ~40 init-only CDP commands to every page it learns about via `Target.attachedToTarget`. Without interception, this would trigger eager debugger attachment on all tabs. The relay intercepts these commands (in `INIT_ONLY_METHODS` set) and returns synthetic responses without calling `chrome.debugger.attach()`.
+
+Key methods: `Runtime.enable/disable`, `Page.enable/disable`, `Page.getFrameTree`, `Page.createIsolatedWorld` (critical — this was the actual trigger), `Page.addScriptToEvaluateOnNewDocument`, plus ~35 more Network/Fetch/Emulation/Security commands.
+
+**Location**: `relay/src/index.js`, `INIT_ONLY_METHODS`, `syntheticInitResponse()`, `_forwardToTab()`.
+
+### browserContextId Requirement
+
+Playwright's `CRBrowser._onAttachedToTarget` asserts `targetInfo.browserContextId` must be truthy. All relay-synthesized `targetInfo` objects must include `browserContextId: DEFAULT_BROWSER_CONTEXT_ID`. `Target.getBrowserContexts` must return `[DEFAULT_BROWSER_CONTEXT_ID]`.
+
+**Location**: `relay/src/index.js`, `DEFAULT_BROWSER_CONTEXT_ID = 'bf-default-context'`.
+
+### OOPIF / Child Session Routing
+
+Cross-origin iframes create child CDP sessions. The extension tracks `childSessions` (Chrome sessionId → parent tabId). The relay maps child session events to the parent page's relay sessionId for correct Playwright frame tree construction.
+
+### Debugger Detach Cascade
+
+When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the debugger from **ALL** tabs (reason: `canceled_by_user`). The extension must clear all attached tab state, not just one tab.
+
+### Test Isolation: writeCdpUrl Flag
+
+`RelayServer.start()` accepts `{ writeCdpUrl: false }` to prevent test instances from clobbering `~/.browserforce/cdp-url`. **All test `relay.start()` calls must pass `{ writeCdpUrl: false }`** or the production cdp-url file gets overwritten with random test ports.
+
+## Security Rules
+
+- Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.
+- Extension WS validates `Origin: chrome-extension://`. Reject all others.
+- CDP clients require auth token in query param. Token is random 32 bytes (base64url).
+- Token file permissions: `0o600` (owner read/write only).
+- Single extension slot. Second extension connection gets HTTP 409.
+
 ## Development Workflow
+
+### Commands
+
+```bash
+pnpm relay              # Start relay server (port 19222, kills stale process first)
+pnpm relay:dev          # Start with --watch
+pnpm mcp                # Start MCP server (stdio)
+pnpm test               # All tests
+pnpm test:relay         # Relay server unit + integration tests
+pnpm test:mcp           # MCP server tests
+```
 
 ### Making Changes
 
 1. **Relay changes**: Edit `relay/src/index.js`, restart with `pnpm relay:dev` (auto-reload)
 2. **Extension changes**: Edit `extension/background.js`, reload at `chrome://extensions/` (click refresh icon)
 3. **MCP changes**: Edit `mcp/src/index.js`, restart the MCP client (Claude Desktop, etc.)
-
-### Testing
-
-```bash
-pnpm test               # All tests
-pnpm test:relay          # Relay server unit + integration tests
-pnpm test:mcp            # MCP server tests
-```
-
-Tests use `node:test` (built-in, no dependencies).
 
 ### Code Review Checklist
 
@@ -137,10 +199,10 @@ When reviewing changes to this project:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `relay/src/index.js` | ~690 | `RelayServer` class — CDP proxy, session management, HTTP endpoints |
-| `extension/background.js` | ~425 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
+| `relay/src/index.js` | ~800 | `RelayServer` class — CDP proxy, session management, HTTP endpoints |
+| `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
-| `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, attached tabs list |
+| `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
 | `mcp/src/index.js` | ~420 | MCP server — 15 tools via Playwright-core `connectOverCDP` |
 
 ## Agent Roles
@@ -162,6 +224,8 @@ Run with: `node --test relay/test/relay-server.test.js` and `node --test mcp/tes
 
 3. **Extension code can't be unit-tested directly**: It uses Chrome APIs (`chrome.debugger`, `chrome.tabs`, etc.) that don't exist outside Chrome. Test extension logic indirectly via relay integration tests.
 
-4. **Tab indices are unstable**: Closing tab 0 shifts all subsequent indices down. Always call `bf_list_tabs` before using `bf_click`/`bf_navigate` with a `tabIndex`.
+4. **Tab indices are unstable**: Closing tab 0 shifts all subsequent indices down. Always call `list_tabs` before using `click`/`navigate` with a `tabIndex`.
 
 5. **Relay port collision**: Default port 19222. If tests fail with EADDRINUSE, kill stale processes: `lsof -ti:19222 | xargs kill -9`.
+
+6. **Test writeCdpUrl**: Never call `relay.start()` in tests without `{ writeCdpUrl: false }` — it overwrites the production cdp-url file.
