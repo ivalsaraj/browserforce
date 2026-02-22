@@ -15,6 +15,17 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 | Bot detection | Easily detected | Runs in your real profile |
 | Cookies & sessions | Empty | Yours |
 
+## Comparison
+
+| | Playwright MCP | Playwriter | Claude Extension | Antigravity | BrowserForce |
+|---|---|---|---|---|---|
+| Browser | Spawns new Chrome | Your Chrome | Your Chrome | Your Chrome | **Your Chrome** |
+| Tools | Many dedicated tools | 1 `execute` tool | Built-in | Many dedicated tools | **1 `execute` tool** |
+| Agent support | Any MCP client | Any MCP client | Claude only | Custom | **Any MCP client** |
+| Context method | Screenshots | A11y snapshots | Screenshots | Screenshots | **A11y snapshots** |
+| Playwright API | Partial | Full | No | No | **Full** |
+| State persistence | Per session | Per session | No | Per session | **Per session** |
+
 ## Setup
 
 ### 1. Install
@@ -64,7 +75,15 @@ Extension icon turns green — you're connected.
 
 ### OpenClaw
 
-Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
+Install the BrowserForce skill:
+
+```bash
+npx -y skills add ivalsaraj/browserforce
+```
+
+The skill teaches your agent to use BrowserForce CLI commands via Bash. Your OpenClaw agent can now browse the web as you — no login flows, no captchas.
+
+Or add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -87,8 +106,6 @@ Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
   }
 }
 ```
-
-Then add `"mcp-adapter"` to your agent's allowed tools. Your OpenClaw agent can now browse the web as you — no login flows, no captchas.
 
 ### Claude Desktop
 
@@ -137,16 +154,6 @@ browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
 ```
 
 Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
-
-### OpenClaw Skill
-
-Install the skill directly:
-
-```bash
-npx -y skills add ivalsaraj/browserforce
-```
-
-Or add to your agent config manually — the skill teaches the agent to use BrowserForce CLI commands via Bash.
 
 ### Any Playwright Script
 
@@ -279,38 +286,6 @@ RELAY_PORT=19333 browserforce serve
 | `GET /json/list` | List attached targets |
 | `ws://.../extension` | Chrome extension WebSocket |
 | `ws://.../cdp?token=...` | Agent CDP connection |
-
-## Comparison
-
-### vs Playwright MCP
-
-| | Playwright MCP | BrowserForce |
-|---|---|---|
-| Browser | Spawns new Chrome | **Uses your Chrome** |
-| Login state | Fresh — must log in every time | Already logged in |
-| Extensions | None | Your existing ones |
-| Bot detection | Always detected | Runs in your real profile |
-| Memory | Double (two Chrome instances) | Uses existing Chrome |
-
-### vs Claude Browser Extension
-
-| | Claude Extension | BrowserForce |
-|---|---|---|
-| Agent support | Claude only | **Any MCP client** (OpenClaw, Claude, custom) |
-| Context method | Screenshots (100KB+) | Accessibility snapshots (5-20KB) |
-| Playwright API | No | Full |
-| Network interception | Limited | Full |
-| Raw CDP access | No | Yes |
-
-### vs Antigravity (Jetski)
-
-| | Jetski | BrowserForce |
-|---|---|---|
-| Tools | 17+ tools | 1 `execute` tool |
-| Approach | Spawns subagent for browser tasks | Direct execution |
-| Latency | High (agent overhead) | Low |
-| LLM knowledge | Must learn custom tools | Already knows Playwright |
-| Context usage | High (many tool schemas) | Low |
 
 ## Troubleshooting
 

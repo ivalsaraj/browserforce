@@ -112,7 +112,15 @@ The extension icon turns green — you're connected.
 
 **Option A: OpenClaw**
 
-Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
+Install the BrowserForce skill:
+
+```bash
+npx -y skills add ivalsaraj/browserforce
+```
+
+The skill teaches your agent to use BrowserForce CLI commands via Bash. Your agent can now browse the web as you — no login flows, no captchas.
+
+Or add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -135,16 +143,6 @@ Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
   }
 }
 ```
-
-Then add `"mcp-adapter"` to your agent's allowed tools. Your agent can now browse the web as you.
-
-Or install the OpenClaw skill directly:
-
-```bash
-npx -y skills add ivalsaraj/browserforce
-```
-
-The skill teaches the agent to use BrowserForce CLI commands via Bash — no MCP config needed.
 
 **Option B: Claude Desktop / Claude Code (via MCP)**
 
