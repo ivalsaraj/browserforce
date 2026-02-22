@@ -333,14 +333,19 @@ async function getAccessibilityTree(page, rootSelector) {
       return kids;
     }
 
+    let nodeCount = 0;
+    const MAX_NODES = 2000;
+
     function buildTree(el, depth) {
       if (!el || el.nodeType !== 1) return null;
       if (isHidden(el)) return null;
       if (depth > 30) return null; // prevent runaway recursion
+      if (nodeCount >= MAX_NODES) return null; // cap total nodes
 
       const role = getRole(el);
       const children = [];
       for (const child of getChildren(el)) {
+        if (nodeCount >= MAX_NODES) break;
         const r = buildTree(child, depth + 1);
         if (r) {
           if (Array.isArray(r)) children.push(...r);
@@ -349,6 +354,7 @@ async function getAccessibilityTree(page, rootSelector) {
       }
 
       if (role) {
+        nodeCount++;
         const node = { role, name: getName(el) };
         if (/^H[1-6]$/.test(el.tagName)) node.level = parseInt(el.tagName[1]);
         if (['checkbox', 'radio', 'switch'].includes(role)) {

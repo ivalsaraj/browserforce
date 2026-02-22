@@ -341,6 +341,8 @@ function onDebuggerDetach(source, reason) {
         method: 'tabDetached',
         params: { tabId, reason },
       });
+      tabLastActivity.delete(tabId);
+      agentCreatedTabs.delete(tabId);
     }
     attachedTabs.clear();
     childSessions.clear();
@@ -409,6 +411,12 @@ function startAutoManageTimer() {
   autoManageInterval = setInterval(checkInactiveTabs, 60_000);
 }
 
+function stopAutoManageTimer() {
+  if (!autoManageInterval) return;
+  clearInterval(autoManageInterval);
+  autoManageInterval = null;
+}
+
 async function checkInactiveTabs() {
   const settings = await chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes']);
   const detachMs = (settings.autoDetachMinutes || 0) * 60_000;
@@ -438,9 +446,15 @@ async function checkInactiveTabs() {
   }
 }
 
-chrome.storage.onChanged.addListener((changes) => {
+chrome.storage.onChanged.addListener(async (changes) => {
   if (changes.autoDetachMinutes || changes.autoCloseMinutes) {
-    startAutoManageTimer();
+    const settings = await chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes']);
+    const anyEnabled = (settings.autoDetachMinutes || 0) > 0 || (settings.autoCloseMinutes || 0) > 0;
+    if (anyEnabled) {
+      startAutoManageTimer();
+    } else {
+      stopAutoManageTimer();
+    }
   }
 });
 
