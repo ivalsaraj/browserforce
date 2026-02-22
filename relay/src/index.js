@@ -15,6 +15,12 @@ const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
 const CDP_URL_FILE = path.join(BF_DIR, 'cdp-url');
 
+// ─── Logging ─────────────────────────────────────────────────────────────────
+
+function ts() { return new Date().toTimeString().slice(0, 8); }
+function log(...args) { console.log(`[${ts()}]`, ...args); }
+function logErr(...args) { console.error(`[${ts()}]`, ...args); }
+
 // ─── Token Persistence ──────────────────────────────────────────────────────
 
 function getOrCreateAuthToken() {
@@ -36,11 +42,40 @@ function writeCdpUrlFile(cdpUrl) {
     fs.mkdirSync(BF_DIR, { recursive: true });
     fs.writeFileSync(CDP_URL_FILE, cdpUrl, { mode: 0o600 });
   } catch (e) {
-    console.error('[relay] Failed to write CDP URL file:', e.message);
+    logErr('[relay] Failed to write CDP URL file:', e.message);
   }
 }
 
 // ─── RelayServer ─────────────────────────────────────────────────────────────
+
+const DEFAULT_BROWSER_CONTEXT_ID = 'bf-default-context';
+
+// Commands Playwright sends automatically to every page during initialization.
+// We return synthetic {} for these on unattached tabs so we never call
+// chrome.debugger.attach() until the AI actually uses the tab.
+// This preserves dark mode and avoids the "controlled by automated software" bar
+// on every open tab.
+const INIT_ONLY_METHODS = new Set([
+  'Runtime.enable', 'Runtime.disable', 'Runtime.runIfWaitingForDebugger',
+  'Page.enable', 'Page.disable', 'Page.setLifecycleEventsEnabled',
+  'Page.setInterceptFileChooserDialog', 'Page.setPrerenderingAllowed',
+  'Fetch.enable', 'Fetch.disable',
+  'Network.enable', 'Network.disable', 'Network.setBypassServiceWorker',
+  'Network.setExtraHTTPHeaders', 'Network.setCacheDisabled',
+  'Target.setAutoAttach', 'Target.setDiscoverTargets',
+  'Log.enable', 'Log.disable',
+  'CSS.enable', 'CSS.disable',
+  'DOM.enable', 'DOM.disable',
+  'Inspector.enable',
+  'ServiceWorker.enable', 'ServiceWorker.disable',
+  'Console.enable', 'Console.disable',
+  'Debugger.enable', 'Debugger.disable',
+  'Security.enable', 'Security.disable',
+  'Performance.enable', 'Performance.disable',
+  'Emulation.setEmulatedMedia', 'Emulation.setDeviceMetricsOverride',
+  'Emulation.setTouchEmulationEnabled', 'Emulation.setDefaultBackgroundColorOverride',
+  'Emulation.setAutomationOverride',
+]);
 
 class RelayServer {
   constructor(port = DEFAULT_PORT) {
@@ -67,7 +102,7 @@ class RelayServer {
     this.autoAttachParams = null;
   }
 
-  start() {
+  start({ writeCdpUrl = true } = {}) {
     const server = http.createServer((req, res) => this._handleHttp(req, res));
 
     this.extWss = new WebSocketServer({ noServer: true });
@@ -79,7 +114,7 @@ class RelayServer {
 
     server.listen(this.port, '127.0.0.1', () => {
       const cdpUrl = `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`;
-      writeCdpUrlFile(cdpUrl);
+      if (writeCdpUrl) writeCdpUrlFile(cdpUrl);
       console.log('');
       console.log('  BrowserForce');
       console.log('  ────────────────────────────────────────');
@@ -183,24 +218,24 @@ class RelayServer {
   // ─── Extension Connection ────────────────────────────────────────────────
 
   _onExtConnect(ws) {
-    console.log('[relay] Extension connected');
+    log('[relay] Extension connected');
     this.ext = { ws };
 
     ws.on('message', (data) => {
       try {
         this._handleExtMessage(JSON.parse(data.toString()));
       } catch (e) {
-        console.error('[relay] Extension message parse error:', e.message);
+        logErr('[relay] Extension message parse error:', e.message);
       }
     });
 
     ws.on('close', () => {
-      console.log('[relay] Extension disconnected');
+      log('[relay] Extension disconnected');
       this._cleanupExtension();
     });
 
     ws.on('error', (err) => {
-      console.error('[relay] Extension WS error:', err.message);
+      logErr('[relay] Extension WS error:', err.message);
     });
 
     // Ping keepalive
@@ -329,7 +364,7 @@ class RelayServer {
       params: { sessionId, targetId: target?.targetId },
     });
 
-    console.log(`[relay] Tab ${tabId} detached (${reason})`);
+    log(`[relay] Tab ${tabId} detached (${reason})`);
   }
 
   _handleTabUpdated({ tabId, url, title }) {
@@ -351,6 +386,7 @@ class RelayServer {
           title: target.targetInfo.title || '',
           url: target.targetInfo.url || '',
           attached: true,
+          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
         },
       },
     });
@@ -359,7 +395,7 @@ class RelayServer {
   // ─── CDP Client Connection ──────────────────────────────────────────────
 
   _onCdpConnect(ws) {
-    console.log('[relay] CDP client connected');
+    log('[relay] CDP client connected');
     this.clients.add(ws);
 
     ws.on('message', (data) => {
@@ -367,17 +403,17 @@ class RelayServer {
         const msg = JSON.parse(data.toString());
         this._handleCdpClientMessage(ws, msg);
       } catch (e) {
-        console.error('[relay] CDP client message error:', e.message);
+        logErr('[relay] CDP client message error:', e.message);
       }
     });
 
     ws.on('close', () => {
-      console.log('[relay] CDP client disconnected');
+      log('[relay] CDP client disconnected');
       this.clients.delete(ws);
     });
 
     ws.on('error', (err) => {
-      console.error('[relay] CDP client WS error:', err.message);
+      logErr('[relay] CDP client WS error:', err.message);
     });
   }
 
@@ -428,6 +464,7 @@ class RelayServer {
                 title: target.targetInfo?.title || '',
                 url: target.targetInfo?.url || '',
                 attached: true,
+                browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
               },
             },
           }));
@@ -440,7 +477,7 @@ class RelayServer {
         // Respond immediately, then attach tabs asynchronously
         ws.send(JSON.stringify({ id: msgId, result: {} }));
         this._autoAttachAllTabs(ws).catch((e) => {
-          console.error('[relay] Auto-attach error:', e.message);
+          logErr('[relay] Auto-attach error:', e.message);
         });
         return undefined; // Already sent response
 
@@ -452,6 +489,7 @@ class RelayServer {
             title: t.targetInfo?.title || '',
             url: t.targetInfo?.url || '',
             attached: true,
+            browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
           })),
         };
 
@@ -466,6 +504,7 @@ class RelayServer {
                   title: target.targetInfo?.title || '',
                   url: target.targetInfo?.url || '',
                   attached: true,
+                  browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
                 },
               };
             }
@@ -503,7 +542,7 @@ class RelayServer {
         return {};
 
       case 'Target.getBrowserContexts':
-        return { browserContextIds: [] };
+        return { browserContextIds: [DEFAULT_BROWSER_CONTEXT_ID] };
 
       default:
         // Unknown browser-level commands get a no-op response
@@ -517,7 +556,7 @@ class RelayServer {
     if (!this.ext) return;
 
     const { tabs } = await this._sendToExt('listTabs');
-    console.log(`[relay] Discovered ${tabs.length} tab(s) (lazy — debugger deferred until first use)`);
+    log(`[relay] Discovered ${tabs.length} tab(s) (lazy — debugger deferred until first use)`);
 
     for (const tab of tabs) {
       // Skip if already tracked
@@ -544,7 +583,7 @@ class RelayServer {
       this._sendAttachedEvent(ws, sessionId, { targetId, targetInfo });
     }
 
-    console.log(`[relay] ${this.targets.size} target(s) registered. Debugger attaches on first use.`);
+    log(`[relay] ${this.targets.size} target(s) registered. Debugger attaches on first use.`);
   }
 
   /** Attach debugger to a tab on demand (lazy). Race-safe via attachPromise. */
@@ -558,7 +597,7 @@ class RelayServer {
     }
 
     target.attachPromise = (async () => {
-      console.log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (${target.targetInfo?.url})`);
+      log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (${target.targetInfo?.url})`);
       const result = await this._sendToExt('attachTab', {
         tabId: target.tabId,
         sessionId,
@@ -567,6 +606,15 @@ class RelayServer {
       if (result.targetInfo) target.targetInfo = result.targetInfo;
       target.debuggerAttached = true;
       target.attachPromise = null;
+
+      // Playwright already sent Runtime.enable during init (we faked it with {}).
+      // Now that the real debugger is attached, trigger it so Chrome emits
+      // executionContextCreated events and Playwright can evaluate JS on this tab.
+      this._sendToExt('cdpCommand', {
+        tabId: target.tabId,
+        method: 'Runtime.enable',
+        params: {},
+      }).catch(() => {}); // fire-and-forget; events will arrive async
     })();
 
     await target.attachPromise;
@@ -583,6 +631,7 @@ class RelayServer {
           title: target.targetInfo?.title || '',
           url: target.targetInfo?.url || '',
           attached: true,
+          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
         },
         waitingForDebugger: false,
       },
@@ -616,6 +665,7 @@ class RelayServer {
           title: result.targetInfo?.title || '',
           url: result.targetInfo?.url || params.url || 'about:blank',
           attached: true,
+          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
         },
         waitingForDebugger: false,
       },
@@ -662,8 +712,14 @@ class RelayServer {
     // Main session
     const target = this.targets.get(sessionId);
     if (target) {
-      // Lazy attach: connect debugger on first CDP command
       if (!target.debuggerAttached) {
+        // Playwright sends init-only commands to every page it learns about.
+        // Return synthetic {} so we never attach the debugger until the AI
+        // actually uses the tab — preserves dark mode and avoids the automation
+        // info bar on every open tab.
+        if (INIT_ONLY_METHODS.has(method)) {
+          return {};
+        }
         await this._ensureDebuggerAttached(target, sessionId);
       }
       return this._sendToExt('cdpCommand', {
@@ -722,7 +778,7 @@ if (require.main === module) {
   relay.start();
 
   process.on('SIGINT', () => {
-    console.log('\n[relay] Shutting down...');
+    log('\n[relay] Shutting down...');
     relay.stop();
     process.exit(0);
   });

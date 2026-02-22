@@ -4,8 +4,8 @@
   "private": true,
   "description": "Bridge AI agents to your real Chrome browser via CDP relay",
   "scripts": {
-    "relay": "node relay/src/index.js",
-    "relay:dev": "node --watch relay/src/index.js",
+    "relay": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node relay/src/index.js",
+    "relay:dev": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node --watch relay/src/index.js",
     "mcp": "node mcp/src/index.js",
     "test": "node --test relay/test/relay-server.test.js && node --test mcp/test/mcp-tools.test.js",
     "test:relay": "node --test relay/test/relay-server.test.js",

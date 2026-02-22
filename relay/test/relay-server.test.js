@@ -102,7 +102,7 @@ describe('HTTP Endpoints', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200); // Wait for server to bind
   });
 
@@ -155,7 +155,7 @@ describe('WebSocket Security', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -238,7 +238,7 @@ describe('CDP Protocol', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -340,7 +340,7 @@ describe('Extension Communication', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -409,7 +409,7 @@ describe('Auto-attach Flow', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -599,7 +599,7 @@ describe('CDP Command Forwarding', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -721,7 +721,7 @@ describe('CDP Event Forwarding', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -795,7 +795,7 @@ describe('Tab Lifecycle', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
@@ -904,7 +904,7 @@ describe('Extension Disconnect', () => {
   before(async () => {
     port = getRandomPort();
     relay = new RelayServer(port);
-    relay.start();
+    relay.start({ writeCdpUrl: false });
     await sleep(200);
   });
 
