@@ -2,9 +2,9 @@
 
 > "a lion doesn't concern itself with token counting" — [@steipete](https://x.com/steipete), creator of [OpenClaw](https://github.com/openclaw/openclaw)
 
-**Fully autonomous browser control for AI agents.** Your logins, your cookies, your extensions — already there. No manual tab clicking. Your agent browses as you, even from WhatsApp.
+**You're giving an AI your real Chrome — your logins, cookies, and sessions. That takes conviction.** BrowserForce is built for people who use the best models and don't look back. Security is built in: lock URLs, block navigation, read-only mode, auto-cleanup — you stay in control.
 
-Other tools make you click each tab, spawn a fresh Chrome, or only work with one AI client. BrowserForce connects to **your running browser** and auto-attaches to all tabs. One Chrome extension, full Playwright API, completely hands-off.
+**Fully autonomous browser control.** No manual tab clicking. Your agent browses as you, even from WhatsApp. Other tools make you click each tab, spawn a fresh Chrome, or only work with one AI client. BrowserForce connects to **your running browser** and auto-attaches to all tabs. One Chrome extension, full Playwright API, completely hands-off.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
@@ -231,16 +231,19 @@ The **Chrome extension** lives in your browser. It attaches Chrome's built-in de
 
 When the agent connects, it immediately sees all your open tabs as controllable Playwright pages. No clicking, no manual attachment.
 
-## Extension Settings
+## You Stay in Control
 
-Click the extension icon to configure:
+Click the extension icon to configure restrictions. Your browser, your rules:
 
-- **Auto / Manual mode** — Let the agent create tabs freely, or manually select which tabs it can access
-- **Lock URL** — Prevent the agent from navigating away from the current page
-- **No new tabs** — Block tab creation
-- **Read-only** — Observe only, no interactions
-- **Auto-cleanup** — Automatically detach or close agent tabs after a timeout
-- **Custom instructions** — Pass text instructions to the agent
+| Setting | What it does |
+|---------|-------------|
+| **Auto / Manual mode** | Let the agent create tabs freely, or hand-pick which tabs it can access |
+| **Lock URL** | Prevent the agent from navigating away from the current page |
+| **No new tabs** | Block the agent from opening new tabs |
+| **Read-only** | Observe only — no clicks, no typing, no interactions |
+| **Auto-detach** | Automatically detach inactive tabs after 5-60 minutes |
+| **Auto-close** | Automatically close agent-created tabs after 5-60 minutes |
+| **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
 
 ## Security
 
@@ -250,6 +253,7 @@ Click the extension icon to configure:
 | **Auth** | Random token required for every CDP connection |
 | **Origin** | Extension only accepts connections from its own Chrome origin |
 | **Visibility** | Chrome shows "controlled by automated test software" on active tabs |
+| **Restrictions** | Lock URLs, block navigation, read-only mode — enforced at the CDP level |
 
 Everything runs on your machine. The auth token is stored at `~/.browserforce/auth-token` with owner-only permissions.
 
