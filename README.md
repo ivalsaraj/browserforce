@@ -86,7 +86,7 @@ browserforce serve
 
 **Verify it works** — send this to your agent:
 
-> Go to https://example.com and tell me the page title
+> Go to https://x.com and give me top tweets
 
 If your agent browses to the page and responds with the title, you're all set.
 
