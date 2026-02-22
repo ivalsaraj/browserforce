@@ -179,7 +179,7 @@ class RelayServer {
 
   // ─── HTTP ────────────────────────────────────────────────────────────────
 
-  _handleHttp(req, res) {
+  async _handleHttp(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -212,6 +212,21 @@ class RelayServer {
         webSocketDebuggerUrl: `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`,
       }));
       res.end(JSON.stringify(list));
+      return;
+    }
+
+    if (url.pathname === '/restrictions') {
+      if (!this.ext) {
+        res.end(JSON.stringify({ mode: 'auto', lockUrl: false, noNewTabs: false, readOnly: false, instructions: '' }));
+        return;
+      }
+      try {
+        const restrictions = await this._sendToExt('getRestrictions');
+        res.end(JSON.stringify(restrictions));
+      } catch (err) {
+        res.statusCode = 502;
+        res.end(JSON.stringify({ error: 'Extension not responding' }));
+      }
       return;
     }
 
@@ -346,6 +361,26 @@ class RelayServer {
 
     if (msg.method === 'tabUpdated') {
       this._handleTabUpdated(msg.params);
+      return;
+    }
+
+    if (msg.method === 'manualTabAttached') {
+      const { tabId, sessionId, targetId, targetInfo } = msg.params;
+      const relaySessionId = `bf-session-${++this.sessionCounter}`;
+      this.targets.set(relaySessionId, {
+        tabId,
+        targetId: targetId || `bf-target-${tabId}`,
+        targetInfo: targetInfo || { url: '', title: '' },
+        debuggerAttached: true,
+      });
+      this.tabToSession.set(tabId, relaySessionId);
+
+      // Notify connected CDP clients
+      for (const client of this.clients) {
+        if (client.readyState === 1) { // WebSocket.OPEN
+          this._sendAttachedEvent(client, relaySessionId, this.targets.get(relaySessionId));
+        }
+      }
       return;
     }
   }
