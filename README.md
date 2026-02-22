@@ -1,172 +1,90 @@
 # BrowserForce
 
-Bridge AI agents to your **real Chrome browser** — with all your logged-in sessions, cookies, and tabs — via a transparent CDP (Chrome DevTools Protocol) proxy.
+**Give your AI agent your real Chrome browser.** Your logins, your cookies, your extensions — already there.
 
-No headless browser. No sandboxed profiles. Your agent drives your actual browser.
+Other browser tools spawn a fresh Chrome — no logins, no extensions, instantly flagged by bot detectors. BrowserForce connects to **your running browser** instead. One Chrome extension, full Playwright API, everything you're already logged into.
 
-> **New here?** Read the [User Guide](GUIDE.md) for a plain-English walkthrough of what this does and how to get started.
+Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
-## Architecture
-
-```
-┌──────────────────┐      ┌──────────────────┐      ┌──────────────────────────┐
-│   AI Agent       │ CDP  │   Relay Server   │  WS  │   Chrome Extension       │
-│  (Playwright)    │─────▶│  (Node.js)       │─────▶│  (MV3 Service Worker)    │
-│                  │◀─────│  127.0.0.1:19222 │◀─────│  chrome.debugger API     │
-└──────────────────┘      └──────────────────┘      └──────────────────────────┘
-```
-
-**Relay server** — Localhost-only Node.js process. Accepts Playwright CDP connections on one side, Chrome extension WebSocket on the other. Transparently proxies CDP commands/events. Intercepts `Target.*` commands to manage tab attachment.
-
-**Chrome extension** — MV3 service worker. Connects to the relay via WebSocket. Uses `chrome.debugger` API to attach to real browser tabs and forward CDP commands. Auto-reconnects on service worker termination.
-
-**Agent** — Any Playwright-compatible client. Connects via standard `chromium.connectOverCDP()`. Sees all your real browser tabs as controllable pages.
+| | OpenClaw's built-in browser | BrowserForce |
+|---|---|---|
+| Browser | Spawns dedicated Chrome | **Uses your Chrome** |
+| Login state | Fresh — must log in every time | Already logged in |
+| Extensions | None | Your existing ones |
+| 2FA / Captchas | Blocked | Already passed (you did it) |
+| Bot detection | Easily detected | Runs in your real profile |
+| Cookies & sessions | Empty | Yours |
 
 ## Setup
 
-### 1. Install the relay server
+### 1. Install
 
 ```bash
-cd relay
+git clone https://github.com/anthropics/browserforce.git
+cd browserforce
 pnpm install
 ```
 
-### 2. Load the extension
+### 2. Load the Chrome extension
 
-1. Open Chrome → `chrome://extensions/`
-2. Enable **Developer mode** (toggle in top-right)
-3. Click **Load unpacked** → select the `extension/` directory
-4. The extension icon appears in the toolbar (gray badge = disconnected)
+1. Open `chrome://extensions/` in Chrome
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** → select the `extension/` folder
+4. Extension icon appears in your toolbar (gray = disconnected)
 
 ### 3. Start the relay
 
 ```bash
-pnpm relay
-# or
-node relay/src/index.js
+browserforce serve
 ```
 
-Output:
+Or with pnpm (development):
+
+```bash
+pnpm relay
+```
 
 ```
   BrowserForce
   ────────────────────────────────────────
   Status:   http://127.0.0.1:19222/
-  CDP:      ws://127.0.0.1:19222/cdp?token=<AUTH_TOKEN>
+  CDP:      ws://127.0.0.1:19222/cdp?token=<TOKEN>
   ────────────────────────────────────────
 ```
 
-The extension badge turns green (`ON`) when connected.
+Extension icon turns green — you're connected.
 
-### 4. Connect your agent
+## Connect Your Agent
 
-```javascript
-const { chromium } = require('playwright');
+### OpenClaw
 
-const browser = await chromium.connectOverCDP(
-  'ws://127.0.0.1:19222/cdp?token=<AUTH_TOKEN>'
-);
+Add to `~/.openclaw/openclaw.json`:
 
-// Access your real, logged-in tabs
-const context = browser.contexts()[0];
-const pages = context.pages();
-
-for (const page of pages) {
-  console.log(page.url());
+```json
+{
+  "plugins": {
+    "entries": {
+      "mcp-adapter": {
+        "enabled": true,
+        "config": {
+          "servers": [
+            {
+              "name": "browserforce",
+              "transport": "stdio",
+              "command": "node",
+              "args": ["/absolute/path/to/browserforce/mcp/src/index.js"]
+            }
+          ]
+        }
+      }
+    }
+  }
 }
-
-// Take a screenshot of Gmail (already logged in!)
-const gmail = pages.find(p => p.url().includes('mail.google'));
-if (gmail) {
-  await gmail.screenshot({ path: 'gmail.png' });
-}
-
-// Open a new tab in the same browser
-const page = await context.newPage();
-await page.goto('https://x.com');
-// Uses your existing X session — no login needed
 ```
 
-## Configuration
+Then add `"mcp-adapter"` to your agent's allowed tools. Your OpenClaw agent can now browse the web as you — no login flows, no captchas.
 
-### Relay port
-
-```bash
-RELAY_PORT=19333 pnpm relay
-# or
-node relay/src/index.js 19333
-```
-
-### Extension relay URL
-
-Click the extension icon → change the relay URL in the popup → Save.
-
-Default: `ws://127.0.0.1:19222/extension`
-
-## How it works
-
-### Zero-click control
-
-When your agent connects and Playwright sends `Target.setAutoAttach`, the relay:
-
-1. Asks the extension for all open tabs
-2. Attaches `chrome.debugger` to each eligible tab
-3. Sends `Target.attachedToTarget` events to Playwright
-4. Your agent sees all tabs as `page` objects — immediately controllable
-
-No clicking. No tab groups. No manual attachment. The agent requests access, the relay grants it.
-
-### New tab creation
-
-```javascript
-const page = await context.newPage();
-await page.goto('https://github.com');
-```
-
-Creates a real Chrome tab, attaches the debugger, returns a Playwright page. Your cookies apply.
-
-### CDP transparency
-
-The relay is a transparent CDP proxy. Standard Playwright operations work:
-
-- `page.click()`, `page.type()`, `page.fill()` — native CDP `Input.*` events
-- `page.screenshot()` — `Page.captureScreenshot`
-- `page.evaluate()` — `Runtime.evaluate`
-- `page.goto()` — `Page.navigate`
-- Frame/iframe access — OOPIF child session routing
-
-### Reconnection
-
-The MV3 service worker handles Chrome's aggressive termination:
-
-- Relay pings extension every 5 seconds (keeps worker alive)
-- `maintainConnection` loop auto-reconnects on WS drop
-- `chrome.alarms` fallback wakes the worker after full termination
-- On reconnect, relay re-issues tab attachments
-
-## Security model
-
-| Layer | Control |
-|-------|---------|
-| **Network** | Relay binds to `127.0.0.1` only — no remote access |
-| **Origin** | Extension WS rejects non-`chrome-extension://` origins |
-| **Auth** | CDP clients require a per-instance random auth token |
-| **Visibility** | Chrome shows "controlled by automated test software" infobar |
-
-The auth token is persisted to `~/.browserforce/auth-token` and reused across restarts.
-
-## MCP Server (AI Agent Integration)
-
-The MCP server lets any MCP-compatible AI agent (Claude Desktop, Claude Code, etc.) control your browser through natural language.
-
-### Install
-
-```bash
-cd mcp
-pnpm install
-```
-
-### Configure for Claude Desktop
+### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -181,11 +99,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-No token configuration needed — the MCP server reads it automatically from `~/.browserforce/cdp-url`.
+### Claude Code
 
-### Configure for Claude Code
-
-Add to `~/.claude/mcp.json` or project `.mcp.json`:
+Add to `~/.claude/mcp.json`:
 
 ```json
 {
@@ -198,102 +114,171 @@ Add to `~/.claude/mcp.json` or project `.mcp.json`:
 }
 ```
 
-### Available MCP Tools
+### CLI
 
-| Tool | Description |
-|------|-------------|
-| `execute` | Run Playwright JavaScript in your real Chrome browser. Full access to `page`, `context`, persistent `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `clearLogs()`, plus globals like `fetch`, `URL`, `Buffer`. |
-| `reset` | Reconnect to the relay, reinitialize browser context, and clear persistent state. Use when connection drops or state gets corrupted. |
+```bash
+npm install -g browserforce   # or: pnpm add -g browserforce
+```
 
-### Example Agent Interaction
+```bash
+browserforce serve              # Start the relay server
+browserforce status             # Check relay and extension status
+browserforce tabs               # List open browser tabs
+browserforce snapshot [n]       # Accessibility tree of tab n
+browserforce screenshot [n]     # Screenshot tab n (PNG to stdout)
+browserforce navigate <url>     # Open URL in a new tab
+browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
+```
 
-Once configured, you can tell Claude:
+Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
 
-> "Open twitter.com in my browser and take a screenshot"
+### OpenClaw Skill
 
-The agent will run:
+Install the skill directly:
 
-\`\`\`javascript
-// execute tool
-await page.goto('https://twitter.com');
+```bash
+npx -y skills add anthropics/browserforce
+```
+
+Or add to your agent config manually — the skill teaches the agent to use BrowserForce CLI commands via Bash.
+
+### Any Playwright Script
+
+```javascript
+const { chromium } = require('playwright');
+
+const browser = await chromium.connectOverCDP(
+  'ws://127.0.0.1:19222/cdp?token=<TOKEN>'
+);
+
+const pages = browser.contexts()[0].pages();
+for (const page of pages) {
+  console.log(page.url());  // your real tabs!
+}
+
+// Gmail is already logged in
+const gmail = pages.find(p => p.url().includes('mail.google'));
+await gmail.screenshot({ path: 'gmail.png' });
+```
+
+No token config needed for MCP — the server reads it automatically from `~/.browserforce/cdp-url`.
+
+## What Your Agent Can Do
+
+Once connected, your agent has full Playwright access to your real browser:
+
+```javascript
+// Navigate (uses your cookies — no login needed)
+await page.goto('https://github.com');
+await waitForPageLoad();
+
+// Read pages with accessibility snapshots (10-100x cheaper than screenshots)
+return await snapshot();
+
+// Click, type, fill forms
+await page.locator('role=button[name="Sign in"]').click();
+await page.locator('role=textbox[name="Search"]').fill('query');
+
+// Screenshots when you need them
 return await page.screenshot();
-\`\`\`
-
-Since it's your real Chrome with your real X session, you'll see your actual feed.
-
-More examples of what the agent can do via `execute`:
-
-\`\`\`javascript
-// Get page title
-return await page.title()
-
-// Accessibility snapshot (10-100x cheaper than screenshots)
-return await snapshot()
-
-// Navigate and wait for load
-await page.goto('https://example.com');
-return await waitForPageLoad()
-
-// Persist data across calls
-state.count = (state.count || 0) + 1;
-return state.count
 
 // Work with multiple tabs
 const pages = context.pages();
-return await pages[1].title()
+const gmail = pages.find(p => p.url().includes('mail.google'));
 
-// Get console logs
-return getLogs()
-\`\`\`
+// Persist data across calls
+state.results = await page.evaluate(() => document.title);
+```
 
+### MCP Tools
 
-### Override CDP URL
+| Tool | Description |
+|------|-------------|
+| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, and Node.js globals. |
+| `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
-If you need to point the MCP server at a non-default relay:
+## How It Works
 
+```
+  Agent (OpenClaw, Claude, etc.)
+         │
+         │ CDP over WebSocket
+         ▼
+  Relay Server (localhost:19222)
+         │
+         │ WebSocket
+         ▼
+  Chrome Extension (MV3)
+         │
+         │ chrome.debugger API
+         ▼
+  Your Real Chrome Browser
+```
+
+The **relay server** runs on your machine (localhost only). It translates between the agent's CDP commands and the extension's debugger bridge.
+
+The **Chrome extension** lives in your browser. It attaches Chrome's built-in debugger to your tabs and forwards commands — exactly like DevTools does.
+
+When the agent connects, it immediately sees all your open tabs as controllable Playwright pages. No clicking, no manual attachment.
+
+## Extension Settings
+
+Click the extension icon to configure:
+
+- **Auto / Manual mode** — Let the agent create tabs freely, or manually select which tabs it can access
+- **Lock URL** — Prevent the agent from navigating away from the current page
+- **No new tabs** — Block tab creation
+- **Read-only** — Observe only, no interactions
+- **Auto-cleanup** — Automatically detach or close agent tabs after a timeout
+- **Custom instructions** — Pass text instructions to the agent
+
+## Security
+
+| Layer | Control |
+|-------|---------|
+| **Network** | Relay binds to `127.0.0.1` only — never exposed to the internet |
+| **Auth** | Random token required for every CDP connection |
+| **Origin** | Extension only accepts connections from its own Chrome origin |
+| **Visibility** | Chrome shows "controlled by automated test software" on active tabs |
+
+Everything runs on your machine. The auth token is stored at `~/.browserforce/auth-token` with owner-only permissions.
+
+## Configuration
+
+**Custom relay port:**
+```bash
+RELAY_PORT=19333 pnpm relay
+```
+
+**Extension relay URL:** Click the extension icon → change the URL → Save. Default: `ws://127.0.0.1:19222/extension`
+
+**Override CDP URL for MCP:**
 ```json
 {
-  "mcpServers": {
-    "browserforce": {
-      "command": "node",
-      "args": ["/path/to/mcp/src/index.js"],
-      "env": {
-        "BF_CDP_URL": "ws://127.0.0.1:19333/cdp?token=your-token"
-      }
-    }
+  "env": {
+    "BF_CDP_URL": "ws://127.0.0.1:19333/cdp?token=your-token"
   }
 }
 ```
 
 ## API
 
-### HTTP endpoints
-
 | Endpoint | Description |
 |----------|-------------|
 | `GET /` | Health check (extension status, target count) |
-| `GET /json/version` | CDP discovery endpoint |
+| `GET /json/version` | CDP discovery |
 | `GET /json/list` | List attached targets |
-
-### WebSocket endpoints
-
-| Endpoint | Client |
-|----------|--------|
-| `ws://.../extension` | Chrome extension (single slot) |
-| `ws://.../cdp?token=...` | Playwright / CDP clients |
+| `ws://.../extension` | Chrome extension WebSocket |
+| `ws://.../cdp?token=...` | Agent CDP connection |
 
 ## Troubleshooting
 
-**Extension stays gray ("disconnected")**
-- Is the relay running? Check `http://127.0.0.1:19222/`
-- Check the relay URL in the extension popup matches
+| Problem | Fix |
+|---------|-----|
+| Extension stays gray | Is the relay running? Check `http://127.0.0.1:19222/` |
+| "Another debugger attached" | Close DevTools for that tab |
+| Agent sees 0 pages | Open at least one regular webpage (not `chrome://`) |
+| Extension keeps reconnecting | Normal — MV3 kills idle workers; it auto-recovers |
+| Port in use | `lsof -ti:19222 \| xargs kill -9` |
 
-**"Another debugger is already attached"**
-- Another DevTools window is open for that tab. Close it, or the extension skips that tab.
-
-**Agent sees 0 pages**
-- The extension filters `chrome://`, `edge://`, and `devtools://` tabs
-- Ensure you have at least one regular webpage tab open
-
-**Service worker dies / badge flickers**
-- Normal MV3 behavior. The 5s ping keeps it alive during active sessions. The alarm fallback handles full restarts.
+> **Want the full walkthrough?** Read the [User Guide](GUIDE.md) for a plain-English explanation of what this does and how to get started.
