@@ -64,7 +64,7 @@ Extension icon turns green — you're connected.
 
 ### OpenClaw
 
-Add to `~/.openclaw/openclaw.json`:
+Install BrowserForce, then add it as an MCP server in `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -77,8 +77,8 @@ Add to `~/.openclaw/openclaw.json`:
             {
               "name": "browserforce",
               "transport": "stdio",
-              "command": "node",
-              "args": ["/absolute/path/to/browserforce/mcp/src/index.js"]
+              "command": "browserforce",
+              "args": ["mcp"]
             }
           ]
         }
@@ -98,8 +98,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "browserforce": {
-      "command": "node",
-      "args": ["/absolute/path/to/browserforce/mcp/src/index.js"]
+      "command": "browserforce",
+      "args": ["mcp"]
     }
   }
 }
@@ -113,8 +113,8 @@ Add to `~/.claude/mcp.json`:
 {
   "mcpServers": {
     "browserforce": {
-      "command": "node",
-      "args": ["/absolute/path/to/browserforce/mcp/src/index.js"]
+      "command": "browserforce",
+      "args": ["mcp"]
     }
   }
 }
@@ -279,6 +279,38 @@ RELAY_PORT=19333 browserforce serve
 | `GET /json/list` | List attached targets |
 | `ws://.../extension` | Chrome extension WebSocket |
 | `ws://.../cdp?token=...` | Agent CDP connection |
+
+## Comparison
+
+### vs Playwright MCP
+
+| | Playwright MCP | BrowserForce |
+|---|---|---|
+| Browser | Spawns new Chrome | **Uses your Chrome** |
+| Login state | Fresh — must log in every time | Already logged in |
+| Extensions | None | Your existing ones |
+| Bot detection | Always detected | Runs in your real profile |
+| Memory | Double (two Chrome instances) | Uses existing Chrome |
+
+### vs Claude Browser Extension
+
+| | Claude Extension | BrowserForce |
+|---|---|---|
+| Agent support | Claude only | **Any MCP client** (OpenClaw, Claude, custom) |
+| Context method | Screenshots (100KB+) | Accessibility snapshots (5-20KB) |
+| Playwright API | No | Full |
+| Network interception | Limited | Full |
+| Raw CDP access | No | Yes |
+
+### vs Antigravity (Jetski)
+
+| | Jetski | BrowserForce |
+|---|---|---|
+| Tools | 17+ tools | 1 `execute` tool |
+| Approach | Spawns subagent for browser tasks | Direct execution |
+| Latency | High (agent overhead) | Low |
+| LLM knowledge | Must learn custom tools | Already knows Playwright |
+| Context usage | High (many tool schemas) | Low |
 
 ## Troubleshooting
 

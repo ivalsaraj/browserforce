@@ -33,9 +33,8 @@ BrowserForce gives AI agents — like [OpenClaw](https://github.com/openclaw/ope
 
 | Capability | What it means |
 |------------|---------------|
+| **Accessibility snapshots** | Read structured page content as text (fast, cheap — preferred over screenshots) |
 | **Screenshots** | Take a screenshot of any tab (viewport or full page) |
-| **Read text** | Extract all text content from a page or element |
-| **Read HTML** | Get raw HTML for structured data extraction |
 | **Run JavaScript** | Execute any JS in the page context and get the result |
 | **Wait for elements** | Wait until a specific element appears, URL changes, or page loads |
 
@@ -65,25 +64,25 @@ Three pieces work together:
 | **2FA/captchas** | Blocked — can't pass them | Already passed (you did it) |
 | **Browser profile** | Empty/sandboxed | Your real profile |
 | **Extensions** | None | Your installed extensions |
-| **Bookmarks, history** | Empty | Yours |
+| **Bot detection** | Easily flagged | Runs in your real profile |
 
 ## Quick Start
 
 ### 1. Install
 
 ```bash
-# Clone the repo
-git clone <repo-url>
-cd browserforce
-
-# Install relay dependencies
-cd relay && pnpm install && cd ..
-
-# Install MCP dependencies (if using with Claude)
-cd mcp && pnpm install && cd ..
+npm install -g browserforce
 ```
 
-### 2. Load the extension
+Or from source:
+
+```bash
+git clone https://github.com/ivalsaraj/browserforce.git
+cd browserforce
+pnpm install
+```
+
+### 2. Load the Chrome extension
 
 1. Open Chrome and go to `chrome://extensions/`
 2. Turn on **Developer mode** (toggle in top-right corner)
@@ -94,7 +93,7 @@ cd mcp && pnpm install && cd ..
 ### 3. Start the relay
 
 ```bash
-pnpm relay
+browserforce serve
 ```
 
 You'll see:
@@ -111,7 +110,43 @@ The extension icon turns green — you're connected.
 
 ### 4. Connect an AI agent
 
-**Option A: Claude Desktop / Claude Code (via MCP)**
+**Option A: OpenClaw**
+
+Add BrowserForce as an MCP server in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "mcp-adapter": {
+        "enabled": true,
+        "config": {
+          "servers": [
+            {
+              "name": "browserforce",
+              "transport": "stdio",
+              "command": "browserforce",
+              "args": ["mcp"]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+Then add `"mcp-adapter"` to your agent's allowed tools. Your agent can now browse the web as you.
+
+Or install the OpenClaw skill directly:
+
+```bash
+npx -y skills add ivalsaraj/browserforce
+```
+
+The skill teaches the agent to use BrowserForce CLI commands via Bash — no MCP config needed.
+
+**Option B: Claude Desktop / Claude Code (via MCP)**
 
 Add to your Claude config:
 
@@ -119,8 +154,8 @@ Add to your Claude config:
 {
   "mcpServers": {
     "browserforce": {
-      "command": "node",
-      "args": ["/full/path/to/browserforce/mcp/src/index.js"]
+      "command": "browserforce",
+      "args": ["mcp"]
     }
   }
 }
@@ -128,7 +163,7 @@ Add to your Claude config:
 
 Then just talk to Claude: *"Open twitter.com and take a screenshot"*
 
-**Option B: Custom Playwright script**
+**Option C: Custom Playwright script**
 
 ```javascript
 const { chromium } = require('playwright');
@@ -144,27 +179,42 @@ for (const page of pages) {
 }
 ```
 
+## CLI
+
+Once installed globally (`npm install -g browserforce`), the CLI is available:
+
+```bash
+browserforce serve              # Start the relay server
+browserforce status             # Check relay and extension status
+browserforce tabs               # List open browser tabs
+browserforce snapshot [n]       # Accessibility tree of tab n (default: 0)
+browserforce screenshot [n]     # Screenshot tab n (default: 0, PNG to stdout)
+browserforce navigate <url>     # Open URL in a new tab
+browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
+```
+
+Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
+
+**Examples:**
+
+```bash
+browserforce tabs
+browserforce -e "return await snapshot()"
+browserforce -e "await page.goto('https://github.com'); return await snapshot()"
+browserforce screenshot 0 > page.png
+browserforce navigate https://gmail.com
+```
+
 ## MCP Tools Reference
 
-When connected via MCP (Claude Desktop, Claude Code, etc.), the AI has these tools:
+When connected via MCP (OpenClaw, Claude Desktop, Claude Code), the AI has two tools:
 
-| Tool | What it does | Example use |
-|------|-------------|-------------|
-| `bf_list_tabs` | Lists all your open tabs | "What tabs do I have open?" |
-| `bf_navigate` | Goes to a URL | "Go to github.com" |
-| `bf_new_tab` | Opens a new tab | "Open a new tab to twitter.com" |
-| `bf_close_tab` | Closes a tab | "Close the second tab" |
-| `bf_screenshot` | Takes a screenshot | "Show me what's on the page" |
-| `bf_click` | Clicks something | "Click the Login button" |
-| `bf_type` | Types text | "Type 'hello world' in the search box" |
-| `bf_fill` | Fills a form field | "Fill the email field with test@example.com" |
-| `bf_press_key` | Presses a key | "Press Enter" |
-| `bf_scroll` | Scrolls the page | "Scroll down" |
-| `bf_select` | Picks a dropdown option | "Select 'English' from the language dropdown" |
-| `bf_hover` | Hovers over an element | "Hover over the user menu" |
-| `bf_get_content` | Reads page text/HTML | "What does this page say?" |
-| `bf_evaluate` | Runs JavaScript | "Run document.title in the page" |
-| `bf_wait_for` | Waits for something | "Wait until the page finishes loading" |
+| Tool | What it does |
+|------|-------------|
+| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, and Node.js globals. |
+| `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
+
+The `execute` tool gives the agent full Playwright access — it can navigate, click, type, screenshot, read accessibility trees, and run JavaScript in the page context. All within your real browser session.
 
 ## Security
 
@@ -182,13 +232,13 @@ A: The AI can see whatever is visible on the page, just like a screenshot. It ca
 A: No. The relay only accepts connections from `127.0.0.1` (your own machine) with a secret token.
 
 **Q: Does it work with any AI?**
-A: Any AI that supports MCP (Claude Desktop, Claude Code) or any tool that speaks CDP (Playwright, Puppeteer scripts).
+A: Any AI that supports MCP (OpenClaw, Claude Desktop, Claude Code) or any tool that speaks CDP (Playwright, Puppeteer scripts).
 
 **Q: What happens if Chrome kills the extension?**
 A: Chrome aggressively kills MV3 extensions after 30 seconds of inactivity. The relay sends keepalive pings every 5 seconds to prevent this. If the extension does restart, it auto-reconnects.
 
 **Q: Can I control which tabs the AI accesses?**
-A: Currently, the AI can see all regular tabs (not `chrome://` system pages). Tab-level permissions are on the roadmap.
+A: Yes. Click the extension icon to switch between Auto mode (agent sees all tabs) and Manual mode (you select which tabs). You can also lock URLs, block new tabs, or enable read-only mode.
 
 **Q: Does it work with multiple windows?**
 A: Yes. All tabs across all Chrome windows are visible.
@@ -197,7 +247,7 @@ A: Yes. All tabs across all Chrome windows are visible.
 
 | Problem | Fix |
 |---------|-----|
-| Extension icon stays gray | Is the relay running? Run `pnpm relay` |
+| Extension icon stays gray | Is the relay running? Run `browserforce serve` |
 | "Another debugger is attached" | Close DevTools for that tab |
 | AI sees 0 pages | Open at least one regular webpage (not `chrome://`) |
 | Extension keeps disconnecting | Normal MV3 behavior — it auto-reconnects |
