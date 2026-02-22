@@ -1,5 +1,5 @@
 // BrowserForce — MCP Server
-// 2-tool architecture: execute (run Playwright code) + reset (reconnect)
+// 3-tool architecture: execute (run Playwright code) + reset (reconnect) + screenshot_with_labels (visual a11y labels)
 // Connects to the relay via Playwright's CDP client.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
