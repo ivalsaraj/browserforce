@@ -1,4 +1,4 @@
-# BrowserForce
+# BrowserForce // 
 
 > "a lion doesn't concern itself with token counting" — [@steipete](https://x.com/steipete), creator of [OpenClaw](https://github.com/openclaw/openclaw)
 
@@ -10,15 +10,16 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 
 ## Comparison
 
-| | Playwright MCP | Playwriter | Claude Extension | Antigravity | BrowserForce |
+| | Playwright MCP | OpenClaw Browser | Playwriter | Claude Extension | BrowserForce |
 |---|---|---|---|---|---|
-| Tab access | N/A (new browser) | Click each tab | Click each tab | Click each tab | **All tabs, automatic** |
-| Browser | Spawns new Chrome | Your Chrome | Your Chrome | Your Chrome | **Your Chrome** |
-| Autonomous | Yes | No (manual click) | No (manual click) | No (manual click) | **Yes (fully autonomous)** |
-| Tools | Many dedicated tools | 1 `execute` tool | Built-in | Many dedicated tools | **1 `execute` tool** |
-| Agent support | Any MCP client | Any MCP client | Claude only | Custom | **Any MCP client** |
-| Context method | Screenshots | A11y snapshots | Screenshots | Screenshots | **A11y snapshots** |
-| Playwright API | Partial | Full | No | No | **Full** |
+| Browser | Spawns new Chrome | Separate profile | Your Chrome | Your Chrome | **Your Chrome** |
+| Login state | Fresh | Fresh (isolated) | Yours | Yours | **Yours** |
+| Tab access | N/A (new browser) | Managed by agent | Click each tab | Click each tab | **All tabs, automatic** |
+| Autonomous | Yes | Yes | No (manual click) | No (manual click) | **Yes (fully autonomous)** |
+| Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)** |
+| Tools | Many dedicated | 1 `browser` tool | 1 `execute` tool | Built-in | **1 `execute` tool** |
+| Agent support | Any MCP client | OpenClaw only | Any MCP client | Claude only | **Any MCP client** |
+| Playwright API | Partial | No | Full | No | **Full** |
 
 ## Setup
 
