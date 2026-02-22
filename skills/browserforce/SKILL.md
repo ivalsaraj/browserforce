@@ -19,8 +19,8 @@ cookies, and extensions already active. No headless browser, no fresh profiles.
 ## Prerequisites
 
 The user must have:
-1. BrowserForce relay running: `browserforce serve`
-2. BrowserForce Chrome extension installed and connected (green icon)
+1. BrowserForce Chrome extension installed and connected (green icon)
+2. The relay auto-starts on first command — no manual step needed
 
 Check with: `browserforce status`
 

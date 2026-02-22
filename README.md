@@ -44,27 +44,15 @@ pnpm install
 3. Click **Load unpacked** → select the `extension/` folder
 4. Extension icon appears in your toolbar (gray = disconnected)
 
-### 3. Start the relay
+### 3. Done
+
+The relay auto-starts when you run any command or connect via MCP — no manual step needed. Extension icon turns green once connected.
+
+To run the relay manually (optional):
 
 ```bash
 browserforce serve
 ```
-
-Or with pnpm (development):
-
-```bash
-pnpm relay
-```
-
-```
-  BrowserForce
-  ────────────────────────────────────────
-  Status:   http://127.0.0.1:19222/
-  CDP:      ws://127.0.0.1:19222/cdp?token=<TOKEN>
-  ────────────────────────────────────────
-```
-
-Extension icon turns green — you're connected.
 
 ## Connect Your Agent
 
@@ -220,6 +208,7 @@ state.results = await page.evaluate(() => document.title);
 | Tool | Description |
 |------|-------------|
 | `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, and Node.js globals. |
+| `screenshot_with_labels` | Take a screenshot with Vimium-style accessibility labels overlaid on interactive elements. |
 | `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
 ## How It Works
