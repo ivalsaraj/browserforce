@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { Semaphore, buildBoxFromQuad } from '../src/a11y-labels.js';
+import { Semaphore, buildBoxFromQuad, buildSnapshotFromCdpNodes } from '../src/a11y-labels.js';
 
 describe('Semaphore', () => {
   it('allows up to max concurrent acquisitions', async () => {
@@ -52,5 +52,92 @@ describe('buildBoxFromQuad', () => {
     const box = buildBoxFromQuad(quad);
     assert.equal(box.width, 0);
     assert.equal(box.height, 0);
+  });
+});
+
+describe('buildSnapshotFromCdpNodes', () => {
+  it('builds snapshot text with refs from CDP AX nodes', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Test' }, childIds: ['2', '3'], ignored: false },
+      { nodeId: '2', role: { value: 'navigation' }, name: { value: 'Main' }, parentId: '1', childIds: ['4'], ignored: false, backendDOMNodeId: 10 },
+      { nodeId: '3', role: { value: 'main' }, name: { value: '' }, parentId: '1', childIds: ['5', '6'], ignored: false, backendDOMNodeId: 11 },
+      { nodeId: '4', role: { value: 'link' }, name: { value: 'Home' }, parentId: '2', childIds: [], ignored: false, backendDOMNodeId: 12 },
+      { nodeId: '5', role: { value: 'heading' }, name: { value: 'Welcome' }, parentId: '3', childIds: [], ignored: false, backendDOMNodeId: 13 },
+      { nodeId: '6', role: { value: 'button' }, name: { value: 'Submit' }, parentId: '3', childIds: [], ignored: false, backendDOMNodeId: 14 },
+    ];
+
+    const { text, refs } = buildSnapshotFromCdpNodes(nodes);
+    assert.ok(text.includes('- navigation "Main"'));
+    assert.ok(text.includes('- link "Home" [ref=e1]'));
+    assert.ok(text.includes('- heading "Welcome"'));
+    assert.ok(text.includes('- button "Submit" [ref=e2]'));
+    assert.equal(refs.length, 2);
+    assert.equal(refs[0].ref, 'e1');
+    assert.equal(refs[0].role, 'link');
+    assert.equal(refs[0].backendNodeId, 12);
+    assert.equal(refs[1].ref, 'e2');
+    assert.equal(refs[1].backendNodeId, 14);
+  });
+
+  it('skips ignored nodes', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, childIds: ['2', '3'], ignored: false },
+      { nodeId: '2', role: { value: 'main' }, name: { value: '' }, parentId: '1', childIds: ['3'], ignored: false, backendDOMNodeId: 10 },
+      { nodeId: '3', role: { value: 'button' }, name: { value: 'OK' }, parentId: '2', childIds: [], ignored: true, backendDOMNodeId: 11 },
+    ];
+
+    const { refs } = buildSnapshotFromCdpNodes(nodes);
+    assert.equal(refs.length, 0);
+  });
+
+  it('skips generic/none/presentation roles', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, childIds: ['2'], ignored: false },
+      { nodeId: '2', role: { value: 'generic' }, name: { value: '' }, parentId: '1', childIds: ['3'], ignored: false, backendDOMNodeId: 10 },
+      { nodeId: '3', role: { value: 'button' }, name: { value: 'Go' }, parentId: '2', childIds: [], ignored: false, backendDOMNodeId: 11 },
+    ];
+
+    const { text, refs } = buildSnapshotFromCdpNodes(nodes);
+    assert.ok(!text.includes('generic'));
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].ref, 'e1');
+  });
+
+  it('filters to subtree when scopeBackendNodeId provided', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, childIds: ['2', '3'], ignored: false },
+      { nodeId: '2', role: { value: 'navigation' }, name: { value: '' }, parentId: '1', childIds: ['4'], ignored: false, backendDOMNodeId: 20 },
+      { nodeId: '3', role: { value: 'main' }, name: { value: '' }, parentId: '1', childIds: ['5'], ignored: false, backendDOMNodeId: 30 },
+      { nodeId: '4', role: { value: 'link' }, name: { value: 'Nav Link' }, parentId: '2', childIds: [], ignored: false, backendDOMNodeId: 21 },
+      { nodeId: '5', role: { value: 'button' }, name: { value: 'Main Btn' }, parentId: '3', childIds: [], ignored: false, backendDOMNodeId: 31 },
+    ];
+
+    const { text, refs } = buildSnapshotFromCdpNodes(nodes, 30);
+    assert.ok(!text.includes('Nav Link'));
+    assert.ok(text.includes('Main Btn'));
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].name, 'Main Btn');
+  });
+
+  it('throws when scopeBackendNodeId has no AX match', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, childIds: [], ignored: false },
+    ];
+
+    assert.throws(
+      () => buildSnapshotFromCdpNodes(nodes, 999),
+      /no matching accessibility node/
+    );
+  });
+
+  it('builds locators using role and name', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, childIds: ['2'], ignored: false },
+      { nodeId: '2', role: { value: 'main' }, name: { value: '' }, parentId: '1', childIds: ['3'], ignored: false, backendDOMNodeId: 10 },
+      { nodeId: '3', role: { value: 'textbox' }, name: { value: 'Email' }, parentId: '2', childIds: [], ignored: false, backendDOMNodeId: 11 },
+    ];
+
+    const { refs } = buildSnapshotFromCdpNodes(nodes);
+    assert.equal(refs[0].locator, 'role=textbox[name="Email"]');
   });
 });
