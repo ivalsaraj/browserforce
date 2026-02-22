@@ -20,6 +20,12 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 ### 1. Install
 
 ```bash
+npm install -g browserforce
+```
+
+Or from source:
+
+```bash
 git clone https://github.com/anthropics/browserforce.git
 cd browserforce
 pnpm install
@@ -202,6 +208,9 @@ state.results = await page.evaluate(() => document.title);
 ```
   Agent (OpenClaw, Claude, etc.)
          │
+         ├─ MCP server (stdio)
+         ├─ CLI (browserforce -e)
+         │
          │ CDP over WebSocket
          ▼
   Relay Server (localhost:19222)
@@ -247,7 +256,7 @@ Everything runs on your machine. The auth token is stored at `~/.browserforce/au
 
 **Custom relay port:**
 ```bash
-RELAY_PORT=19333 pnpm relay
+RELAY_PORT=19333 browserforce serve
 ```
 
 **Extension relay URL:** Click the extension icon → change the URL → Save. Default: `ws://127.0.0.1:19222/extension`

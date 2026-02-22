@@ -3,15 +3,44 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Give AI agents your real Chrome browser — your logins, cookies, and tabs. Works with OpenClaw, Claude, and any MCP agent.",
+  "homepage": "https://github.com/anthropics/browserforce",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthropics/browserforce.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "browser",
+    "chrome",
+    "playwright",
+    "mcp",
+    "openclaw",
+    "ai-agent",
+    "cdp",
+    "automation",
+    "browserforce"
+  ],
+  "engines": {
+    "node": ">=18.3.0"
+  },
   "bin": {
     "browserforce": "./bin.js"
   },
   "files": [
     "bin.js",
-    "relay/",
-    "mcp/",
+    "relay/src/",
+    "relay/package.json",
+    "mcp/src/",
+    "mcp/package.json",
     "skills/"
   ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "diff": "^8.0.3",
+    "playwright-core": "^1.52.0",
+    "ws": "^8.19.0",
+    "zod": "^3.24.0"
+  },
   "scripts": {
     "relay": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node relay/src/index.js",
     "relay:dev": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node --watch relay/src/index.js",
