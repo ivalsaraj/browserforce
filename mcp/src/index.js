@@ -394,8 +394,9 @@ server.tool(
   async ({ selector, interactiveOnly = true }) => {
     await ensureBrowser();
     const ctx = getContext();
-    const pages = ctx.pages();
-    const page = pages[0] || null;
+    const page = (userState.page && !userState.page.isClosed())
+      ? userState.page
+      : ctx.pages()[0] || null;
     if (!page) {
       return {
         content: [{ type: 'text', text: 'Error: No pages available. Open a tab first.' }],

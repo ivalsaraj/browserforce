@@ -140,4 +140,40 @@ describe('buildSnapshotFromCdpNodes', () => {
     const { refs } = buildSnapshotFromCdpNodes(nodes);
     assert.equal(refs[0].locator, 'role=textbox[name="Email"]');
   });
+
+  it('assigns refs to context roles when refAll is true', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Test' }, childIds: ['2', '3'], ignored: false },
+      { nodeId: '2', role: { value: 'navigation' }, name: { value: 'Main' }, parentId: '1', childIds: ['4'], ignored: false, backendDOMNodeId: 10 },
+      { nodeId: '3', role: { value: 'main' }, name: { value: '' }, parentId: '1', childIds: ['5', '6'], ignored: false, backendDOMNodeId: 11 },
+      { nodeId: '4', role: { value: 'link' }, name: { value: 'Home' }, parentId: '2', childIds: [], ignored: false, backendDOMNodeId: 12 },
+      { nodeId: '5', role: { value: 'heading' }, name: { value: 'Welcome' }, parentId: '3', childIds: [], ignored: false, backendDOMNodeId: 13 },
+      { nodeId: '6', role: { value: 'button' }, name: { value: 'Submit' }, parentId: '3', childIds: [], ignored: false, backendDOMNodeId: 14 },
+    ];
+
+    const { text, refs } = buildSnapshotFromCdpNodes(nodes, undefined, { refAll: true });
+    // Interactive + context roles should all get refs
+    const roles = refs.map(r => r.role);
+    assert.ok(roles.includes('link'), 'link should have ref');
+    assert.ok(roles.includes('button'), 'button should have ref');
+    assert.ok(roles.includes('heading'), 'heading should have ref (context role)');
+    assert.ok(roles.includes('navigation'), 'navigation should have ref (context role)');
+    assert.ok(roles.includes('main'), 'main should have ref (context role)');
+    assert.equal(refs.length, 5);
+    // All refs should appear in snapshot text
+    assert.ok(text.includes('[ref=e1]'));
+    assert.ok(text.includes('[ref=e5]'));
+  });
+
+  it('does not assign refs to context roles by default (refAll=false)', () => {
+    const nodes = [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, childIds: ['2'], ignored: false },
+      { nodeId: '2', role: { value: 'heading' }, name: { value: 'Title' }, parentId: '1', childIds: ['3'], ignored: false, backendDOMNodeId: 10 },
+      { nodeId: '3', role: { value: 'button' }, name: { value: 'Go' }, parentId: '2', childIds: [], ignored: false, backendDOMNodeId: 11 },
+    ];
+
+    const { refs } = buildSnapshotFromCdpNodes(nodes);
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].role, 'button');
+  });
 });

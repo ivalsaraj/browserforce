@@ -48,7 +48,7 @@ export function buildBoxFromQuad(quad) {
 
 // ─── CDP AX Tree → Snapshot Text ──────────────────────────────────────────────
 
-export function buildSnapshotFromCdpNodes(nodes, scopeBackendNodeId) {
+export function buildSnapshotFromCdpNodes(nodes, scopeBackendNodeId, { refAll = false } = {}) {
   // Build lookup maps
   const byId = new Map();
   for (const node of nodes) {
@@ -144,7 +144,7 @@ export function buildSnapshotFromCdpNodes(nodes, scopeBackendNodeId) {
       lineText += ` "${escapeLocatorName(name)}"`;
     }
 
-    if (isInteractive) {
+    if (isInteractive || (refAll && isContext && node.backendDOMNodeId)) {
       refCounter++;
       const ref = `e${refCounter}`;
       const locator = buildLocator(role, name, null);
@@ -431,13 +431,11 @@ export async function screenshotWithLabels(page, { selector, interactiveOnly = t
       : null;
 
     const { nodes } = await cdp.send('Accessibility.getFullAXTree');
-    const { text, refs } = buildSnapshotFromCdpNodes(nodes, scopeId);
+    const { text, refs } = buildSnapshotFromCdpNodes(nodes, scopeId, {
+      refAll: !interactiveOnly,
+    });
 
-    const interactiveRefs = interactiveOnly
-      ? refs.filter(r => INTERACTIVE_ROLES.has(r.role))
-      : refs;
-
-    const labels = await getLabelBoxes(cdp, interactiveRefs);
+    const labels = await getLabelBoxes(cdp, refs);
 
     await injectA11yClient(page);
     labelsInjected = true;
