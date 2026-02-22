@@ -9,10 +9,14 @@ const saveUrlBtn = document.getElementById('bf-save-url');
 const tabCountEl = document.getElementById('bf-tab-count');
 const tabsListEl = document.getElementById('bf-tabs-list');
 const memoryEl = document.getElementById('bf-memory');
+const autoDetachSelect = document.getElementById('bf-auto-detach');
+const autoCloseSelect = document.getElementById('bf-auto-close');
 
 // Load saved relay URL
-chrome.storage.local.get(['relayUrl'], (result) => {
+chrome.storage.local.get(['relayUrl', 'autoDetachMinutes', 'autoCloseMinutes'], (result) => {
   relayUrlInput.value = result.relayUrl || RELAY_URL_DEFAULT;
+  autoDetachSelect.value = String(result.autoDetachMinutes || 0);
+  autoCloseSelect.value = String(result.autoCloseMinutes || 0);
 });
 
 // Save relay URL
@@ -23,6 +27,14 @@ saveUrlBtn.addEventListener('click', () => {
     saveUrlBtn.textContent = 'Saved';
     setTimeout(() => { saveUrlBtn.textContent = 'Save'; }, 1200);
   });
+});
+
+autoDetachSelect.addEventListener('change', () => {
+  chrome.storage.local.set({ autoDetachMinutes: Number(autoDetachSelect.value) });
+});
+
+autoCloseSelect.addEventListener('change', () => {
+  chrome.storage.local.set({ autoCloseMinutes: Number(autoCloseSelect.value) });
 });
 
 // Poll status from background

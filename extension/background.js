@@ -20,6 +20,13 @@ const childSessions = new Map();
 /** Serializes tab group operations to avoid races (same pattern as playwriter) */
 let tabGroupQueue = Promise.resolve();
 
+/** Tracks last CDP activity per attached tab (tabId → timestamp ms) */
+const tabLastActivity = new Map();
+/** Tracks tabs created by the agent via createTab() */
+const agentCreatedTabs = new Set();
+/** Auto-detach check interval handle */
+let autoManageInterval = null;
+
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 (async function init() {
@@ -156,6 +163,7 @@ async function executeCommand(msg) {
     case 'closeTab':
       return closeTab(msg.params);
     case 'cdpCommand':
+      tabLastActivity.set(msg.params.tabId, Date.now());
       return cdpCommand(msg.params);
     default:
       throw new Error(`Unknown command: ${msg.method}`);
@@ -223,6 +231,7 @@ async function attachTab(tabId, sessionId) {
   const entry = { sessionId, targetId, targetInfo, tabId };
   attachedTabs.set(tabId, entry);
   updateBadge();
+  tabLastActivity.set(tabId, Date.now());
   queueSyncTabGroup();
 
   return entry;
@@ -251,7 +260,9 @@ async function createTab(params) {
   // Brief delay for Chrome to finalize tab creation
   await sleep(200);
 
-  return attachTab(tab.id, params.sessionId);
+  const result = await attachTab(tab.id, params.sessionId);
+  agentCreatedTabs.add(tab.id);
+  return result;
 }
 
 async function closeTab(params) {
@@ -387,7 +398,58 @@ function cleanupTab(tabId) {
   for (const [childId, parentTabId] of childSessions) {
     if (parentTabId === tabId) childSessions.delete(childId);
   }
+  tabLastActivity.delete(tabId);
+  agentCreatedTabs.delete(tabId);
 }
+
+// ─── Auto-Detach / Auto-Close ─────────────────────────────────────────────
+
+function startAutoManageTimer() {
+  if (autoManageInterval) return;
+  autoManageInterval = setInterval(checkInactiveTabs, 60_000);
+}
+
+async function checkInactiveTabs() {
+  const settings = await chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes']);
+  const detachMs = (settings.autoDetachMinutes || 0) * 60_000;
+  const closeMs = (settings.autoCloseMinutes || 0) * 60_000;
+
+  if (!detachMs && !closeMs) return;
+
+  const now = Date.now();
+  // Snapshot keys — iteration-safe since we mutate inside the loop
+  const entries = [...tabLastActivity.entries()];
+
+  for (const [tabId, lastActivity] of entries) {
+    const idle = now - lastActivity;
+
+    // Auto-close takes precedence for agent-created tabs
+    if (closeMs && agentCreatedTabs.has(tabId) && idle >= closeMs) {
+      console.log(`[bf] Auto-closing agent tab ${tabId} (idle ${Math.round(idle / 60_000)}m)`);
+      await closeTab({ tabId });
+      continue;
+    }
+
+    // Auto-detach: full cleanup (debugger + ungroup)
+    if (detachMs && idle >= detachMs) {
+      console.log(`[bf] Auto-detaching tab ${tabId} (idle ${Math.round(idle / 60_000)}m)`);
+      await detachTab(tabId);
+    }
+  }
+}
+
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.autoDetachMinutes || changes.autoCloseMinutes) {
+    startAutoManageTimer();
+  }
+});
+
+// Start timer on load if settings are configured
+chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) => {
+  if ((settings.autoDetachMinutes || 0) > 0 || (settings.autoCloseMinutes || 0) > 0) {
+    startAutoManageTimer();
+  }
+});
 
 /**
  * Syncs the 'browserforce' Chrome tab group to reflect currently attached tabs.
@@ -447,13 +509,13 @@ async function syncTabGroup() {
       }
     }
   } catch (e) {
-    console.debug('[bf] syncTabGroup error:', e.message);
+    console.warn('[bf] syncTabGroup error:', e.message);
   }
 }
 
 function queueSyncTabGroup() {
   tabGroupQueue = tabGroupQueue.then(syncTabGroup).catch((e) => {
-    console.debug('[bf] syncTabGroup error:', e.message);
+    console.warn('[bf] syncTabGroup error:', e.message);
   });
 }
 

@@ -24,6 +24,34 @@
     </section>
 
     <section class="field">
+      <label>Settings</label>
+      <div class="settings-group">
+        <div class="setting-row">
+          <span class="setting-label">Auto-detach inactive tabs</span>
+          <select id="bf-auto-detach">
+            <option value="0">Off</option>
+            <option value="5">5 min</option>
+            <option value="10">10 min</option>
+            <option value="15">15 min</option>
+            <option value="30">30 min</option>
+            <option value="60">60 min</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <span class="setting-label">Auto-close agent tabs</span>
+          <select id="bf-auto-close">
+            <option value="0">Off</option>
+            <option value="5">5 min</option>
+            <option value="10">10 min</option>
+            <option value="15">15 min</option>
+            <option value="30">30 min</option>
+            <option value="60">60 min</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section class="field">
       <label>Controlled Tabs <span id="bf-tab-count" class="badge">0</span></label>
       <div id="bf-tabs-list" class="tabs-list">
         <div class="empty">No tabs attached</div>
