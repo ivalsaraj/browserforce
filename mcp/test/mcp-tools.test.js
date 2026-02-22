@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { createPatch } from 'diff';
 
 // ─── CDP URL Discovery ──────────────────────────────────────────────────────
 
@@ -103,6 +104,7 @@ describe('Tool Definitions', () => {
       'bf_get_content',
       'bf_evaluate',
       'bf_wait_for',
+      'bf_snapshot',
     ];
 
     for (const tool of expectedTools) {
@@ -220,5 +222,317 @@ describe('MCP Response Format', () => {
     assert.equal(parsed.length, 2);
     assert.equal(parsed[0].index, 0);
     assert.equal(parsed[1].url, 'https://github.com');
+  });
+});
+
+// ─── Snapshot Logic ──────────────────────────────────────────────────────────
+
+describe('Snapshot Tree Building', () => {
+  const INTERACTIVE_ROLES = new Set([
+    'button', 'link', 'textbox', 'combobox', 'searchbox',
+    'checkbox', 'radio', 'slider', 'spinbutton', 'switch',
+    'menuitem', 'menuitemcheckbox', 'menuitemradio',
+    'option', 'tab', 'treeitem',
+  ]);
+
+  const CONTEXT_ROLES = new Set([
+    'navigation', 'main', 'contentinfo', 'banner', 'form',
+    'section', 'region', 'complementary', 'search',
+    'list', 'listitem', 'table', 'rowgroup', 'row', 'cell',
+    'heading', 'img',
+  ]);
+
+  const SKIP_ROLES = new Set(['generic', 'none', 'presentation']);
+
+  function escapeLocatorName(name) {
+    return name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  function buildLocator(role, name, stableAttr) {
+    if (stableAttr) {
+      return `[${stableAttr.attr}="${escapeLocatorName(stableAttr.value)}"]`;
+    }
+    const trimmed = name?.trim();
+    if (trimmed) {
+      return `role=${role}[name="${escapeLocatorName(trimmed)}"]`;
+    }
+    return `role=${role}`;
+  }
+
+  function hasInteractiveDescendant(node) {
+    if (!node.children) return false;
+    for (const child of node.children) {
+      if (INTERACTIVE_ROLES.has(child.role)) return true;
+      if (hasInteractiveDescendant(child)) return true;
+    }
+    return false;
+  }
+
+  function hasMatchingDescendant(node, pattern) {
+    if (!node.children) return false;
+    for (const child of node.children) {
+      const text = `${child.role} ${child.name || ''}`;
+      if (pattern.test(text)) return true;
+      if (hasMatchingDescendant(child, pattern)) return true;
+    }
+    return false;
+  }
+
+  function walkAxTree(node, visitor, depth = 0, parentNames = []) {
+    if (!node) return;
+    visitor(node, depth, parentNames);
+    const nextNames = node.name ? [...parentNames, node.name] : parentNames;
+    if (node.children) {
+      for (const child of node.children) {
+        walkAxTree(child, visitor, depth + 1, nextNames);
+      }
+    }
+  }
+
+  function buildSnapshotText(axTree, stableIdMap, searchPattern) {
+    const lines = [];
+    const refs = [];
+    let refCounter = 0;
+
+    walkAxTree(axTree, (node, depth) => {
+      const role = node.role;
+      if (SKIP_ROLES.has(role) || role === 'RootWebArea' || role === 'WebArea') return;
+
+      const isInteractive = INTERACTIVE_ROLES.has(role);
+      const isContext = CONTEXT_ROLES.has(role);
+      const name = node.name || '';
+
+      if (!isInteractive && !isContext) {
+        if (!hasInteractiveDescendant(node)) return;
+      }
+
+      if (searchPattern) {
+        const text = `${role} ${name}`;
+        if (!searchPattern.test(text) && !hasMatchingDescendant(node, searchPattern)) return;
+      }
+
+      const indent = '  '.repeat(depth);
+      let lineText = `${indent}- ${role}`;
+      if (name) lineText += ` "${escapeLocatorName(name)}"`;
+
+      if (isInteractive) {
+        refCounter++;
+        const stableId = stableIdMap?.get(name);
+        const ref = stableId ? stableId.value : `e${refCounter}`;
+        const locator = buildLocator(role, name, stableId);
+        lineText += ` [ref=${ref}]`;
+        refs.push({ ref, role, name, locator });
+      }
+
+      if (node.children?.length > 0) {
+        const hasRelevantChildren = node.children.some(c =>
+          INTERACTIVE_ROLES.has(c.role) || CONTEXT_ROLES.has(c.role) || hasInteractiveDescendant(c)
+        );
+        if (hasRelevantChildren) lineText += ':';
+      }
+
+      lines.push(lineText);
+    });
+
+    return { text: lines.join('\n'), refs };
+  }
+
+  it('builds snapshot from a simple AX tree', () => {
+    const axTree = {
+      role: 'WebArea', name: 'Example',
+      children: [
+        { role: 'banner', name: '', children: [
+          { role: 'link', name: 'Home', children: [] },
+          { role: 'link', name: 'About', children: [] },
+        ]},
+        { role: 'main', name: '', children: [
+          { role: 'heading', name: 'Welcome', children: [] },
+          { role: 'button', name: 'Submit', children: [] },
+          { role: 'textbox', name: 'Email', children: [] },
+        ]},
+      ],
+    };
+
+    const { text, refs } = buildSnapshotText(axTree, new Map(), null);
+
+    assert.ok(text.includes('- banner:'));
+    assert.ok(text.includes('- link "Home" [ref=e1]'));
+    assert.ok(text.includes('- link "About" [ref=e2]'));
+    assert.ok(text.includes('- main:'));
+    assert.ok(text.includes('- heading "Welcome"'));
+    assert.ok(text.includes('- button "Submit" [ref=e3]'));
+    assert.ok(text.includes('- textbox "Email" [ref=e4]'));
+    assert.equal(refs.length, 4);
+    assert.equal(refs[0].ref, 'e1');
+    assert.equal(refs[0].locator, 'role=link[name="Home"]');
+    assert.equal(refs[2].locator, 'role=button[name="Submit"]');
+  });
+
+  it('uses stable IDs when available', () => {
+    const axTree = {
+      role: 'WebArea', name: '',
+      children: [
+        { role: 'main', name: '', children: [
+          { role: 'button', name: 'Submit Form', children: [] },
+        ]},
+      ],
+    };
+
+    const stableIdMap = new Map();
+    stableIdMap.set('Submit Form', { attr: 'data-testid', value: 'submit-btn' });
+
+    const { refs } = buildSnapshotText(axTree, stableIdMap, null);
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].ref, 'submit-btn');
+    assert.equal(refs[0].locator, '[data-testid="submit-btn"]');
+  });
+
+  it('filters by search pattern', () => {
+    const axTree = {
+      role: 'WebArea', name: '',
+      children: [
+        { role: 'navigation', name: '', children: [
+          { role: 'link', name: 'Home', children: [] },
+        ]},
+        { role: 'main', name: '', children: [
+          { role: 'button', name: 'Submit', children: [] },
+          { role: 'textbox', name: 'Email', children: [] },
+        ]},
+      ],
+    };
+
+    const { text, refs } = buildSnapshotText(axTree, new Map(), /button/i);
+    assert.ok(text.includes('button'));
+    assert.ok(!text.includes('link'));
+    assert.ok(!text.includes('textbox'));
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].name, 'Submit');
+  });
+
+  it('skips generic/presentation roles', () => {
+    const axTree = {
+      role: 'WebArea', name: '',
+      children: [
+        { role: 'generic', name: '', children: [
+          { role: 'button', name: 'Click Me', children: [] },
+        ]},
+      ],
+    };
+
+    const { text, refs } = buildSnapshotText(axTree, new Map(), null);
+    assert.ok(!text.includes('generic'));
+    assert.ok(text.includes('button "Click Me"'));
+    assert.equal(refs.length, 1);
+  });
+
+  it('handles empty AX tree gracefully', () => {
+    const axTree = { role: 'WebArea', name: '', children: [] };
+    const { text, refs } = buildSnapshotText(axTree, new Map(), null);
+    assert.equal(text, '');
+    assert.equal(refs.length, 0);
+  });
+
+  it('preserves indentation hierarchy', () => {
+    const axTree = {
+      role: 'WebArea', name: '',
+      children: [
+        { role: 'navigation', name: 'Main Nav', children: [
+          { role: 'list', name: '', children: [
+            { role: 'listitem', name: '', children: [
+              { role: 'link', name: 'Home', children: [] },
+            ]},
+          ]},
+        ]},
+      ],
+    };
+
+    const { text } = buildSnapshotText(axTree, new Map(), null);
+    const lines = text.split('\n');
+    assert.ok(lines[0].startsWith('  - navigation'));
+    assert.ok(lines[1].startsWith('    - list'));
+    assert.ok(lines[2].startsWith('      - listitem'));
+    assert.ok(lines[3].startsWith('        - link'));
+  });
+
+  it('locator escapes special characters in names', () => {
+    const axTree = {
+      role: 'WebArea', name: '',
+      children: [
+        { role: 'main', name: '', children: [
+          { role: 'button', name: 'Click "here"', children: [] },
+        ]},
+      ],
+    };
+
+    const { refs } = buildSnapshotText(axTree, new Map(), null);
+    assert.equal(refs[0].locator, 'role=button[name="Click \\"here\\""]');
+  });
+});
+
+describe('Snapshot Diff Mode', () => {
+  function createDiff(oldText, newText) {
+    if (oldText === newText) return { type: 'no-change', content: newText };
+
+    const patch = createPatch('snapshot', oldText, newText, 'previous', 'current', { context: 3 });
+    const patchLines = patch.split('\n');
+    const diffBody = patchLines.slice(4).join('\n');
+
+    const oldLineCount = oldText.split('\n').length;
+    const newLineCount = newText.split('\n').length;
+    const addedLines = (diffBody.match(/^\+[^+]/gm) || []).length;
+    const removedLines = (diffBody.match(/^-[^-]/gm) || []).length;
+    const changeRatio = Math.max(addedLines, removedLines) / Math.max(oldLineCount, newLineCount, 1);
+
+    if (changeRatio >= 0.5 || diffBody.length >= newText.length) {
+      return { type: 'full', content: newText };
+    }
+    return { type: 'diff', content: diffBody };
+  }
+
+  it('returns no-change when snapshots are identical', () => {
+    const text = '- main:\n  - button "Submit" [ref=e1]';
+    const result = createDiff(text, text);
+    assert.equal(result.type, 'no-change');
+  });
+
+  it('returns diff for small changes', () => {
+    const old = [
+      '- banner:',
+      '  - link "Home" [ref=e1]',
+      '  - link "About" [ref=e2]',
+      '- main:',
+      '  - heading "Welcome"',
+      '  - button "Submit" [ref=e3]',
+      '  - textbox "Email" [ref=e4]',
+      '  - textbox "Password" [ref=e5]',
+      '  - checkbox "Remember me" [ref=e6]',
+      '  - link "Forgot password?" [ref=e7]',
+    ].join('\n');
+
+    const now = [
+      '- banner:',
+      '  - link "Home" [ref=e1]',
+      '  - link "About" [ref=e2]',
+      '- main:',
+      '  - heading "Welcome"',
+      '  - button "Submit" [ref=e3]',
+      '  - textbox "Email" [ref=e4]',
+      '  - textbox "Password" [ref=e5]',
+      '  - checkbox "Remember me" [ref=e6]',
+      '  - link "Forgot password?" [ref=e7]',
+      '  - button "Reset" [ref=e8]',
+    ].join('\n');
+
+    const result = createDiff(old, now);
+    assert.equal(result.type, 'diff');
+    assert.ok(result.content.includes('+  - button "Reset"'));
+  });
+
+  it('returns full content when >50% changed', () => {
+    const old = '- button "A" [ref=e1]\n- button "B" [ref=e2]';
+    const now = '- link "X" [ref=e1]\n- link "Y" [ref=e2]\n- link "Z" [ref=e3]';
+    const result = createDiff(old, now);
+    assert.equal(result.type, 'full');
+    assert.equal(result.content, now);
   });
 });

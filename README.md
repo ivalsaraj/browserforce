@@ -207,6 +207,7 @@ Add to `~/.claude/mcp.json` or project `.mcp.json`:
 | `bf_new_tab` | Open a new tab (with your cookies/sessions) |
 | `bf_close_tab` | Close a tab |
 | `bf_screenshot` | Take a screenshot (returns image to agent) |
+| `bf_snapshot` | Get accessibility tree as text with interactive element refs — 10-100x cheaper than screenshots |
 | `bf_click` | Click an element (CSS/text/role selector) |
 | `bf_type` | Type text character-by-character (works on contenteditable) |
 | `bf_fill` | Fill an input field (clear + set value) |
@@ -218,6 +219,41 @@ Add to `~/.claude/mcp.json` or project `.mcp.json`:
 | `bf_evaluate` | Execute JavaScript in page context |
 | `bf_wait_for` | Wait for element, URL, or load state |
 
+### Accessibility Snapshots (bf_snapshot)
+
+Instead of expensive screenshots (100KB+ image tokens), `bf_snapshot` returns the page's accessibility tree as text (~5-20KB). Each interactive element gets a ref that works as a Playwright locator.
+
+```
+Page: GitHub (https://github.com)
+Refs: 12 interactive elements
+
+- banner:
+  - link "Home" [ref=e1]
+  - search:
+    - searchbox "Search or jump to..." [ref=e2]
+  - navigation:
+    - link "Pull requests" [ref=e3]
+    - link "Issues" [ref=e4]
+- main:
+  - heading "Dashboard"
+  - link "your-repo" [ref=repo-link]
+  - button "New repository" [ref=e5]
+
+--- Ref → Locator ---
+e1: role=link[name="Home"]
+e2: role=searchbox[name="Search or jump to..."]
+repo-link: [data-testid="repo-link"]
+e5: role=button[name="New repository"]
+```
+
+Features:
+- **Search filtering**: `bf_snapshot({ search: "button|error" })` — show only matching elements
+- **Diff mode**: `bf_snapshot({ diff: true })` — return only what changed since last call
+- **Stable refs**: Uses `data-testid`/`id` attributes when available instead of e1/e2 counters
+- **Scoped snapshots**: `bf_snapshot({ selector: "#main-content" })` — snapshot a subtree
+
+The agent reads text (cheap, fast) instead of parsing a screenshot (expensive, slow). Refs map directly to Playwright locators for `bf_click`, `bf_fill`, etc.
+
 ### Example Agent Interaction
 
 Once configured, you can tell Claude:
@@ -225,6 +261,8 @@ Once configured, you can tell Claude:
 > "Open twitter.com in my browser and take a screenshot"
 
 The agent will call `bf_new_tab` with `url: "https://twitter.com"`, then `bf_screenshot` — and since it's your real Chrome with your real X session, you'll see your actual feed.
+
+For lower-cost observation, the agent can use `bf_snapshot` instead of `bf_screenshot` to read the page structure as text.
 
 ### Override CDP URL
 

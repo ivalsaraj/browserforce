@@ -29,7 +29,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
               ▼                                │
 ┌──────────────────────────────────┐           │
 │  MCP Server (mcp/src/index.js)   │           │
-│  - 15 browser control tools      │           │
+│  - 16 browser control tools      │           │
 │  - Playwright-core CDP client    ├───────────┘
 │  - Auto-discovers relay token    │
 └──────────────┬───────────────────┘
@@ -203,7 +203,7 @@ When reviewing changes to this project:
 | `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
 | `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
-| `mcp/src/index.js` | ~420 | MCP server — 15 tools via Playwright-core `connectOverCDP` |
+| `mcp/src/index.js` | ~660 | MCP server — 16 tools via Playwright-core `connectOverCDP` |
 
 ## Agent Roles
 
