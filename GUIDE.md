@@ -2,9 +2,9 @@
 
 ## What is this?
 
-BrowserForce lets **AI agents control your real Chrome browser** — the one you're already logged into. No headless browser, no fake profiles. The AI sees your actual tabs and can interact with any website using your existing sessions.
+BrowserForce gives AI agents — like [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible tool — access to **your real Chrome browser**. The one you're already logged into. No headless browser, no fake profiles. The AI sees your actual tabs and can interact with any website using your existing sessions.
 
-**Example:** You tell Claude "go to my Gmail and summarize my latest emails" — and it actually opens your Gmail (already logged in), reads the page, and gives you a summary. No passwords, no login flows.
+**Example:** You tell your agent "go to my Gmail and summarize my latest emails" — and it actually opens your Gmail (already logged in), reads the page, and gives you a summary. No passwords, no login flows.
 
 ## What can it do?
 

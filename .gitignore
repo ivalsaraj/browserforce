@@ -7,3 +7,4 @@ node_modules/
 .npm
 pnpm-debug.log*
 .worktrees/
+docs/plans/*
