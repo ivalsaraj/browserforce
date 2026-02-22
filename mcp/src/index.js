@@ -222,6 +222,167 @@ function getPages() {
 
 let userState = {};
 
+// ─── Accessibility Tree via DOM ──────────────────────────────────────────────
+// Replaces page.accessibility.snapshot() which was removed in Playwright 1.58.
+// Walks the DOM and builds an AX tree using ARIA roles, HTML semantics, and
+// computed accessible names. Supports Shadow DOM (open roots).
+
+async function getAccessibilityTree(page, rootSelector) {
+  return page.evaluate((sel) => {
+    function getRole(el) {
+      if (el.nodeType !== 1) return null;
+      const explicit = el.getAttribute('role');
+      if (explicit) return explicit;
+      switch (el.tagName) {
+        case 'A': return el.hasAttribute('href') ? 'link' : null;
+        case 'BUTTON': case 'SUMMARY': return 'button';
+        case 'INPUT': {
+          const t = (el.type || 'text').toLowerCase();
+          if (t === 'hidden') return null;
+          return { text: 'textbox', search: 'searchbox', email: 'textbox', url: 'textbox',
+            tel: 'textbox', password: 'textbox', number: 'spinbutton',
+            checkbox: 'checkbox', radio: 'radio', range: 'slider',
+            button: 'button', submit: 'button', reset: 'button', image: 'button',
+          }[t] || 'textbox';
+        }
+        case 'SELECT': return 'combobox';
+        case 'TEXTAREA': return 'textbox';
+        case 'IMG': return 'img';
+        case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6': return 'heading';
+        case 'NAV': return 'navigation';
+        case 'MAIN': return 'main';
+        case 'HEADER': return el.closest('article, aside, main, nav, section') ? null : 'banner';
+        case 'FOOTER': return el.closest('article, aside, main, nav, section') ? null : 'contentinfo';
+        case 'ASIDE': return 'complementary';
+        case 'FORM': return (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || el.getAttribute('name')) ? 'form' : null;
+        case 'TABLE': return 'table';
+        case 'THEAD': case 'TBODY': case 'TFOOT': return 'rowgroup';
+        case 'TR': return 'row';
+        case 'TH': return 'columnheader';
+        case 'TD': return 'cell';
+        case 'UL': case 'OL': return 'list';
+        case 'LI': return 'listitem';
+        case 'DIALOG': return 'dialog';
+        case 'DETAILS': case 'FIELDSET': return 'group';
+        case 'PROGRESS': return 'progressbar';
+        case 'METER': return 'meter';
+        case 'OPTION': return 'option';
+        case 'SECTION': return (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) ? 'region' : null;
+        case 'ARTICLE': return 'article';
+        case 'SEARCH': return 'search';
+        default: return null;
+      }
+    }
+
+    function getName(el) {
+      const ariaLabel = el.getAttribute('aria-label');
+      if (ariaLabel) return ariaLabel.trim();
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const t = labelledBy.split(/\s+/)
+          .map(id => document.getElementById(id)?.textContent?.trim())
+          .filter(Boolean).join(' ');
+        if (t) return t;
+      }
+      if (el.tagName === 'IMG') return (el.alt || '').trim();
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) {
+        if (el.id) {
+          const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+          if (lab) return lab.textContent?.trim() || '';
+        }
+        const parentLabel = el.closest('label');
+        if (parentLabel) {
+          const clone = parentLabel.cloneNode(true);
+          clone.querySelectorAll('input,select,textarea').forEach(i => i.remove());
+          const t = clone.textContent?.trim();
+          if (t) return t;
+        }
+        if (el.placeholder) return el.placeholder.trim();
+      }
+      if (el.title && !['A', 'BUTTON'].includes(el.tagName)) return el.title.trim();
+      const textTags = ['BUTTON', 'A', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SUMMARY', 'OPTION', 'LEGEND', 'CAPTION'];
+      if (textTags.includes(el.tagName)) {
+        return (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 200);
+      }
+      return '';
+    }
+
+    function isHidden(el) {
+      if (el.getAttribute('aria-hidden') === 'true') return true;
+      if (el.hidden) return true;
+      if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD'].includes(el.tagName)) return true;
+      try {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') return true;
+      } catch { /* ignore */ }
+      return false;
+    }
+
+    function getChildren(el) {
+      const kids = [];
+      // Regular DOM children
+      for (const child of el.children) {
+        kids.push(child);
+      }
+      // Open Shadow DOM
+      if (el.shadowRoot) {
+        for (const child of el.shadowRoot.children) {
+          kids.push(child);
+        }
+      }
+      return kids;
+    }
+
+    function buildTree(el, depth) {
+      if (!el || el.nodeType !== 1) return null;
+      if (isHidden(el)) return null;
+      if (depth > 30) return null; // prevent runaway recursion
+
+      const role = getRole(el);
+      const children = [];
+      for (const child of getChildren(el)) {
+        const r = buildTree(child, depth + 1);
+        if (r) {
+          if (Array.isArray(r)) children.push(...r);
+          else children.push(r);
+        }
+      }
+
+      if (role) {
+        const node = { role, name: getName(el) };
+        if (/^H[1-6]$/.test(el.tagName)) node.level = parseInt(el.tagName[1]);
+        if (['checkbox', 'radio', 'switch'].includes(role)) {
+          node.checked = el.checked ?? el.getAttribute('aria-checked') === 'true';
+        }
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') node.disabled = true;
+        const exp = el.getAttribute('aria-expanded');
+        if (exp !== null) node.expanded = exp === 'true';
+        if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.value) {
+          node.value = el.value.slice(0, 500);
+        }
+        if (el.tagName === 'SELECT' && el.selectedOptions?.length) {
+          node.value = el.selectedOptions[0]?.text || '';
+        }
+        if (children.length > 0) node.children = children;
+        return node;
+      }
+
+      // No role: pass through children
+      if (children.length === 0) return null;
+      if (children.length === 1) return children[0];
+      return children; // flatten
+    }
+
+    const scope = sel ? document.querySelector(sel) : document.body;
+    if (!scope) return null;
+
+    const result = buildTree(scope, 0);
+    if (!result) return { role: 'WebArea', name: document.title, children: [] };
+    const kids = Array.isArray(result) ? result : (result.children || [result]);
+    return { role: 'WebArea', name: document.title, children: kids };
+  }, rootSelector || null);
+}
+
 // ─── Snapshot Helper ─────────────────────────────────────────────────────────
 
 async function getStableIds(page, rootSelector) {
@@ -264,17 +425,17 @@ class CodeExecutionTimeoutError extends Error {
   }
 }
 
-function buildExecContext(page, ctx) {
-  const snapshot = async ({ selector, search } = {}) => {
-    let axRoot;
-    if (selector) {
-      const handle = await page.locator(selector).elementHandle({ timeout: 10000 });
-      if (!handle) return `No element found for selector: ${selector}`;
-      axRoot = await page.accessibility.snapshot({ interestingOnly: false, root: handle });
-    } else {
-      axRoot = await page.accessibility.snapshot({ interestingOnly: false });
-    }
+function buildExecContext(defaultPage, ctx) {
+  // Resolve the active page: state.page if set and alive, else the default
+  const activePage = () => {
+    if (userState.page && !userState.page.isClosed()) return userState.page;
+    if (defaultPage && !defaultPage.isClosed()) return defaultPage;
+    throw new Error('No active page. Create one first: state.page = await context.newPage()');
+  };
 
+  const snapshot = async ({ selector, search } = {}) => {
+    const page = activePage();
+    const axRoot = await getAccessibilityTree(page, selector);
     if (!axRoot) return 'No accessibility tree available for this page.';
 
     const stableIds = await getStableIds(page, selector);
@@ -293,19 +454,21 @@ function buildExecContext(page, ctx) {
   };
 
   const waitForPageLoad = (opts = {}) =>
-    smartWaitForPageLoad(page, opts.timeout ?? 30000);
+    smartWaitForPageLoad(activePage(), opts.timeout ?? 30000);
 
   const getLogs = ({ count } = {}) => {
+    const page = activePage();
+    setupConsoleCapture(page);
     const logs = consoleLogs.get(page) || [];
     return count ? logs.slice(-count) : [...logs];
   };
 
   const clearLogs = () => {
-    consoleLogs.set(page, []);
+    consoleLogs.set(activePage(), []);
   };
 
   return {
-    page,
+    page: defaultPage,
     context: ctx,
     state: userState,
     snapshot,
@@ -353,22 +516,192 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
+// ─── Execute Tool Prompt ───────────────────────────────────────────────────
+
+const EXECUTE_PROMPT = `Run Playwright JavaScript in the user's real Chrome browser.
+This is their actual browser with real cookies, sessions, and tabs — not a sandbox.
+
+═══ AVAILABLE SCOPE ═══
+
+Variables:
+  page        Default page (first tab in context — shared, avoid navigating it)
+  context     Browser context — access all pages via context.pages()
+  state       Persistent object across calls (cleared on reset). Store your working page here.
+
+Helpers:
+  snapshot({ selector?, search? })   Accessibility tree as text. 10-100x cheaper than screenshots.
+  waitForPageLoad({ timeout? })      Smart load detection (filters analytics/ads, polls readyState).
+  getLogs({ count? })                Browser console logs captured for current page.
+  clearLogs()                        Clear captured console logs.
+
+Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEncoder, TextDecoder
+
+═══ FIRST CALL — PAGE SETUP ═══
+
+IMPORTANT: Do NOT navigate the user's existing tabs. Always create or reuse a dedicated tab.
+
+On your first call, initialize state.page:
+  // Reuse an about:blank tab if one exists, otherwise create a new one
+  state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
+  await state.page.goto('https://example.com');
+  await waitForPageLoad();
+  return await snapshot();
+
+After setup, use state.page for ALL subsequent operations — not the default page variable.
+If state.page was closed or navigated away, recreate it:
+  if (!state.page || state.page.isClosed()) {
+    state.page = await context.newPage();
+  }
+
+═══ WORKFLOW — OBSERVE → ACT → OBSERVE ═══
+
+After every action, verify its result before proceeding:
+
+1. OBSERVE: snapshot() to understand current page state
+2. ACT: Perform ONE action (click, type, navigate, etc.)
+3. OBSERVE: snapshot() again to verify the action worked
+
+Never chain multiple actions blindly. If you click a button, verify it worked before clicking the next.
+Each execute call should do ONE meaningful action and return verification.
+
+When navigating:
+  await state.page.goto(url);
+  await waitForPageLoad();
+  return await snapshot();
+
+When clicking:
+  await state.page.locator('role=button[name="Submit"]').click();
+  await waitForPageLoad();
+  return await snapshot();
+
+When filling forms:
+  await state.page.locator('role=textbox[name="Email"]').fill('user@example.com');
+  return await snapshot();
+
+═══ SNAPSHOT FIRST ═══
+
+ALWAYS prefer snapshot() over screenshot():
+- snapshot() returns a text accessibility tree — fast, cheap, searchable
+- screenshot() returns a PNG image — expensive, requires vision processing
+
+Use snapshot() for:
+  ✓ Reading page content and text
+  ✓ Finding interactive elements (buttons, links, inputs)
+  ✓ Verifying actions succeeded
+  ✓ Checking if a page loaded correctly
+
+Use screenshot() ONLY for:
+  ✓ Visual layout verification (grids, alignment, spacing)
+  ✓ Seeing images, charts, or visual content
+  ✓ Debugging when snapshot doesn't show the issue
+
+Targeted snapshots: snapshot({ search: /pattern/i }) filters the tree.
+Scoped snapshots: snapshot({ selector: '#main' }) limits to a subtree.
+
+═══ PAGE MANAGEMENT ═══
+
+Listing tabs:       const pages = context.pages();
+Creating a tab:     const p = await context.newPage();
+Navigating:         await state.page.goto(url);
+Current URL:        state.page.url()
+Page title:         await state.page.title()
+
+context.pages() returns ALL open tabs. Index 0 is usually the user's original tab.
+Store your working page in state.page to avoid losing track of it.
+
+For multi-tab workflows:
+  const pages = context.pages();
+  // Find a specific tab by URL
+  const gmail = pages.find(p => p.url().includes('mail.google'));
+
+═══ INTERACTING WITH ELEMENTS ═══
+
+Use Playwright locators with accessibility roles (from snapshot output):
+  await state.page.locator('role=button[name="Sign in"]').click();
+  await state.page.locator('role=textbox[name="Search"]').fill('query');
+  await state.page.locator('role=link[name="Settings"]').click();
+
+If snapshot shows [ref=some-id] for an element with a data-testid or id:
+  await state.page.locator('[data-testid="some-id"]').click();
+
+For text content:
+  const text = await state.page.locator('role=heading').textContent();
+
+═══ COMMON PATTERNS ═══
+
+Navigate and read:
+  await state.page.goto('https://example.com');
+  await waitForPageLoad();
+  return await snapshot();
+
+Click and verify:
+  await state.page.locator('role=button[name="Next"]').click();
+  await waitForPageLoad();
+  return await snapshot();
+
+Fill form and submit:
+  await state.page.locator('role=textbox[name="Username"]').fill('user');
+  await state.page.locator('role=textbox[name="Password"]').fill('pass');
+  await state.page.locator('role=button[name="Login"]').click();
+  await waitForPageLoad();
+  return await snapshot();
+
+Extract data:
+  return await state.page.evaluate(() => {
+    return document.querySelector('.price').textContent;
+  });
+
+Wait for specific element:
+  await state.page.locator('role=heading[name="Dashboard"]').waitFor();
+  return await snapshot();
+
+Debug with console logs:
+  return getLogs({ count: 20 });
+
+═══ ANTI-PATTERNS ═══
+
+✗ Don't navigate the user's existing tabs — create your own via context.newPage()
+✗ Don't screenshot() to read text — use snapshot()
+✗ Don't chain actions without verifying — observe after each action
+✗ Don't use page.waitForTimeout() — use waitForPageLoad() or waitFor()
+✗ Don't forget to return a value — every call should return verification
+✗ Don't write complex multi-step scripts — split into separate execute calls
+✗ Don't use page variable directly — use state.page after first call setup
+
+═══ ERROR RECOVERY ═══
+
+If page closed:      state.page = await context.newPage();
+If navigation fails: Check state.page.url() to see where you actually are
+If element missing:   Use snapshot({ search: /element/ }) to find it
+If connection lost:   Call the reset tool, then re-initialize state.page
+If timeout:          Increase timeout param, or break into smaller steps
+
+═══ API REFERENCE ═══
+
+snapshot(options?)
+  options.selector  CSS selector to scope the snapshot (e.g., '#main', '.sidebar')
+  options.search    Regex string to filter tree nodes (e.g., 'button|link')
+  Returns: Text accessibility tree with interactive element refs
+
+waitForPageLoad(options?)
+  options.timeout   Max wait in ms (default: 30000)
+  Returns: { success, readyState, pendingRequests, waitTimeMs, timedOut }
+  Filters analytics/ad requests that never finish. Polls document.readyState.
+
+getLogs(options?)
+  options.count     Number of recent entries (default: all)
+  Returns: Array of "[type] message" strings from browser console
+
+clearLogs()
+  Clears captured console logs for current page.
+
+state
+  Persistent object — survives across execute calls. Cleared on reset.
+  Use state.page, state.data, state.anything to preserve working state.`;
+
 server.tool(
   'execute',
-  `Run Playwright JavaScript in your real Chrome browser.
-
-Scope: page, context, state, snapshot(), waitForPageLoad(), getLogs(), clearLogs()
-Globals: fetch, URL, Buffer, setTimeout, TextEncoder, TextDecoder
-
-Use 'return' to send a value back. Screenshots: return await page.screenshot().
-Multiple tabs: context.pages()[n]. state persists between calls. reset() clears it.
-
-Examples:
-  return await page.title()
-  return await page.screenshot()
-  await page.goto('https://example.com'); return await snapshot()
-  const [tab1, tab2] = context.pages(); return await tab2.title()
-  state.count = (state.count || 0) + 1; return state.count`,
+  EXECUTE_PROMPT,
   {
     code: z.string().describe('JavaScript to run — page/context/state/snapshot/waitForPageLoad/getLogs in scope'),
     timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
@@ -377,10 +710,10 @@ Examples:
     await ensureBrowser();
     ensureAllPagesCapture();
     const ctx = getContext();
-    const pages = getPages();
-    if (pages.length === 0) throw new Error('No pages available. Open a tab first.');
-    const page = pages[0];
-    setupConsoleCapture(page);
+    const pages = ctx.pages();
+    const page = pages[0] || null;
+
+    if (page) setupConsoleCapture(page);
     const execCtx = buildExecContext(page, ctx);
     try {
       return await runCode(code, execCtx, timeout);

@@ -602,34 +602,18 @@ class RelayServer {
     if (!this.ext) return;
 
     const { tabs } = await this._sendToExt('listTabs');
-    log(`[relay] Discovered ${tabs.length} tab(s) (lazy — debugger deferred until first use)`);
+    log(`[relay] Browser has ${tabs.length} tab(s) — agent creates own tabs via context.newPage()`);
 
-    for (const tab of tabs) {
-      // Skip if already tracked
-      if (this.tabToSession.has(tab.tabId)) {
-        const sessionId = this.tabToSession.get(tab.tabId);
-        const target = this.targets.get(sessionId);
-        this._sendAttachedEvent(ws, sessionId, target);
-        continue;
-      }
-
-      const sessionId = `s${++this.sessionCounter}`;
-      const targetId = `tab-${tab.tabId}`;
-      const targetInfo = { targetId, type: 'page', title: tab.title, url: tab.url };
-
-      this.targets.set(sessionId, {
-        tabId: tab.tabId,
-        targetId,
-        targetInfo,
-        debuggerAttached: false,
-        attachPromise: null,
-      });
-      this.tabToSession.set(tab.tabId, sessionId);
-
-      this._sendAttachedEvent(ws, sessionId, { targetId, targetInfo });
+    // Re-emit attachedToTarget for already-tracked targets (reconnection case)
+    for (const [sessionId, target] of this.targets) {
+      this._sendAttachedEvent(ws, sessionId, target);
     }
 
-    log(`[relay] ${this.targets.size} target(s) registered. Debugger attaches on first use.`);
+    // Do NOT auto-attach existing browser tabs. Lazy attachment creates broken
+    // Playwright Page objects because INIT_ONLY_METHODS fakes Runtime.enable,
+    // so Playwright never gets executionContextCreated events → page.evaluate()
+    // deadlocks. Instead, the agent creates tabs via context.newPage() which
+    // eagerly attaches the debugger via _createTarget.
   }
 
   /** Attach debugger to a tab on demand (lazy). Race-safe via attachPromise. */
@@ -652,15 +636,6 @@ class RelayServer {
       if (result.targetInfo) target.targetInfo = result.targetInfo;
       target.debuggerAttached = true;
       target.attachPromise = null;
-
-      // Playwright already sent Runtime.enable during init (we faked it with {}).
-      // Now that the real debugger is attached, trigger it so Chrome emits
-      // executionContextCreated events and Playwright can evaluate JS on this tab.
-      this._sendToExt('cdpCommand', {
-        tabId: target.tabId,
-        method: 'Runtime.enable',
-        params: {},
-      }).catch(() => {}); // fire-and-forget; events will arrive async
     })();
 
     await target.attachPromise;

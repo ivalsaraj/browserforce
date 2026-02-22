@@ -79,25 +79,35 @@ describe('Tool Definitions', () => {
       'utf8'
     );
 
-    const toolBlocks = source.split('server.tool(').slice(1);
-    for (const block of toolBlocks) {
-      // Second argument to server.tool() is the description
-      const descMatch = block.match(/,\s*(`[^`]+`|'[^']*'|"[^"]*")/);
-      assert.ok(descMatch, 'Each tool should have a description');
-      assert.ok(descMatch[1].length > 5, 'Description should be non-empty');
-    }
+    // execute tool uses EXECUTE_PROMPT variable, reset uses inline string
+    assert.ok(source.includes('EXECUTE_PROMPT'), 'execute tool should reference EXECUTE_PROMPT');
+    assert.ok(source.includes('const EXECUTE_PROMPT'), 'EXECUTE_PROMPT should be defined');
+    // Check reset tool still has inline description
+    const resetBlock = source.split("'reset'")[1] || '';
+    assert.ok(resetBlock.includes('Reconnects'), 'reset should have description');
   });
 
-  it('execute tool description mentions page, context, and state', () => {
+  it('execute tool description includes key guidance sections', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
-    const execBlock = source.split("'execute'")[1]?.split('server.tool(')[0] || '';
-    assert.ok(execBlock.includes('page'), 'execute description should mention page');
-    assert.ok(execBlock.includes('context'), 'execute description should mention context');
-    assert.ok(execBlock.includes('state'), 'execute description should mention state');
+    // EXECUTE_PROMPT is defined as a const above server.tool('execute', EXECUTE_PROMPT, ...)
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+    // Core scope
+    assert.ok(promptBlock.includes('page'), 'should mention page');
+    assert.ok(promptBlock.includes('context'), 'should mention context');
+    assert.ok(promptBlock.includes('state'), 'should mention state');
+    // Key behavioral guidance
+    assert.ok(promptBlock.includes('state.page'), 'should mention state.page for page management');
+    assert.ok(promptBlock.includes('snapshot'), 'should mention snapshot-first approach');
+    assert.ok(promptBlock.includes('waitForPageLoad'), 'should mention waitForPageLoad');
+    assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
+    // Anti-patterns section
+    assert.ok(promptBlock.includes('ANTI-PATTERN') || promptBlock.includes('Don\'t') || promptBlock.includes('✗'), 'should include anti-patterns');
   });
 
   it('execute tool has code and optional timeout params', () => {
