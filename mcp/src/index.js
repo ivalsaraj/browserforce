@@ -400,6 +400,9 @@ server.tool(
   'Reconnects to the relay, reinitializes the browser context, and clears persistent state. Use when: connection lost, pages closed unexpectedly, or state is corrupt.',
   {},
   async () => {
+    if (browser) {
+      try { await browser.close(); } catch { /* connection may already be dead */ }
+    }
     browser = null;
     userState = {};
     contextListenerAttached = false;
