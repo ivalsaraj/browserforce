@@ -179,11 +179,25 @@ function setTabs(tabs) {
   tabsListEl.innerHTML = tabs
     .map((t) => `
       <div class="tab-item">
-        <div class="tab-title">${escapeHtml(t.title || 'Untitled')}</div>
+        <div class="tab-title-row">
+          <span class="tab-title">${escapeHtml(t.title || 'Untitled')}</span>
+          <button class="detach-btn" data-tab-id="${t.tabId}" title="Detach tab">×</button>
+        </div>
         <div class="tab-url">${escapeHtml(t.url || '')}</div>
       </div>
     `)
     .join('');
+
+  // Wire up detach buttons
+  tabsListEl.querySelectorAll('.detach-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const tabId = Number(btn.dataset.tabId);
+      chrome.runtime.sendMessage({ type: 'detachTab', tabId }, () => {
+        refreshStatus();
+      });
+    });
+  });
 }
 
 function setAutoTimer(secs) {

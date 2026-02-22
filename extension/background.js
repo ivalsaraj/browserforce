@@ -279,7 +279,6 @@ async function createTab(params) {
       : 'Tab creation blocked: "No new tabs" restriction is active.';
 
     if (!restrictionExplained) {
-      restrictionExplained = true;
       throw new Error(buildRestrictionError(msg, 'no new tabs', settings));
     }
     throw new Error(`BLOCKED: ${msg}`);
@@ -736,6 +735,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ error: err.message });
       }
     });
+    return true; // async sendResponse
+  }
+
+  if (msg.type === 'detachTab') {
+    detachTab(msg.tabId)
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ error: err.message }));
     return true; // async sendResponse
   }
 

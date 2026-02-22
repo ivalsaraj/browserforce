@@ -922,3 +922,198 @@ describe('Extension Disconnect', () => {
     await sleep(100);
   });
 });
+
+// ─── GET /restrictions Endpoint ──────────────────────────────────────────────
+
+describe('GET /restrictions endpoint', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('returns 200 with default restrictions when no extension is connected', async () => {
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/restrictions`);
+    assert.equal(status, 200);
+    assert.deepEqual(body, {
+      mode: 'auto',
+      lockUrl: false,
+      noNewTabs: false,
+      readOnly: false,
+      instructions: '',
+    });
+  });
+
+  it('returns application/json content-type when no extension is connected', async () => {
+    return new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${port}/restrictions`, (res) => {
+        assert.ok(
+          res.headers['content-type'].includes('application/json'),
+          'Content-Type should be application/json',
+        );
+        res.resume();
+        res.on('end', resolve);
+      }).on('error', reject);
+    });
+  });
+
+  it('forwards getRestrictions to extension and returns its response', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const extRestrictions = {
+      mode: 'locked',
+      lockUrl: true,
+      noNewTabs: true,
+      readOnly: false,
+      instructions: 'Only visit example.com',
+    };
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id !== undefined && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: extRestrictions }));
+      }
+    });
+
+    await sleep(50); // Let extension register
+
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/restrictions`);
+    assert.equal(status, 200);
+    assert.deepEqual(body, extRestrictions);
+
+    ext.close();
+    await sleep(100);
+  });
+});
+
+// ─── manualTabAttached Handler ───────────────────────────────────────────────
+
+describe('manualTabAttached handler', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('creates session and broadcasts Target.attachedToTarget to CDP clients', async () => {
+    // Connect mock extension
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); }
+    });
+
+    // Connect CDP client
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const events = [];
+    cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+    await sleep(50); // Let both connections settle
+
+    // Extension sends manualTabAttached
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 999,
+        sessionId: 'manual-999-123',
+        targetId: 'bf-target-999',
+        targetInfo: { url: 'https://example.com', title: 'Example' },
+      },
+    }));
+
+    await sleep(200);
+
+    // CDP client should have received Target.attachedToTarget
+    const attached = events.find((m) => m.method === 'Target.attachedToTarget');
+    assert.ok(attached, 'Should receive Target.attachedToTarget event');
+
+    // sessionId should be in bf-session-N format
+    assert.ok(
+      /^bf-session-\d+$/.test(attached.params.sessionId),
+      `sessionId "${attached.params.sessionId}" should match bf-session-N`,
+    );
+
+    // targetInfo fields should be correct
+    assert.equal(attached.params.targetInfo.url, 'https://example.com');
+    assert.equal(attached.params.targetInfo.title, 'Example');
+    assert.equal(attached.params.targetInfo.targetId, 'bf-target-999');
+    assert.equal(attached.params.targetInfo.type, 'page');
+    assert.equal(attached.params.targetInfo.browserContextId, 'bf-default-context');
+    assert.equal(attached.params.waitingForDebugger, false);
+
+    // Relay state: target should be in /json/list
+    const list = await httpGet(`http://127.0.0.1:${port}/json/list`);
+    assert.equal(list.body.length, 1);
+    assert.equal(list.body[0].url, 'https://example.com');
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('adds target to tabToSession and targets maps', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.on('message', () => {}); // drain messages
+
+    await sleep(50);
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 888,
+        sessionId: 'manual-888-456',
+        targetId: 'bf-target-888',
+        targetInfo: { url: 'https://other.com', title: 'Other' },
+      },
+    }));
+
+    await sleep(200);
+
+    // tabToSession should map tabId 888 to a bf-session-N
+    assert.ok(relay.tabToSession.has(888), 'tabToSession should contain tabId 888');
+    const sessionId = relay.tabToSession.get(888);
+    assert.ok(/^bf-session-\d+$/.test(sessionId), 'Mapped session should be bf-session-N');
+
+    // targets should contain the session
+    assert.ok(relay.targets.has(sessionId), 'targets map should contain the session');
+    const target = relay.targets.get(sessionId);
+    assert.equal(target.tabId, 888);
+    assert.equal(target.targetId, 'bf-target-888');
+    assert.equal(target.debuggerAttached, true);
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+});
