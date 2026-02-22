@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { chromium } from 'playwright-core';
 import {
-  getCdpUrl, CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
+  getCdpUrl, ensureRelay, CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
 import { screenshotWithLabels } from './a11y-labels.js';
 
@@ -65,6 +65,7 @@ let browser = null;
 
 async function ensureBrowser() {
   if (browser?.isConnected()) return;
+  await ensureRelay();
   const cdpUrl = getCdpUrl();
   browser = await chromium.connectOverCDP(cdpUrl);
   browser.on('disconnected', () => {

@@ -43,7 +43,8 @@ function httpGet(url) {
 }
 
 async function connectBrowser() {
-  const { getCdpUrl } = await import('./mcp/src/exec-engine.js');
+  const { getCdpUrl, ensureRelay } = await import('./mcp/src/exec-engine.js');
+  await ensureRelay();
   // playwright-core lives in mcp/node_modules (pnpm workspace sub-package).
   // Use createRequire from the mcp package context to locate it, then dynamic-import.
   const { createRequire } = await import('node:module');

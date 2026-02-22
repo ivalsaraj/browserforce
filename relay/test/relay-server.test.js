@@ -1117,3 +1117,60 @@ describe('manualTabAttached handler', () => {
     await sleep(100);
   });
 });
+
+// ─── Auto-start Relay ─────────────────────────────────────────────────────
+
+describe('ensureRelay', () => {
+  let ensureRelay;
+  let isRelayRunning;
+
+  before(async () => {
+    const mod = await import('../../mcp/src/exec-engine.js');
+    ensureRelay = mod.ensureRelay;
+    // Access isRelayRunning indirectly — test via ensureRelay behavior
+  });
+
+  it('is a no-op when relay is already running', async () => {
+    const port = getRandomPort();
+    const relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+
+    const origPort = process.env.RELAY_PORT;
+    process.env.RELAY_PORT = String(port);
+    try {
+      const start = Date.now();
+      await ensureRelay(); // should detect running relay, no spawn
+      const elapsed = Date.now() - start;
+      // Detection should be fast — under 1s (no polling loop)
+      assert.ok(elapsed < 1000, `ensureRelay took ${elapsed}ms, expected < 1000ms`);
+    } finally {
+      if (origPort === undefined) delete process.env.RELAY_PORT;
+      else process.env.RELAY_PORT = origPort;
+      relay.stop();
+    }
+  });
+
+  it('throws when relay cannot start on an occupied port', async () => {
+    // Occupy a port with a non-relay HTTP server (returns 404, not the relay health JSON)
+    const port = getRandomPort();
+    const blocker = http.createServer((req, res) => { res.writeHead(404); res.end(); });
+    await new Promise(r => blocker.listen(port, '127.0.0.1', r));
+
+    const origPort = process.env.RELAY_PORT;
+    process.env.RELAY_PORT = String(port);
+
+    try {
+      // ensureRelay pings the port — gets 404 (not ok), tries to spawn relay,
+      // but relay can't bind (port occupied) → times out
+      await assert.rejects(
+        () => ensureRelay(),
+        { message: /Failed to auto-start relay/ },
+      );
+    } finally {
+      if (origPort === undefined) delete process.env.RELAY_PORT;
+      else process.env.RELAY_PORT = origPort;
+      blocker.close();
+    }
+  });
+});

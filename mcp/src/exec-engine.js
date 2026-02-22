@@ -4,6 +4,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import {
   TEST_ID_ATTRS,
   buildSnapshotText, parseSearchPattern, annotateStableAttrs,
@@ -11,8 +13,10 @@ import {
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
+const DEFAULT_PORT = 19222;
 export const BF_DIR = join(homedir(), '.browserforce');
 export const CDP_URL_FILE = join(BF_DIR, 'cdp-url');
+const RELAY_SCRIPT = fileURLToPath(new URL('../../relay/src/index.js', import.meta.url));
 
 export function getCdpUrl() {
   if (process.env.BF_CDP_URL) return process.env.BF_CDP_URL;
@@ -34,8 +38,57 @@ export function getRelayHttpUrl() {
     const parsed = new URL(cdpUrl);
     return `http://${parsed.hostname}:${parsed.port}`;
   } catch {
-    return 'http://127.0.0.1:19222';
+    return `http://127.0.0.1:${DEFAULT_PORT}`;
   }
+}
+
+// ─── Auto-start relay ───────────────────────────────────────────────────────
+
+function getRelayPort() {
+  if (process.env.RELAY_PORT) return parseInt(process.env.RELAY_PORT, 10);
+  try {
+    const url = readFileSync(CDP_URL_FILE, 'utf8').trim();
+    if (url) {
+      const port = new URL(url).port;
+      if (port) return parseInt(port, 10);
+    }
+  } catch { /* fall through */ }
+  return DEFAULT_PORT;
+}
+
+async function isRelayRunning(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      signal: AbortSignal.timeout(500),
+    });
+    return res.ok;
+  } catch { return false; }
+}
+
+/**
+ * Ensure the relay server is running. If not, spawn it as a detached
+ * background process and wait for it to become reachable.
+ */
+export async function ensureRelay() {
+  const port = getRelayPort();
+  if (await isRelayRunning(port)) return;
+
+  const child = spawn(process.execPath, [RELAY_SCRIPT], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, RELAY_PORT: String(port) },
+  });
+  child.unref();
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 200));
+    if (await isRelayRunning(port)) {
+      process.stderr.write('[browserforce] Relay auto-started\n');
+      return;
+    }
+  }
+  throw new Error('Failed to auto-start relay server within 5s');
 }
 
 // ─── Smart Page Load Detection ───────────────────────────────────────────────
