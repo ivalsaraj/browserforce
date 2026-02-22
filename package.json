@@ -1,12 +1,12 @@
 {
   "name": "browserforce",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Give AI agents your real Chrome browser — your logins, cookies, and tabs. Works with OpenClaw, Claude, and any MCP agent.",
-  "homepage": "https://github.com/anthropics/browserforce",
+  "homepage": "https://github.com/ivalsaraj/browserforce",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthropics/browserforce.git"
+    "url": "https://github.com/ivalsaraj/browserforce.git"
   },
   "license": "MIT",
   "keywords": [

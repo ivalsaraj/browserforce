@@ -26,7 +26,7 @@ npm install -g browserforce
 Or from source:
 
 ```bash
-git clone https://github.com/anthropics/browserforce.git
+git clone https://github.com/ivalsaraj/browserforce.git
 cd browserforce
 pnpm install
 ```
@@ -143,7 +143,7 @@ Each `-e` command is one-shot — state does not persist between calls. For pers
 Install the skill directly:
 
 ```bash
-npx -y skills add anthropics/browserforce
+npx -y skills add ivalsaraj/browserforce
 ```
 
 Or add to your agent config manually — the skill teaches the agent to use BrowserForce CLI commands via Bash.
