@@ -1,10 +1,1 @@
-{
-  "name": "browserforce-relay",
-  "version": "1.0.0",
-  "private": true,
-  "description": "CDP relay server bridging Chrome extension to AI agents",
-  "main": "src/index.js",
-  "dependencies": {
-    "ws": "^8.18.0"
-  }
-}
+{ "type": "commonjs" }
