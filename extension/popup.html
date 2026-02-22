@@ -15,49 +15,92 @@
       </div>
     </header>
 
-    <section class="field">
-      <label for="bf-relay-url">Relay URL</label>
-      <div class="input-row">
-        <input type="text" id="bf-relay-url" placeholder="ws://127.0.0.1:19222/extension">
-        <button id="bf-save-url">Save</button>
-      </div>
-    </section>
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="status">Status</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
+    </nav>
 
-    <section class="field">
-      <label>Settings</label>
-      <div class="settings-group">
-        <div class="setting-row">
-          <span class="setting-label">Auto-detach inactive tabs</span>
-          <select id="bf-auto-detach">
-            <option value="0">Off</option>
-            <option value="5">5 min</option>
-            <option value="10">10 min</option>
-            <option value="15">15 min</option>
-            <option value="30">30 min</option>
-            <option value="60">60 min</option>
-          </select>
+    <!-- Status Tab -->
+    <div id="tab-status" class="tab-panel active">
+      <section class="field">
+        <label for="bf-relay-url">Relay URL</label>
+        <div class="input-row">
+          <input type="text" id="bf-relay-url" placeholder="ws://127.0.0.1:19222/extension">
+          <button id="bf-save-url">Save</button>
         </div>
-        <div class="setting-row">
-          <span class="setting-label">Auto-close agent tabs</span>
-          <select id="bf-auto-close">
-            <option value="0">Off</option>
-            <option value="5">5 min</option>
-            <option value="10">10 min</option>
-            <option value="15">15 min</option>
-            <option value="30">30 min</option>
-            <option value="60">60 min</option>
-          </select>
+      </section>
+
+      <section class="field">
+        <label>Controlled Tabs <span id="bf-tab-count" class="badge">0</span><span id="bf-auto-timer" class="auto-timer"></span></label>
+        <div id="bf-tabs-list" class="tabs-list">
+          <div class="empty">No tabs attached</div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="field">
-      <label>Controlled Tabs <span id="bf-tab-count" class="badge">0</span><span id="bf-auto-timer" class="auto-timer"></span></label>
-      <div id="bf-tabs-list" class="tabs-list">
-        <div class="empty">No tabs attached</div>
-      </div>
-    </section>
+      <button id="bf-attach-tab" class="attach-btn">+ Attach Current Tab</button>
+    </div>
 
+    <!-- Settings Tab -->
+    <div id="tab-settings" class="tab-panel">
+      <section class="field">
+        <label>Mode</label>
+        <select id="bf-mode" class="full-width">
+          <option value="auto">Auto (agent creates tabs)</option>
+          <option value="manual">Manual (select tabs yourself)</option>
+        </select>
+      </section>
+
+      <section class="field">
+        <label>Restrictions</label>
+        <div class="settings-group">
+          <label class="checkbox-row">
+            <input type="checkbox" id="bf-lock-url">
+            <span>Lock URL (no navigation)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="bf-no-new-tabs">
+            <span>No new tabs</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="bf-read-only">
+            <span>Read-only (observe only)</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="field">
+        <label>Auto-Cleanup</label>
+        <div class="settings-group">
+          <div class="setting-row">
+            <span class="setting-label">Auto-detach inactive tabs</span>
+            <select id="bf-auto-detach">
+              <option value="0">Off</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="60">60 min</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <span class="setting-label">Auto-close agent tabs</span>
+            <select id="bf-auto-close">
+              <option value="0">Off</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="60">60 min</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="field">
+        <label for="bf-instructions">Instructions</label>
+        <textarea id="bf-instructions" rows="4" placeholder="Custom instructions for the AI agent..."></textarea>
+      </section>
+    </div>
   </div>
   <script src="popup.js"></script>
 </body>
