@@ -17,6 +17,9 @@ const attachedTabs = new Map();
 /** @type {Map<string, number>} Chrome child sessionId -> parent tabId */
 const childSessions = new Map();
 
+/** Serializes tab group operations to avoid races (same pattern as playwriter) */
+let tabGroupQueue = Promise.resolve();
+
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 (async function init() {
@@ -220,6 +223,7 @@ async function attachTab(tabId, sessionId) {
   const entry = { sessionId, targetId, targetInfo, tabId };
   attachedTabs.set(tabId, entry);
   updateBadge();
+  queueSyncTabGroup();
 
   return entry;
 }
@@ -234,6 +238,7 @@ async function detachTab(tabId) {
   }
 
   cleanupTab(tabId);
+  queueSyncTabGroup();
   return {};
 }
 
@@ -328,6 +333,7 @@ function onDebuggerDetach(source, reason) {
     }
     attachedTabs.clear();
     childSessions.clear();
+    queueSyncTabGroup();
   } else {
     if (attachedTabs.has(source.tabId)) {
       send({
@@ -335,6 +341,7 @@ function onDebuggerDetach(source, reason) {
         params: { tabId: source.tabId, reason },
       });
       cleanupTab(source.tabId);
+      queueSyncTabGroup();
     }
   }
 
@@ -352,6 +359,7 @@ function onTabRemoved(tabId) {
   });
   cleanupTab(tabId);
   updateBadge();
+  queueSyncTabGroup();
 }
 
 function onTabUpdated(tabId, changeInfo) {
@@ -379,6 +387,74 @@ function cleanupTab(tabId) {
   for (const [childId, parentTabId] of childSessions) {
     if (parentTabId === tabId) childSessions.delete(childId);
   }
+}
+
+/**
+ * Syncs the 'browserforce' Chrome tab group to reflect currently attached tabs.
+ * Modeled after playwriter's syncTabGroup — always queries by title, never caches group ID.
+ */
+async function syncTabGroup() {
+  try {
+    const connectedTabIds = Array.from(attachedTabs.keys());
+    const existingGroups = await chrome.tabGroups.query({ title: 'browserforce' });
+
+    if (connectedTabIds.length === 0) {
+      for (const group of existingGroups) {
+        const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
+        const tabIdsToUngroup = tabsInGroup.map((t) => t.id).filter((id) => id !== undefined);
+        if (tabIdsToUngroup.length > 0) {
+          await chrome.tabs.ungroup(tabIdsToUngroup);
+        }
+      }
+      return;
+    }
+
+    // Consolidate duplicate groups into one
+    let groupId = existingGroups[0]?.id;
+    if (existingGroups.length > 1) {
+      const [keep, ...duplicates] = existingGroups;
+      groupId = keep.id;
+      for (const group of duplicates) {
+        const tabsInDupe = await chrome.tabs.query({ groupId: group.id });
+        const tabIdsToUngroup = tabsInDupe.map((t) => t.id).filter((id) => id !== undefined);
+        if (tabIdsToUngroup.length > 0) {
+          await chrome.tabs.ungroup(tabIdsToUngroup);
+        }
+      }
+    }
+
+    const allTabs = await chrome.tabs.query({});
+    const tabsInGroup = allTabs.filter((t) => t.groupId === groupId && t.id !== undefined);
+    const tabIdsInGroup = new Set(tabsInGroup.map((t) => t.id));
+
+    const tabsToAdd = connectedTabIds.filter((id) => !tabIdsInGroup.has(id));
+    const tabsToRemove = Array.from(tabIdsInGroup).filter((id) => !connectedTabIds.includes(id));
+
+    if (tabsToRemove.length > 0) {
+      try {
+        await chrome.tabs.ungroup(tabsToRemove);
+      } catch {
+        // Tab may have been closed already
+      }
+    }
+
+    if (tabsToAdd.length > 0) {
+      if (groupId === undefined) {
+        const newGroupId = await chrome.tabs.group({ tabIds: tabsToAdd });
+        await chrome.tabGroups.update(newGroupId, { title: 'browserforce', color: 'cyan' });
+      } else {
+        await chrome.tabs.group({ tabIds: tabsToAdd, groupId });
+      }
+    }
+  } catch (e) {
+    console.debug('[bf] syncTabGroup error:', e.message);
+  }
+}
+
+function queueSyncTabGroup() {
+  tabGroupQueue = tabGroupQueue.then(syncTabGroup).catch((e) => {
+    console.debug('[bf] syncTabGroup error:', e.message);
+  });
 }
 
 function send(msg) {
