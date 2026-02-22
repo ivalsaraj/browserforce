@@ -622,11 +622,15 @@ async function syncTabGroup() {
 
     if (tabsToAdd.length > 0) {
       if (groupId === undefined) {
-        const newGroupId = await chrome.tabs.group({ tabIds: tabsToAdd });
-        await chrome.tabGroups.update(newGroupId, { title: 'browserforce', color: 'cyan' });
+        groupId = await chrome.tabs.group({ tabIds: tabsToAdd });
       } else {
         await chrome.tabs.group({ tabIds: tabsToAdd, groupId });
       }
+    }
+
+    // Always ensure group title/color are correct
+    if (groupId !== undefined) {
+      await chrome.tabGroups.update(groupId, { title: 'browserforce', color: 'cyan' });
     }
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);
