@@ -27,6 +27,9 @@ const agentCreatedTabs = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
 
+/** Whether restrictions have been explained to the agent (reset per CDP client session) */
+let restrictionExplained = false;
+
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 (async function init() {
@@ -99,6 +102,7 @@ function connect(relayUrl) {
       clearTimeout(timeout);
       ws = socket;
       connectionState = 'connected';
+      restrictionExplained = false; // Reset for new agent session
       updateBadge();
       console.log('[bf] Connected to relay');
       resolve();
@@ -165,6 +169,18 @@ async function executeCommand(msg) {
     case 'cdpCommand':
       tabLastActivity.set(msg.params.tabId, Date.now());
       return cdpCommand(msg.params);
+    case 'getRestrictions':
+      return new Promise((resolve) => {
+        chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], (s) => {
+          resolve({
+            mode: s.mode || 'auto',
+            lockUrl: !!s.lockUrl,
+            noNewTabs: !!s.noNewTabs,
+            readOnly: !!s.readOnly,
+            instructions: s.userInstructions || '',
+          });
+        });
+      });
     default:
       throw new Error(`Unknown command: ${msg.method}`);
   }
@@ -252,6 +268,23 @@ async function detachTab(tabId) {
 }
 
 async function createTab(params) {
+  // Check restrictions
+  const settings = await new Promise((resolve) => {
+    chrome.storage.local.get(['mode', 'noNewTabs', 'lockUrl', 'readOnly', 'userInstructions'], resolve);
+  });
+
+  if (settings.mode === 'manual' || settings.noNewTabs) {
+    const msg = settings.mode === 'manual'
+      ? 'Tab creation blocked: manual mode is active. Work only with tabs attached by the user.'
+      : 'Tab creation blocked: "No new tabs" restriction is active.';
+
+    if (!restrictionExplained) {
+      restrictionExplained = true;
+      throw new Error(buildRestrictionError(msg, 'no new tabs', settings));
+    }
+    throw new Error(`BLOCKED: ${msg}`);
+  }
+
   const tab = await chrome.tabs.create({
     url: params.url || 'about:blank',
     active: false,
@@ -284,9 +317,81 @@ async function closeTab(params) {
   return {};
 }
 
+// ─── Restriction Enforcement ─────────────────────────────────────────────────
+
+// CDP methods blocked by each restriction
+const NAVIGATE_METHODS = new Set(['Page.navigate']);
+const INPUT_METHODS = new Set([
+  'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText',
+  'Input.dispatchTouchEvent', 'Input.imeSetComposition',
+  'DOM.setAttributeValue', 'DOM.setNodeValue', 'DOM.removeNode',
+]);
+
+async function checkRestriction(method, params, tabId) {
+  const settings = await new Promise((resolve) => {
+    chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], resolve);
+  });
+
+  // No restrictions active -> allow
+  if (!settings.lockUrl && !settings.noNewTabs && !settings.readOnly) return null;
+
+  // Lock URL: block Page.navigate (but allow Page.reload)
+  if (settings.lockUrl && NAVIGATE_METHODS.has(method)) {
+    const entry = attachedTabs.get(tabId);
+    const lockedUrl = entry?.targetInfo?.url || 'the current page';
+    return buildRestrictionError(
+      `Navigation to "${params?.url || 'unknown'}" is not allowed`,
+      `URL is locked to ${lockedUrl}`,
+      settings
+    );
+  }
+
+  // Read-only: block input methods
+  if (settings.readOnly && INPUT_METHODS.has(method)) {
+    return buildRestrictionError(
+      `${method} is blocked in read-only mode`,
+      'Read-only mode is active',
+      settings
+    );
+  }
+
+  return null; // allowed
+}
+
+function buildRestrictionError(action, reason, settings) {
+  if (restrictionExplained) {
+    return `BLOCKED: ${action} (${reason}).`;
+  }
+
+  // First violation — full explanation
+  restrictionExplained = true;
+  const lines = [`BLOCKED: ${action}.`, ''];
+  lines.push('This browser session has active restrictions set by the user:');
+  if (settings.lockUrl) {
+    lines.push('- URL is locked — do not navigate away. page.reload() is allowed.');
+  }
+  if (settings.noNewTabs) {
+    lines.push('- New tab creation is disabled — work only with attached tab(s).');
+  }
+  if (settings.readOnly) {
+    lines.push('- Read-only mode — do not click, type, or submit. Use snapshot(), screenshot(), page.evaluate() to observe.');
+  }
+  if (settings.userInstructions) {
+    lines.push('');
+    lines.push('User instructions: ' + settings.userInstructions);
+  }
+  lines.push('');
+  lines.push('These restrictions are enforced and cannot be bypassed. Plan your actions accordingly.');
+  return lines.join('\n');
+}
+
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
 
 async function cdpCommand({ tabId, method, params, childSessionId }) {
+  // Check restrictions before forwarding
+  const blocked = await checkRestriction(method, params, tabId);
+  if (blocked) throw new Error(blocked);
+
   // Special handling: Runtime.enable needs the disable-then-enable trick
   // to force Chrome to re-emit executionContextCreated events
   if (method === 'Runtime.enable' && !childSessionId) {
@@ -594,5 +699,56 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     });
     return true; // async sendResponse
   }
+
+  if (msg.type === 'attachCurrentTab') {
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      const tab = tabs[0];
+      if (!tab || !tab.id) {
+        sendResponse({ error: 'No active tab' });
+        return;
+      }
+      const url = tab.url || '';
+      if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('devtools://')) {
+        sendResponse({ error: 'Cannot attach internal pages' });
+        return;
+      }
+      if (attachedTabs.has(tab.id)) {
+        sendResponse({ error: 'Already attached' });
+        return;
+      }
+      try {
+        const sessionId = `manual-${tab.id}-${Date.now()}`;
+        await attachTab(tab.id, sessionId);
+        // Notify relay about the manually attached tab
+        send({
+          method: 'manualTabAttached',
+          params: {
+            tabId: tab.id,
+            sessionId,
+            targetId: attachedTabs.get(tab.id)?.targetId,
+            targetInfo: attachedTabs.get(tab.id)?.targetInfo,
+          },
+        });
+        sendResponse({ ok: true, tabId: tab.id });
+      } catch (err) {
+        sendResponse({ error: err.message });
+      }
+    });
+    return true; // async sendResponse
+  }
+
+  if (msg.type === 'getRestrictions') {
+    chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], (s) => {
+      sendResponse({
+        mode: s.mode || 'auto',
+        lockUrl: !!s.lockUrl,
+        noNewTabs: !!s.noNewTabs,
+        readOnly: !!s.readOnly,
+        instructions: s.userInstructions || '',
+      });
+    });
+    return true; // async sendResponse
+  }
+
   return false;
 });
