@@ -2,6 +2,15 @@
 
 const RELAY_URL_DEFAULT = 'ws://127.0.0.1:19222/extension';
 
+// Auto-generated instruction lines per restriction
+const RESTRICTION_LINES = {
+  lockUrl: '- Do not navigate away from the current page URL. Refreshing is allowed.',
+  noNewTabs: '- Do not create new tabs. Only work with the attached tab(s).',
+  readOnly: '- Do not click, type, or submit forms. Only observe using snapshot/screenshot/evaluate.',
+};
+
+// --- DOM refs ---
+
 const statusEl = document.getElementById('bf-status');
 const statusTextEl = document.getElementById('bf-status-text');
 const relayUrlInput = document.getElementById('bf-relay-url');
@@ -9,17 +18,46 @@ const saveUrlBtn = document.getElementById('bf-save-url');
 const tabCountEl = document.getElementById('bf-tab-count');
 const tabsListEl = document.getElementById('bf-tabs-list');
 const autoTimerEl = document.getElementById('bf-auto-timer');
+const attachBtn = document.getElementById('bf-attach-tab');
+const modeSelect = document.getElementById('bf-mode');
+const lockUrlCb = document.getElementById('bf-lock-url');
+const noNewTabsCb = document.getElementById('bf-no-new-tabs');
+const readOnlyCb = document.getElementById('bf-read-only');
 const autoDetachSelect = document.getElementById('bf-auto-detach');
 const autoCloseSelect = document.getElementById('bf-auto-close');
+const instructionsEl = document.getElementById('bf-instructions');
 
-// Load saved relay URL
-chrome.storage.local.get(['relayUrl', 'autoDetachMinutes', 'autoCloseMinutes'], (result) => {
-  relayUrlInput.value = result.relayUrl || RELAY_URL_DEFAULT;
-  autoDetachSelect.value = String(result.autoDetachMinutes || 0);
-  autoCloseSelect.value = String(result.autoCloseMinutes || 0);
+// --- Tab Navigation ---
+
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
 });
 
-// Save relay URL
+// --- Load Settings ---
+
+const SETTINGS_KEYS = [
+  'relayUrl', 'autoDetachMinutes', 'autoCloseMinutes',
+  'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions',
+];
+
+chrome.storage.local.get(SETTINGS_KEYS, (s) => {
+  relayUrlInput.value = s.relayUrl || RELAY_URL_DEFAULT;
+  autoDetachSelect.value = String(s.autoDetachMinutes || 0);
+  autoCloseSelect.value = String(s.autoCloseMinutes || 0);
+  modeSelect.value = s.mode || 'auto';
+  lockUrlCb.checked = !!s.lockUrl;
+  noNewTabsCb.checked = !!s.noNewTabs;
+  readOnlyCb.checked = !!s.readOnly;
+  instructionsEl.value = s.userInstructions || '';
+});
+
+// --- Save Handlers ---
+
 saveUrlBtn.addEventListener('click', () => {
   const url = relayUrlInput.value.trim();
   if (!url) return;
@@ -27,6 +65,10 @@ saveUrlBtn.addEventListener('click', () => {
     saveUrlBtn.textContent = 'Saved';
     setTimeout(() => { saveUrlBtn.textContent = 'Save'; }, 1200);
   });
+});
+
+modeSelect.addEventListener('change', () => {
+  chrome.storage.local.set({ mode: modeSelect.value });
 });
 
 autoDetachSelect.addEventListener('change', () => {
@@ -37,9 +79,77 @@ autoCloseSelect.addEventListener('change', () => {
   chrome.storage.local.set({ autoCloseMinutes: Number(autoCloseSelect.value) });
 });
 
-// Poll status from background
+// --- Restriction Toggles with Auto-Fill ---
+
+// Separator between auto-generated and user lines
+const AUTO_MARKER = '---';
+
+function updateInstructions() {
+  const autoLines = [];
+  if (lockUrlCb.checked) autoLines.push(RESTRICTION_LINES.lockUrl);
+  if (noNewTabsCb.checked) autoLines.push(RESTRICTION_LINES.noNewTabs);
+  if (readOnlyCb.checked) autoLines.push(RESTRICTION_LINES.readOnly);
+
+  // Extract user lines (everything after the marker, or everything if no marker)
+  const current = instructionsEl.value;
+  const markerIdx = current.indexOf(AUTO_MARKER);
+  const userPart = markerIdx !== -1
+    ? current.slice(markerIdx + AUTO_MARKER.length).trim()
+    : current.trim();
+
+  // Rebuild: auto lines + marker + user lines
+  const parts = [];
+  if (autoLines.length > 0) {
+    parts.push(autoLines.join('\n'));
+    parts.push(AUTO_MARKER);
+  }
+  if (userPart) parts.push(userPart);
+
+  const newValue = parts.join('\n');
+  instructionsEl.value = newValue;
+  chrome.storage.local.set({ userInstructions: newValue });
+}
+
+function onRestrictionToggle() {
+  chrome.storage.local.set({
+    lockUrl: lockUrlCb.checked,
+    noNewTabs: noNewTabsCb.checked,
+    readOnly: readOnlyCb.checked,
+  });
+  updateInstructions();
+}
+
+lockUrlCb.addEventListener('change', onRestrictionToggle);
+noNewTabsCb.addEventListener('change', onRestrictionToggle);
+readOnlyCb.addEventListener('change', onRestrictionToggle);
+
+// Save user edits to instructions (debounced)
+let instrTimeout;
+instructionsEl.addEventListener('input', () => {
+  clearTimeout(instrTimeout);
+  instrTimeout = setTimeout(() => {
+    chrome.storage.local.set({ userInstructions: instructionsEl.value });
+  }, 500);
+});
+
+// --- Attach Current Tab ---
+
+attachBtn.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'attachCurrentTab' }, (response) => {
+    if (chrome.runtime.lastError || !response) {
+      attachBtn.textContent = 'Failed';
+    } else if (response.error) {
+      attachBtn.textContent = response.error;
+    } else {
+      attachBtn.textContent = 'Attached!';
+    }
+    setTimeout(() => { attachBtn.textContent = '+ Attach Current Tab'; }, 1500);
+  });
+});
+
+// --- Status Polling ---
+
 function refreshStatus() {
-  // Use message passing to get state from service worker
   chrome.runtime.sendMessage({ type: 'getStatus' }, (response) => {
     if (chrome.runtime.lastError || !response) {
       setStatus('disconnected', 'Service worker inactive');
@@ -92,6 +202,5 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// Refresh every second while popup is open
 refreshStatus();
 setInterval(refreshStatus, 1000);
