@@ -8,7 +8,7 @@ const relayUrlInput = document.getElementById('bf-relay-url');
 const saveUrlBtn = document.getElementById('bf-save-url');
 const tabCountEl = document.getElementById('bf-tab-count');
 const tabsListEl = document.getElementById('bf-tabs-list');
-const memoryEl = document.getElementById('bf-memory');
+const autoTimerEl = document.getElementById('bf-auto-timer');
 const autoDetachSelect = document.getElementById('bf-auto-detach');
 const autoCloseSelect = document.getElementById('bf-auto-close');
 
@@ -49,7 +49,7 @@ function refreshStatus() {
 
     setStatus(response.connectionState, response.connectionState);
     setTabs(response.tabs || []);
-    setMemory(response.memory);
+    setAutoTimer(response.nextAutoActionSecs);
   });
 }
 
@@ -76,28 +76,14 @@ function setTabs(tabs) {
     .join('');
 }
 
-function setMemory(memory) {
-  if (!memory) {
-    memoryEl.innerHTML = '<span class="memory-na">Not available</span>';
+function setAutoTimer(secs) {
+  if (secs == null) {
+    autoTimerEl.textContent = '';
     return;
   }
-
-  const used = formatBytes(memory.usedJSHeapSize);
-  const total = formatBytes(memory.totalJSHeapSize);
-  const pct = Math.round((memory.usedJSHeapSize / memory.totalJSHeapSize) * 100);
-
-  memoryEl.innerHTML = `
-    <div class="memory-bar-track">
-      <div class="memory-bar-fill" style="width: ${pct}%"></div>
-    </div>
-    <div class="memory-text">${used} / ${total} (${pct}%)</div>
-  `;
-}
-
-function formatBytes(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / 1048576).toFixed(1) + ' MB';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  autoTimerEl.textContent = `${m}:${String(s).padStart(2, '0')}`;
 }
 
 function escapeHtml(str) {

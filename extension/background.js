@@ -572,17 +572,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       });
     }
 
-    // Memory info (Chrome-specific, may return quantized values)
-    let memory = null;
-    if (performance && performance.memory) {
-      memory = {
-        usedJSHeapSize: performance.memory.usedJSHeapSize,
-        totalJSHeapSize: performance.memory.totalJSHeapSize,
-        jsHeapSizeLimit: performance.memory.jsHeapSizeLimit,
-      };
-    }
-
-    sendResponse({ connectionState, tabs, memory });
+    // Compute seconds until next auto-action (detach or close)
+    let nextAutoActionSecs = null;
+    chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) => {
+      const detachMs = (settings.autoDetachMinutes || 0) * 60_000;
+      const closeMs = (settings.autoCloseMinutes || 0) * 60_000;
+      if ((detachMs || closeMs) && tabLastActivity.size > 0) {
+        const now = Date.now();
+        let earliest = Infinity;
+        for (const [tabId, lastActivity] of tabLastActivity) {
+          const limit = (closeMs && agentCreatedTabs.has(tabId)) ? closeMs : detachMs;
+          if (!limit) continue;
+          const remaining = limit - (now - lastActivity);
+          if (remaining < earliest) earliest = remaining;
+        }
+        if (earliest < Infinity) {
+          nextAutoActionSecs = Math.max(0, Math.ceil(earliest / 1000));
+        }
+      }
+      sendResponse({ connectionState, tabs, nextAutoActionSecs });
+    });
+    return true; // async sendResponse
   }
   return false;
 });
