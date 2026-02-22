@@ -2,12 +2,15 @@
   "name": "browserforce",
   "version": "1.0.0",
   "type": "module",
-  "description": "Bridge AI agents to your real Chrome browser via CDP relay",
-  "bin": "./bin.js",
+  "description": "Give AI agents your real Chrome browser — your logins, cookies, and tabs. Works with OpenClaw, Claude, and any MCP agent.",
+  "bin": {
+    "browserforce": "./bin.js"
+  },
   "files": [
     "bin.js",
     "relay/",
-    "mcp/"
+    "mcp/",
+    "skills/"
   ],
   "scripts": {
     "relay": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node relay/src/index.js",
