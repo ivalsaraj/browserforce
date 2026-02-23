@@ -326,12 +326,13 @@ function registerExecuteTool(skillAppendix = '') {
       try {
         const result = await runCode(code, execCtx, timeout);
         const formatted = formatResult(result);
-        // Inject update notice into the first text response of the session (once only)
+        const content = [formatted];
+        // Append update notice as a separate content item (once only per session)
         if (pendingUpdate && !updateNoticeSent && formatted.type === 'text') {
           updateNoticeSent = true;
-          formatted.text += `\n\n[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]`;
+          content.push({ type: 'text', text: `[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]` });
         }
-        return { content: [formatted] };
+        return { content };
       } catch (err) {
         const isTimeout = err instanceof CodeExecutionTimeoutError;
         const hint = isTimeout ? '' : '\n\n[If connection lost, call reset tool to reconnect]';

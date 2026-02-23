@@ -2,6 +2,7 @@ import https from 'node:https';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 export function semverGt(a, b) {
   const pa = a.split('.').map(Number);
@@ -20,46 +21,42 @@ export function semverGt(a, b) {
  * Never throws — all errors resolve to null.
  */
 export async function checkForUpdate() {
+  // package.json is two levels up from mcp/src/
+  const pkgPath = fileURLToPath(new URL('../../package.json', import.meta.url));
+  const current = JSON.parse(readFileSync(pkgPath, 'utf8')).version;
+
+  const cacheDir = join(homedir(), '.browserforce');
+  const cacheFile = join(cacheDir, 'update-check.json');
+
+  // Return cached result if still fresh (< 24 h)
   try {
-    // package.json is two levels up from mcp/src/
-    const pkgPath = new URL('../../package.json', import.meta.url).pathname;
-    const current = JSON.parse(readFileSync(pkgPath, 'utf8')).version;
+    const cached = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    if (Date.now() - cached.checkedAt < 86_400_000) {
+      return semverGt(cached.latest, current) ? { current, latest: cached.latest } : null;
+    }
+  } catch { /* no cache yet, or invalid */ }
 
-    const cacheDir = join(homedir(), '.browserforce');
-    const cacheFile = join(cacheDir, 'update-check.json');
+  // Fetch latest from npm registry — let errors propagate to caller
+  const latest = await new Promise((resolve, reject) => {
+    const req = https.get(
+      'https://registry.npmjs.org/browserforce/latest',
+      { headers: { 'User-Agent': 'browserforce-cli' } },
+      (res) => {
+        if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+        let data = '';
+        res.on('data', d => (data += d));
+        res.on('end', () => { try { resolve(JSON.parse(data).version); } catch { reject(new Error('parse error')); } });
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
+  });
 
-    // Return cached result if still fresh (< 24 h)
-    try {
-      const cached = JSON.parse(readFileSync(cacheFile, 'utf8'));
-      if (Date.now() - cached.checkedAt < 86_400_000) {
-        return semverGt(cached.latest, current) ? { current, latest: cached.latest } : null;
-      }
-    } catch { /* no cache yet, or invalid */ }
+  // Persist to cache
+  try {
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(cacheFile, JSON.stringify({ checkedAt: Date.now(), latest }));
+  } catch { /* ignore cache write errors */ }
 
-    // Fetch latest from npm registry
-    const latest = await new Promise((resolve, reject) => {
-      const req = https.get(
-        'https://registry.npmjs.org/browserforce/latest',
-        { headers: { 'User-Agent': 'browserforce-cli' } },
-        (res) => {
-          if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
-          let data = '';
-          res.on('data', d => (data += d));
-          res.on('end', () => { try { resolve(JSON.parse(data).version); } catch { reject(new Error('parse error')); } });
-        },
-      );
-      req.on('error', reject);
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
-    });
-
-    // Persist to cache
-    try {
-      mkdirSync(cacheDir, { recursive: true });
-      writeFileSync(cacheFile, JSON.stringify({ checkedAt: Date.now(), latest }));
-    } catch { /* ignore cache write errors */ }
-
-    return semverGt(latest, current) ? { current, latest } : null;
-  } catch {
-    return null;
-  }
+  return semverGt(latest, current) ? { current, latest } : null;
 }
