@@ -329,6 +329,42 @@ async function cmdUpdate() {
   console.log(`Updated to ${update.latest}.`);
 }
 
+async function doInstallExtension(quiet) {
+  const { cpSync, mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { homedir } = await import('node:os');
+
+  const pkgDir = dirname(fileURLToPath(import.meta.url));
+  const src = join(pkgDir, 'extension');
+  const dest = process.env.BF_EXT_DIR || join(homedir(), '.browserforce', 'extension');
+
+  mkdirSync(dest, { recursive: true });
+  cpSync(src, dest, { recursive: true });
+
+  // VERSION sentinel — tracks npm package version, NOT manifest.json version (those are separate tracks)
+  const pkgVersion = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version;
+  writeFileSync(join(dest, 'VERSION'), pkgVersion);
+
+  if (!quiet) {
+    console.log(`Extension installed to: ${dest}`);
+    console.log('');
+    console.log('To load in Chrome:');
+    console.log('  1. Open chrome://extensions/');
+    console.log('  2. Enable Developer mode (toggle, top-right)');
+    console.log('  3. Click "Load unpacked" → select:');
+    console.log(`     ${dest}`);
+    console.log('');
+    console.log('❗ After any BrowserForce update, re-run: browserforce install-extension');
+    console.log('   Then reload the extension in chrome://extensions/ (click the ↺ icon).');
+  }
+
+  return { dest, pkgVersion };
+}
+
+async function cmdInstallExtension() {
+  await doInstallExtension(false);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -345,6 +381,7 @@ function cmdHelp() {
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
     browserforce update             Update to the latest version
+    browserforce install-extension  Copy extension to ~/.browserforce/extension/
     browserforce -e "<code>"        Execute Playwright JavaScript (one-shot)
 
   Options:
@@ -373,7 +410,8 @@ function cmdHelp() {
 const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
-  execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate, help: cmdHelp,
+  execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
+  'install-extension': cmdInstallExtension, help: cmdHelp,
 };
 
 const handler = commands[command];
@@ -385,7 +423,7 @@ if (!handler) {
 
 // Start update check in background — skipped for long-running or self-update commands
 const updatePromise = (command !== 'serve' && command !== 'mcp' && command !== 'update')
-  ? checkForUpdate()
+  ? checkForUpdate().catch(() => null)
   : null;
 
 try {

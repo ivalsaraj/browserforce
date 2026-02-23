@@ -198,3 +198,42 @@ describe('CLI plugin commands', () => {
     }
   });
 });
+
+describe('CLI install-extension', () => {
+  let tmpExt;
+
+  before(() => {
+    tmpExt = join(tmpdir(), `bf-ext-${Math.random().toString(36).slice(2)}`);
+  });
+
+  after(() => {
+    rmSync(tmpExt, { recursive: true, force: true });
+  });
+
+  it('install-extension copies extension files and writes VERSION', async () => {
+    const { stdout } = await exec('node', ['bin.js', 'install-extension'], {
+      env: { ...process.env, BF_EXT_DIR: tmpExt },
+    });
+    // Check output
+    assert.ok(stdout.includes('Extension installed to:'));
+    assert.ok(stdout.includes(tmpExt));
+    assert.ok(stdout.includes('Load unpacked'));
+    assert.ok(stdout.includes('❗'));
+    assert.ok(stdout.includes('↺'));
+
+    // Check files were copied
+    const { existsSync, readFileSync } = await import('node:fs');
+    assert.ok(existsSync(join(tmpExt, 'manifest.json')));
+    assert.ok(existsSync(join(tmpExt, 'background.js')));
+
+    // Check VERSION sentinel
+    const version = readFileSync(join(tmpExt, 'VERSION'), 'utf8').trim();
+    const pkgVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
+    assert.equal(version, pkgVersion);
+  });
+
+  it('install-extension is listed in help', async () => {
+    const { stdout } = await exec('node', ['bin.js', 'help']);
+    assert.ok(stdout.includes('install-extension'));
+  });
+});
