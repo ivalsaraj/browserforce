@@ -43,12 +43,14 @@ export async function installPlugin(name, pluginsDir) {
   const entry = registry.plugins?.find(p => p.name === name);
   if (!entry) throw new Error(`Plugin "${name}" not found in registry`);
 
-  const js = await fetchPluginFile(`${BASE_RAW}${entry.file}`, 'BF_TEST_PLUGIN_JS');
+  if (!entry.url) throw new Error(`Plugin "${name}" registry entry missing required field: url`);
 
-  // SHA-256 integrity check (skip if registry entry has null hash — dev/test mode)
-  if (entry.sha256?.js) {
+  const js = await fetchPluginFile(entry.url, 'BF_TEST_PLUGIN_JS');
+
+  // SHA-256 integrity check (skip if registry entry omits sha256 — dev/test mode)
+  if (entry.sha256) {
     const actual = createHash('sha256').update(js).digest('hex');
-    if (actual !== entry.sha256.js) {
+    if (actual !== entry.sha256) {
       throw new Error(`Plugin "${name}" integrity check failed — sha256 mismatch`);
     }
   }
@@ -61,9 +63,9 @@ export async function installPlugin(name, pluginsDir) {
   await writeFile(tmpJs, js);
   await rename(tmpJs, join(destDir, 'index.js'));
 
-  if (entry.skill) {
+  if (entry.skill_url) {
     try {
-      const skill = await fetchPluginFile(`${BASE_RAW}${entry.skill}`, 'BF_TEST_PLUGIN_SKILL');
+      const skill = await fetchPluginFile(entry.skill_url, 'BF_TEST_PLUGIN_SKILL');
       await writeFile(join(destDir, 'SKILL.md'), skill);
     } catch { /* SKILL.md optional */ }
   }

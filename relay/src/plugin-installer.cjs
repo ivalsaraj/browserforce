@@ -29,11 +29,13 @@ async function installPlugin(name, pluginsDir) {
   const entry = registry.plugins?.find(p => p.name === name);
   if (!entry) throw new Error(`Plugin "${name}" not found in registry`);
 
-  const js = await httpsGetRaw(`${BASE_RAW}${entry.file}`);
+  if (!entry.url) throw new Error(`Plugin "${name}" registry entry missing required field: url`);
 
-  if (entry.sha256?.js) {
+  const js = await httpsGetRaw(entry.url);
+
+  if (entry.sha256) {
     const actual = crypto.createHash('sha256').update(js).digest('hex');
-    if (actual !== entry.sha256.js) throw new Error(`Plugin "${name}" integrity check failed`);
+    if (actual !== entry.sha256) throw new Error(`Plugin "${name}" integrity check failed`);
   }
 
   const destDir = path.join(pluginsDir, name);
@@ -43,9 +45,9 @@ async function installPlugin(name, pluginsDir) {
   await writeFile(tmpJs, js);
   await rename(tmpJs, path.join(destDir, 'index.js'));
 
-  if (entry.skill) {
+  if (entry.skill_url) {
     try {
-      const skill = await httpsGetRaw(`${BASE_RAW}${entry.skill}`);
+      const skill = await httpsGetRaw(entry.skill_url);
       await writeFile(path.join(destDir, 'SKILL.md'), skill);
     } catch { /* optional */ }
   }
