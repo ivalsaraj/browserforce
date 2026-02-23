@@ -211,6 +211,36 @@ state.results = await page.evaluate(() => document.title);
 | `screenshot_with_labels` | Take a screenshot with Vimium-style accessibility labels overlaid on interactive elements. |
 | `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
+## Examples
+
+Get started with simple prompts. The AI generates code and does the work.
+
+<details>
+<summary><b>Example 1: Read page content (X.com search)</b></summary>
+
+**Prompt to AI:**
+> Go to x.com/search and search for "browserforce". Show me the top 5 tweets you find.
+
+**What the AI does:** Navigates to X, searches the term, extracts top tweets, returns them to you.
+
+**Use case:** Quick research, trend tracking, social listening.
+
+</details>
+
+<details>
+<summary><b>Example 2: Interact with a form (GitHub search)</b></summary>
+
+**Prompt to AI:**
+> Go to GitHub and search for "ai agents". Show me the top 3 repositories and their star counts.
+
+**What the AI does:** Fills GitHub search, waits for results, extracts repo names + stars, returns them.
+
+**Use case:** Finding libraries, competitive research, project discovery.
+
+</details>
+
+**8+ more examples** available in the [User Guide](GUIDE.md#examples).
+
 ## How It Works
 
 ```
