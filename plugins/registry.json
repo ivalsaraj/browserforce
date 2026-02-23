@@ -5,8 +5,8 @@
       "name": "highlight",
       "description": "Highlight elements on the page using CSS outline",
       "version": "1.0.0",
-      "url": "https://raw.githubusercontent.com/browserforce/plugins/main/highlight/index.js",
-      "skill_url": "https://raw.githubusercontent.com/browserforce/plugins/main/highlight/SKILL.md",
+      "url": "https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/official/highlight/index.js",
+      "skill_url": "https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/official/highlight/SKILL.md",
       "sha256": "d302bd9a0f6e96bd0c7a8666b560e01ab88f9f9e4c4694f14d97019f4cc04424"
     }
   ]
