@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "highlight",
+      "description": "Highlight elements on the page using CSS outline",
+      "version": "1.0.0",
+      "url": "https://raw.githubusercontent.com/browserforce/plugins/main/highlight/index.js",
+      "skill_url": "https://raw.githubusercontent.com/browserforce/plugins/main/highlight/SKILL.md",
+      "sha256": "868bbf48b248f51b97f23161d1f4cd6d22fbfc7a8855fa02f2641b1bc386acbc"
+    }
+  ]
+}
