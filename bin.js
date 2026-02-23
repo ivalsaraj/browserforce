@@ -327,6 +327,21 @@ async function cmdUpdate() {
     process.exit(1);
   }
   console.log(`Updated to ${update.latest}.`);
+
+  // Auto-sync extension if user has previously run install-extension
+  const { readFileSync: readFs } = await import('node:fs');
+  const { join: pathJoin } = await import('node:path');
+  const { homedir: osHomedir } = await import('node:os');
+  const extDir = process.env.BF_EXT_DIR || pathJoin(osHomedir(), '.browserforce', 'extension');
+  try {
+    readFs(pathJoin(extDir, 'VERSION'), 'utf8'); // existence check
+    const { dest } = await doInstallExtension(true);
+    console.log(`Extension updated in ${dest}`);
+    console.log('❗ Reload the extension in chrome://extensions/ (click the ↺ icon).');
+  } catch {
+    // No VERSION file — user hasn't run install-extension yet
+    console.log('Tip: run browserforce install-extension to set up the Chrome extension.');
+  }
 }
 
 async function doInstallExtension(quiet) {

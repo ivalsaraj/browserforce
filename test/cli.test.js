@@ -236,4 +236,19 @@ describe('CLI install-extension', () => {
     const { stdout } = await exec('node', ['bin.js', 'help']);
     assert.ok(stdout.includes('install-extension'));
   });
+
+  it('install-extension replaces stale VERSION with current package version', async () => {
+    const { mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+    // Simulate a previously-installed-but-stale extension
+    mkdirSync(tmpExt, { recursive: true });
+    writeFileSync(join(tmpExt, 'VERSION'), '0.0.1');
+
+    // Re-running install-extension should overwrite VERSION with current version
+    await exec('node', ['bin.js', 'install-extension'], {
+      env: { ...process.env, BF_EXT_DIR: tmpExt },
+    });
+    const version = readFileSync(join(tmpExt, 'VERSION'), 'utf8').trim();
+    const pkgVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
+    assert.equal(version, pkgVersion);
+  });
 });
