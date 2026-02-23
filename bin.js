@@ -42,6 +42,32 @@ function httpGet(url) {
   });
 }
 
+function httpFetch(method, url, body, authToken) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const payload = body ? JSON.stringify(body) : undefined;
+    const req = http.request({
+      hostname: parsed.hostname, port: parsed.port,
+      path: parsed.pathname, method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (d) => (data += d));
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 async function connectBrowser() {
   const { getCdpUrl, ensureRelay } = await import('./mcp/src/exec-engine.js');
   await ensureRelay();
@@ -215,6 +241,69 @@ async function cmdMcp() {
   await import('./mcp/src/index.js');
 }
 
+async function cmdPlugin() {
+  const sub = positionals[1];
+  if (!sub) {
+    console.error('Usage: browserforce plugin <list|install|remove> [name]');
+    process.exit(1);
+  }
+
+  const { getRelayHttpUrl } = await import('./mcp/src/exec-engine.js');
+  let baseUrl;
+  try { baseUrl = getRelayHttpUrl(); } catch { baseUrl = 'http://127.0.0.1:19222'; }
+
+  // Auth token for write endpoints — read from token file
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { homedir } = await import('node:os');
+  const pluginsDir = process.env.BF_PLUGINS_DIR || join(homedir(), '.browserforce', 'plugins');
+  const tokenFile = join(homedir(), '.browserforce', 'auth-token');
+  let authToken = '';
+  try { authToken = readFileSync(tokenFile, 'utf8').trim(); } catch { /* no token file */ }
+
+  if (sub === 'list') {
+    const data = await httpGet(`${baseUrl}/plugins`);
+    if (values.json) {
+      output(data, true);
+    } else {
+      const list = (data && data.plugins) ? data.plugins : [];
+      if (list.length === 0) {
+        console.log('No plugins installed');
+      } else {
+        for (const name of list) console.log(` \u2022 ${name}`);
+      }
+    }
+    return;
+  }
+
+  if (sub === 'install') {
+    const name = positionals[2];
+    if (!name) { console.error('Usage: browserforce plugin install <name>'); process.exit(1); }
+    const { status, body } = await httpFetch('POST', `${baseUrl}/plugins/install`, { name }, authToken);
+    if (status >= 400) {
+      console.error(`Error: ${body.error || JSON.stringify(body)}`);
+      process.exit(1);
+    }
+    output(body, values.json);
+    return;
+  }
+
+  if (sub === 'remove') {
+    const name = positionals[2];
+    if (!name) { console.error('Usage: browserforce plugin remove <name>'); process.exit(1); }
+    const { status, body } = await httpFetch('DELETE', `${baseUrl}/plugins/${encodeURIComponent(name)}`, null, authToken);
+    if (status >= 400) {
+      console.error(`Error: ${body.error || JSON.stringify(body)}`);
+      process.exit(1);
+    }
+    output(body, values.json);
+    return;
+  }
+
+  console.error(`Unknown plugin subcommand: ${sub}`);
+  process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -227,6 +316,9 @@ function cmdHelp() {
     browserforce screenshot [n]     Screenshot tab n (default: 0)
     browserforce snapshot [n]       Accessibility tree of tab n (default: 0)
     browserforce navigate <url>     Open URL in a new tab
+    browserforce plugin list        List installed plugins
+    browserforce plugin install <n> Install a plugin from the registry
+    browserforce plugin remove <n>  Remove an installed plugin
     browserforce -e "<code>"        Execute Playwright JavaScript (one-shot)
 
   Options:
@@ -237,6 +329,8 @@ function cmdHelp() {
   Examples:
     browserforce serve
     browserforce tabs
+    browserforce plugin list
+    browserforce plugin install highlight
     browserforce -e "return await snapshot()"
     browserforce -e "await page.goto('https://github.com'); return await snapshot()"
     browserforce screenshot 0 > page.png
@@ -252,7 +346,7 @@ function cmdHelp() {
 const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
-  execute: cmdExecute, help: cmdHelp,
+  execute: cmdExecute, plugin: cmdPlugin, help: cmdHelp,
 };
 
 const handler = commands[command];

@@ -14,6 +14,7 @@ const PING_INTERVAL_MS = 5000;
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
 const CDP_URL_FILE = path.join(BF_DIR, 'cdp-url');
+const BF_PLUGINS_DIR = path.join(BF_DIR, 'plugins');
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -124,8 +125,9 @@ function syntheticInitResponse(method, target) {
 }
 
 class RelayServer {
-  constructor(port = DEFAULT_PORT) {
+  constructor(port = DEFAULT_PORT, pluginsDir = BF_PLUGINS_DIR) {
     this.port = port;
+    this.pluginsDir = pluginsDir;
     this.authToken = getOrCreateAuthToken();
 
     // Extension connection (single slot)
@@ -158,23 +160,26 @@ class RelayServer {
     this.extWss.on('connection', (ws) => this._onExtConnect(ws));
     this.cdpWss.on('connection', (ws) => this._onCdpConnect(ws));
 
-    server.listen(this.port, '127.0.0.1', () => {
-      const cdpUrl = `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`;
-      if (writeCdpUrl) writeCdpUrlFile(cdpUrl);
-      console.log('');
-      console.log('  BrowserForce');
-      console.log('  ────────────────────────────────────────');
-      console.log(`  Status:   http://127.0.0.1:${this.port}/`);
-      console.log(`  CDP:      ${cdpUrl}`);
-      console.log(`  Config:   ${BF_DIR}/`);
-      console.log('  ────────────────────────────────────────');
-      console.log('');
-      console.log('  Waiting for extension to connect...');
-      console.log('');
-    });
-
     this.server = server;
-    return this;
+
+    return new Promise((resolve) => {
+      server.listen(this.port, '127.0.0.1', () => {
+        this.port = server.address().port;
+        const cdpUrl = `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`;
+        if (writeCdpUrl) writeCdpUrlFile(cdpUrl);
+        console.log('');
+        console.log('  BrowserForce');
+        console.log('  ────────────────────────────────────────');
+        console.log(`  Status:   http://127.0.0.1:${this.port}/`);
+        console.log(`  CDP:      ${cdpUrl}`);
+        console.log(`  Config:   ${BF_DIR}/`);
+        console.log('  ────────────────────────────────────────');
+        console.log('');
+        console.log('  Waiting for extension to connect...');
+        console.log('');
+        resolve({ port: this.port, authToken: this.authToken });
+      });
+    });
   }
 
   // ─── HTTP ────────────────────────────────────────────────────────────────
@@ -230,8 +235,93 @@ class RelayServer {
       return;
     }
 
+    // ─── Plugin Routes ───────────────────────────────────────────────────────
+
+    if (url.pathname === '/plugins' && req.method === 'GET') {
+      try {
+        const entries = fs.existsSync(this.pluginsDir)
+          ? fs.readdirSync(this.pluginsDir, { withFileTypes: true })
+              .filter(d => d.isDirectory())
+              .map(d => d.name)
+          : [];
+        res.end(JSON.stringify({ plugins: entries }));
+      } catch (err) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/plugins/install' && req.method === 'POST') {
+      if (!this._requireAuth(req, res)) return;
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', async () => {
+        try {
+          const { name } = JSON.parse(body);
+          if (!name) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'name required' }));
+            return;
+          }
+          const { installPlugin } = require('./plugin-installer.cjs');
+          await installPlugin(name, this.pluginsDir);
+          res.end(JSON.stringify({ ok: true, plugin: name }));
+        } catch (err) {
+          res.statusCode = 422;
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    const deleteMatch = url.pathname.match(/^\/plugins\/([a-z0-9_-]+)$/);
+    if (deleteMatch && req.method === 'DELETE') {
+      if (!this._requireAuth(req, res)) return;
+      const name = deleteMatch[1];
+      try {
+        const pluginPath = path.join(this.pluginsDir, name);
+        if (!fs.existsSync(pluginPath)) {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: `Plugin "${name}" not installed` }));
+          return;
+        }
+        fs.rmSync(pluginPath, { recursive: true });
+        res.end(JSON.stringify({ ok: true, plugin: name }));
+      } catch (err) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     res.statusCode = 404;
     res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  // ─── Auth Helper ─────────────────────────────────────────────────────────
+
+  _requireAuth(req, res) {
+    // Double gate: Bearer token + Origin restriction.
+    // The relay's /json/version exposes the auth token unauthenticated (required
+    // by Playwright for CDP discovery), so Bearer alone isn't sufficient —
+    // any local browser tab could read the token and call write endpoints.
+    // Restricting Origin to chrome-extension:// closes that vector.
+    const origin = req.headers['origin'] || '';
+    if (origin && !origin.startsWith('chrome-extension://')) {
+      // Origin present but not the extension — reject (CSRF / browser tab attack)
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: 'Forbidden — invalid origin' }));
+      return false;
+    }
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (!token || token !== this.authToken) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ error: 'Unauthorized — Bearer token required' }));
+      return false;
+    }
+    return true;
   }
 
   // ─── WebSocket Upgrade ───────────────────────────────────────────────────

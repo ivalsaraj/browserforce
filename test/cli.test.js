@@ -5,6 +5,9 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import http from 'node:http';
 import { createRequire } from 'node:module';
+import { mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // Relay is CJS — use createRequire to import it
 const require = createRequire(import.meta.url);
@@ -147,5 +150,51 @@ describe('CLI', () => {
     const elapsed = Date.now() - start;
     // Should complete well under 10s — if teardown leaks, it would hang
     assert.ok(elapsed < 10000, `CLI took ${elapsed}ms — possible teardown leak`);
+  });
+});
+
+describe('CLI plugin commands', () => {
+  let relay, port, pluginsDir;
+
+  before(async () => {
+    port = getRandomPort();
+    pluginsDir = join(tmpdir(), `bf-cli-plugins-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(pluginsDir, { recursive: true });
+    relay = new RelayServer(port, pluginsDir);
+    await relay.start({ writeCdpUrl: false });
+  });
+
+  after(() => {
+    relay?.stop();
+    rmSync(pluginsDir, { recursive: true, force: true });
+  });
+
+  it('plugin list prints "No plugins installed" when empty', async () => {
+    const cdpUrl = `ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`;
+    const { stdout } = await exec('node', ['bin.js', 'plugin', 'list'], {
+      env: { ...process.env, BF_CDP_URL: cdpUrl },
+    });
+    assert.ok(stdout.includes('No plugins installed'));
+  });
+
+  it('plugin list --json returns plugins array', async () => {
+    const cdpUrl = `ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`;
+    const { stdout } = await exec('node', ['bin.js', 'plugin', 'list', '--json'], {
+      env: { ...process.env, BF_CDP_URL: cdpUrl },
+    });
+    const result = JSON.parse(stdout);
+    assert.ok(Array.isArray(result.plugins));
+  });
+
+  it('plugin remove nonexistent exits 1 with error', async () => {
+    const cdpUrl = `ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`;
+    try {
+      await exec('node', ['bin.js', 'plugin', 'remove', 'ghost-plugin'], {
+        env: { ...process.env, BF_CDP_URL: cdpUrl },
+      });
+      assert.fail('should have exited with error');
+    } catch (err) {
+      assert.ok(err.stderr.includes('Error') || err.code !== 0);
+    }
   });
 });

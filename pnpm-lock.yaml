@@ -6,7 +6,23 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.12.1
+        version: 1.26.0(zod@3.25.76)
+      diff:
+        specifier: ^8.0.3
+        version: 8.0.3
+      playwright-core:
+        specifier: ^1.52.0
+        version: 1.58.2
+      ws:
+        specifier: ^8.19.0
+        version: 8.19.0
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
 
   mcp:
     dependencies:
@@ -23,11 +39,7 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
 
-  relay:
-    dependencies:
-      ws:
-        specifier: ^8.18.0
-        version: 8.19.0
+  relay: {}
 
 packages:
 
