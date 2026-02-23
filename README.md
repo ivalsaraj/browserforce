@@ -23,6 +23,20 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 | Agent support | Any MCP client | OpenClaw only | Any MCP client | Claude only | **Any MCP client** |
 | Playwright API | Partial | No | Full | No | **Full** |
 
+## Your Credentials Stay Yours
+
+Every other approach asks you to hand over something: an API key, an OAuth token, stored passwords, session cookies in a config file. BrowserForce asks for none of it.
+
+**Why?** Because you're already logged in. BrowserForce talks to your running Chrome — it doesn't extract credentials, store cookies, or replay tokens. The browser handles auth exactly as it always has. Your agent inherits your sessions the same way a new Chrome tab does.
+
+What you never need to provide:
+- No passwords
+- No API keys
+- No OAuth tokens
+- No session cookies in env vars or config files
+
+It's a security win *and* a setup win — there are no secrets to rotate, leak, or manage. Your logins live in Chrome. They stay in Chrome.
+
 ## Setup
 
 ### 1. Install
@@ -153,9 +167,75 @@ browserforce snapshot [n]       # Accessibility tree of tab n
 browserforce screenshot [n]     # Screenshot tab n (PNG to stdout)
 browserforce navigate <url>     # Open URL in a new tab
 browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
+browserforce plugin list        # List installed plugins
+browserforce plugin install <n> # Install a plugin from the registry
+browserforce plugin remove <n>  # Remove an installed plugin
 ```
 
 Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
+
+## Plugins
+
+Plugins add custom helpers directly into the `execute` tool scope. Install once — your agent calls them like built-in functions.
+
+### Install a plugin
+
+```bash
+browserforce plugin install highlight
+```
+
+That's it. Restart MCP (or Claude Desktop) and `highlight()` is available in every `execute` call.
+
+### Official plugins
+
+| Plugin | What it adds | Install |
+|--------|-------------|---------|
+| `highlight` | `highlight(selector, color?)` — outlines matching elements; `clearHighlights()` — removes them | `browserforce plugin install highlight` |
+
+### Use an installed plugin
+
+After installing `highlight`, your agent can call it directly:
+
+```javascript
+// Outline all buttons in blue
+await highlight('button', 'blue');
+
+// Highlight the specific element you're about to click
+await highlight('[data-testid="submit"]', 'red');
+return await screenshotWithAccessibilityLabels();
+```
+
+The helper receives the active page, context, and state automatically — no plumbing needed.
+
+### Manage plugins
+
+```bash
+browserforce plugin list        # See what's installed
+browserforce plugin remove highlight   # Uninstall
+```
+
+Plugins are stored at `~/.browserforce/plugins/`. Each one is a folder with an `index.js`.
+
+### Write your own
+
+```javascript
+// ~/.browserforce/plugins/my-plugin/index.js
+export default {
+  name: 'my-plugin',
+  helpers: {
+    async scrollToBottom(page, ctx, state) {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    },
+    async countLinks(page, ctx, state) {
+      return page.evaluate(() => document.querySelectorAll('a').length);
+    },
+  },
+};
+```
+
+Drop it in `~/.browserforce/plugins/my-plugin/`, restart MCP, and call `await scrollToBottom()` or `await countLinks()` from any `execute` call.
+
+Add a `SKILL.md` file alongside `index.js` and its content is automatically appended to the `execute` tool's description — so your agent knows the helpers exist without you having to explain them every time.
 
 ### Any Playwright Script
 
