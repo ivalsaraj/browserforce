@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import https from 'node:https';
 
 const REGISTRY_URL = 'https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/registry.json';
-const BASE_RAW = 'https://raw.githubusercontent.com/ivalsaraj/browserforce/main/';
 
 function httpsGetRaw(url) {
   return new Promise((resolve, reject) => {
