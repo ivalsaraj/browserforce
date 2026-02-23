@@ -1,12 +1,12 @@
 {
   "name": "browserforce",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "type": "module",
   "description": "Give AI agents your real Chrome browser with progressive examples: simple reads, form interactions, multi-tab workflows, and state persistence. Search X and GitHub, extract ProductHunt data, test forms, compare A/B variants, monitor status pages. Works with OpenClaw, Claude, and any MCP agent.",
   "homepage": "https://github.com/ivalsaraj/browserforce",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ivalsaraj/browserforce.git"
+    "url": "git+https://github.com/ivalsaraj/browserforce.git"
   },
   "license": "MIT",
   "keywords": [
@@ -24,7 +24,7 @@
     "node": ">=18.3.0"
   },
   "bin": {
-    "browserforce": "./bin.js"
+    "browserforce": "bin.js"
   },
   "files": [
     "README.md",
