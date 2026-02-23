@@ -388,10 +388,16 @@ Before opening a PR, verify all of the following:
   "version": "1.0.0",
   "audience": ["developer"],
   "capabilities": ["helpers"],
-  "file": "plugins/community/highlight.js",
-  "readme": "plugins/community/highlight.md"
+  "url": "https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/community/highlight/index.js",
+  "sha256": "abc123...",
+  "skill_url": "https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/community/highlight/SKILL.md"
 }
 ```
+
+> **Field reference**
+> - `url` *(required)* — absolute URL to the plugin JS file; fetched and installed by the plugin installer
+> - `sha256` *(recommended)* — hex SHA-256 of the JS file for integrity verification; omit only in dev/test mode
+> - `skill_url` *(optional)* — absolute URL to a `SKILL.md` Claude skill file bundled with the plugin
 
 ---
 

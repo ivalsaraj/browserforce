@@ -3,6 +3,7 @@
 
 import { parseArgs } from 'node:util';
 import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { checkForUpdate } from './mcp/src/update-check.js';
 
 const { values, positionals } = parseArgs({
@@ -75,7 +76,7 @@ async function connectBrowser() {
   // playwright-core lives in mcp/node_modules (pnpm workspace sub-package).
   // Use createRequire from the mcp package context to locate it, then dynamic-import.
   const { createRequire } = await import('node:module');
-  const mReq = createRequire(new URL('./mcp/src/exec-engine.js', import.meta.url).pathname);
+  const mReq = createRequire(fileURLToPath(new URL('./mcp/src/exec-engine.js', import.meta.url)));
   const pwPath = mReq.resolve('playwright-core');
   const { default: pw } = await import(pwPath);
   const { chromium } = pw;
@@ -308,7 +309,13 @@ async function cmdPlugin() {
 async function cmdUpdate() {
   const { spawnSync } = await import('node:child_process');
   console.log('Checking for updates...');
-  const update = await checkForUpdate();
+  let update;
+  try {
+    update = await checkForUpdate();
+  } catch (err) {
+    console.error(`Update check failed: ${err.message}`);
+    return;
+  }
   if (!update) {
     console.log('Already up to date.');
     return;
