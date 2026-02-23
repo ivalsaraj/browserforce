@@ -9,12 +9,13 @@ test('installPlugin writes index.js and SKILL.md to dest dir', async (t) => {
   // We test with a mock fetch — patch global fetch
   const dir = await mkdtemp(join(tmpdir(), 'bf-install-test-'));
 
+  // Registry schema matches registry.json: url/skill_url/sha256 (flat string)
   const fakeRegistry = {
     plugins: [{
       name: 'testplugin',
-      file: 'plugins/official/testplugin/index.js',
-      skill: 'plugins/official/testplugin/SKILL.md',
-      sha256: { js: null }, // null = skip hash check in test mode
+      url: 'https://example.com/plugins/testplugin/index.js',
+      skill_url: 'https://example.com/plugins/testplugin/SKILL.md',
+      sha256: null, // null = skip integrity check in test mode
     }]
   };
 
