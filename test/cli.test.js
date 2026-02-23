@@ -260,7 +260,7 @@ describe('CLI install-extension', () => {
 
     const warning = await new Promise((resolve, reject) => {
       const child = spawn('node', ['bin.js', 'serve'], {
-        env: { ...process.env, BF_EXT_DIR: staleDir },
+        env: { ...process.env, BF_EXT_DIR: staleDir, RELAY_PORT: String(getRandomPort()) },
       });
       let stderr = '';
       const timer = setTimeout(() => {
@@ -294,7 +294,7 @@ describe('CLI install-extension', () => {
 
     const result = await new Promise((resolve) => {
       const child = spawn('node', ['bin.js', 'serve'], {
-        env: { ...process.env, BF_EXT_DIR: freshDir },
+        env: { ...process.env, BF_EXT_DIR: freshDir, RELAY_PORT: String(getRandomPort()) },
       });
       let stderr = '';
       // Give it 1.5s to produce any warning, then declare "no warning"

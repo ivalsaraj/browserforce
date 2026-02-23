@@ -182,6 +182,8 @@ browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
 browserforce plugin list        # List installed plugins
 browserforce plugin install <n> # Install a plugin from the registry
 browserforce plugin remove <n>  # Remove an installed plugin
+browserforce update             # Update to the latest version
+browserforce install-extension  # Copy extension to ~/.browserforce/extension/
 ```
 
 Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.

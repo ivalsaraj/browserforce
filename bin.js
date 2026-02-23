@@ -349,19 +349,19 @@ async function cmdUpdate() {
   const { join: pathJoin } = await import('node:path');
   const { homedir: osHomedir } = await import('node:os');
   const extDir = process.env.BF_EXT_DIR || pathJoin(osHomedir(), '.browserforce', 'extension');
-  try {
-    readFs(pathJoin(extDir, 'VERSION'), 'utf8'); // existence check
+  let hasVersion = false;
+  try { readFs(pathJoin(extDir, 'VERSION'), 'utf8'); hasVersion = true; } catch { /* not installed */ }
+  if (hasVersion) {
     const { dest } = await doInstallExtension(true);
     console.log(`Extension updated in ${dest}`);
     console.log('❗ Reload the extension in chrome://extensions/ (click the ↺ icon).');
-  } catch {
-    // No VERSION file — user hasn't run install-extension yet
+  } else {
     console.log('Tip: run browserforce install-extension to set up the Chrome extension.');
   }
 }
 
 async function doInstallExtension(quiet) {
-  const { cpSync, mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { cpSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } = await import('node:fs');
   const { join, dirname } = await import('node:path');
   const { homedir } = await import('node:os');
 
@@ -369,6 +369,11 @@ async function doInstallExtension(quiet) {
   const src = join(pkgDir, 'extension');
   const dest = process.env.BF_EXT_DIR || join(homedir(), '.browserforce', 'extension');
 
+  if (!existsSync(src)) {
+    throw new Error(`Extension source not found at ${src}.\nIs browserforce installed via npm? Try: npm install -g browserforce`);
+  }
+
+  rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
   cpSync(src, dest, { recursive: true });
 
