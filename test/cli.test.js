@@ -251,4 +251,62 @@ describe('CLI install-extension', () => {
     const pkgVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
     assert.equal(version, pkgVersion);
   });
+
+  it('serve warns when extension VERSION is outdated', async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const staleDir = join(tmpdir(), `bf-ext-stale-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(staleDir, { recursive: true });
+    writeFileSync(join(staleDir, 'VERSION'), '0.0.1'); // intentionally stale
+
+    const warning = await new Promise((resolve, reject) => {
+      const child = spawn('node', ['bin.js', 'serve'], {
+        env: { ...process.env, BF_EXT_DIR: staleDir },
+      });
+      let stderr = '';
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error('serve timed out without producing stderr'));
+      }, 5000);
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+        if (stderr.includes('❗')) {
+          clearTimeout(timer);
+          child.kill('SIGKILL');
+          resolve(stderr);
+        }
+      });
+      child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    });
+
+    assert.ok(warning.includes('outdated'));
+    assert.ok(warning.includes('install-extension'));
+    assert.ok(warning.includes('❗'));
+
+    rmSync(staleDir, { recursive: true, force: true });
+  });
+
+  it('serve does NOT warn when VERSION matches current package', async () => {
+    const { mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+    const freshDir = join(tmpdir(), `bf-ext-fresh-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(freshDir, { recursive: true });
+    const currentVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
+    writeFileSync(join(freshDir, 'VERSION'), currentVersion);
+
+    const result = await new Promise((resolve) => {
+      const child = spawn('node', ['bin.js', 'serve'], {
+        env: { ...process.env, BF_EXT_DIR: freshDir },
+      });
+      let stderr = '';
+      // Give it 1.5s to produce any warning, then declare "no warning"
+      setTimeout(() => {
+        child.kill('SIGKILL');
+        resolve(stderr);
+      }, 1500);
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    });
+
+    assert.ok(!result.includes('outdated'), `Unexpected warning: ${result}`);
+
+    rmSync(freshDir, { recursive: true, force: true });
+  });
 });
