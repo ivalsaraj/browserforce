@@ -3,7 +3,7 @@
 
 import { parseArgs } from 'node:util';
 import http from 'node:http';
-import https from 'node:https';
+import { checkForUpdate } from './mcp/src/update-check.js';
 
 const { values, positionals } = parseArgs({
   options: {
@@ -67,61 +67,6 @@ function httpFetch(method, url, body, authToken) {
     if (payload) req.write(payload);
     req.end();
   });
-}
-
-// ─── Update Notifier ────────────────────────────────────────────────────────
-
-function semverGt(a, b) {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return true;
-    if ((pa[i] || 0) < (pb[i] || 0)) return false;
-  }
-  return false;
-}
-
-async function checkForUpdate() {
-  try {
-    const { readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const { homedir } = await import('node:os');
-
-    const current = JSON.parse(readFileSync(new URL('./package.json', import.meta.url).pathname, 'utf8')).version;
-    const cacheDir = join(homedir(), '.browserforce');
-    const cacheFile = join(cacheDir, 'update-check.json');
-
-    // Return cached result if fresh (< 24 h)
-    try {
-      const cached = JSON.parse(readFileSync(cacheFile, 'utf8'));
-      if (Date.now() - cached.checkedAt < 86_400_000) {
-        return semverGt(cached.latest, current) ? { current, latest: cached.latest } : null;
-      }
-    } catch { /* no cache yet */ }
-
-    // Fetch latest version from npm registry
-    const latest = await new Promise((resolve, reject) => {
-      const req = https.get(
-        'https://registry.npmjs.org/browserforce/latest',
-        { headers: { 'User-Agent': 'browserforce-cli' } },
-        (res) => {
-          if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
-          let data = '';
-          res.on('data', d => (data += d));
-          res.on('end', () => { try { resolve(JSON.parse(data).version); } catch { reject(new Error('parse error')); } });
-        },
-      );
-      req.on('error', reject);
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
-    });
-
-    // Persist cache
-    try { mkdirSync(cacheDir, { recursive: true }); writeFileSync(cacheFile, JSON.stringify({ checkedAt: Date.now(), latest })); } catch { /* ignore */ }
-
-    return semverGt(latest, current) ? { current, latest } : null;
-  } catch {
-    return null;
-  }
 }
 
 async function connectBrowser() {
@@ -360,6 +305,23 @@ async function cmdPlugin() {
   process.exit(1);
 }
 
+async function cmdUpdate() {
+  const { spawnSync } = await import('node:child_process');
+  console.log('Checking for updates...');
+  const update = await checkForUpdate();
+  if (!update) {
+    console.log('Already up to date.');
+    return;
+  }
+  console.log(`Updating ${update.current} → ${update.latest}...`);
+  const result = spawnSync('npm', ['install', '-g', 'browserforce'], { stdio: 'inherit' });
+  if (result.status !== 0) {
+    console.error('Update failed. Run manually: npm install -g browserforce');
+    process.exit(1);
+  }
+  console.log(`Updated to ${update.latest}.`);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -375,6 +337,7 @@ function cmdHelp() {
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
+    browserforce update             Update to the latest version
     browserforce -e "<code>"        Execute Playwright JavaScript (one-shot)
 
   Options:
@@ -387,6 +350,7 @@ function cmdHelp() {
     browserforce tabs
     browserforce plugin list
     browserforce plugin install highlight
+    browserforce update
     browserforce -e "return await snapshot()"
     browserforce -e "await page.goto('https://github.com'); return await snapshot()"
     browserforce screenshot 0 > page.png
@@ -402,7 +366,7 @@ function cmdHelp() {
 const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
-  execute: cmdExecute, plugin: cmdPlugin, help: cmdHelp,
+  execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate, help: cmdHelp,
 };
 
 const handler = commands[command];
@@ -412,8 +376,8 @@ if (!handler) {
   process.exit(1);
 }
 
-// Start update check in background — skipped for long-running commands
-const updatePromise = (command !== 'serve' && command !== 'mcp')
+// Start update check in background — skipped for long-running or self-update commands
+const updatePromise = (command !== 'serve' && command !== 'mcp' && command !== 'update')
   ? checkForUpdate()
   : null;
 

@@ -11,6 +11,7 @@ import {
 } from './exec-engine.js';
 import { screenshotWithLabels } from './a11y-labels.js';
 import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
+import { checkForUpdate } from './update-check.js';
 
 // ─── Console Log Capture ─────────────────────────────────────────────────────
 
@@ -106,6 +107,12 @@ let userState = {};
 
 let plugins = [];
 let pluginHelpers = {};
+
+// ─── Update State ────────────────────────────────────────────────────────────
+// Checked once at startup; notice injected into first execute response only.
+
+let pendingUpdate = null;    // { current, latest } or null
+let updateNoticeSent = false;
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
 
@@ -319,6 +326,11 @@ function registerExecuteTool(skillAppendix = '') {
       try {
         const result = await runCode(code, execCtx, timeout);
         const formatted = formatResult(result);
+        // Inject update notice into the first text response of the session (once only)
+        if (pendingUpdate && !updateNoticeSent && formatted.type === 'text') {
+          updateNoticeSent = true;
+          formatted.text += `\n\n[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]`;
+        }
         return { content: [formatted] };
       } catch (err) {
         const isTimeout = err instanceof CodeExecutionTimeoutError;
@@ -452,6 +464,9 @@ async function initPlugins() {
 async function main() {
   await initPlugins();
   registerExecuteTool(buildPluginSkillAppendix(plugins));
+
+  // Fire update check in background — result stored in pendingUpdate for execute handler
+  checkForUpdate().then(info => { pendingUpdate = info; }).catch(() => {});
 
   try {
     await ensureBrowser();
