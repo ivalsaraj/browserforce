@@ -10,6 +10,7 @@ import {
   getCdpUrl, ensureRelay, CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
 import { screenshotWithLabels } from './a11y-labels.js';
+import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
 
 // ─── Console Log Capture ─────────────────────────────────────────────────────
 
@@ -100,6 +101,11 @@ function getPages() {
 // ─── Persistent State ────────────────────────────────────────────────────────
 
 let userState = {};
+
+// ─── Plugin State ────────────────────────────────────────────────────────────
+
+let plugins = [];
+let pluginHelpers = {};
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
 
@@ -291,38 +297,40 @@ state
   Persistent object — survives across execute calls. Cleared on reset.
   Use state.page, state.data, state.anything to preserve working state.`;
 
-server.tool(
-  'execute',
-  EXECUTE_PROMPT,
-  {
-    code: z.string().describe('JavaScript to run — page/context/state/snapshot/waitForPageLoad/getLogs in scope'),
-    timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
-  },
-  async ({ code, timeout = 30000 }) => {
-    await ensureBrowser();
-    ensureAllPagesCapture();
-    const ctx = getContext();
-    const pages = ctx.pages();
-    const page = pages[0] || null;
+function registerExecuteTool(skillAppendix = '') {
+  server.tool(
+    'execute',
+    EXECUTE_PROMPT + skillAppendix,
+    {
+      code: z.string().describe('JavaScript to run — page/context/state/snapshot/waitForPageLoad/getLogs in scope'),
+      timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
+    },
+    async ({ code, timeout = 30000 }) => {
+      await ensureBrowser();
+      ensureAllPagesCapture();
+      const ctx = getContext();
+      const pages = ctx.pages();
+      const page = pages[0] || null;
 
-    if (page) setupConsoleCapture(page);
-    const execCtx = buildExecContext(page, ctx, userState, {
-      consoleLogs, setupConsoleCapture,
-    });
-    try {
-      const result = await runCode(code, execCtx, timeout);
-      const formatted = formatResult(result);
-      return { content: [formatted] };
-    } catch (err) {
-      const isTimeout = err instanceof CodeExecutionTimeoutError;
-      const hint = isTimeout ? '' : '\n\n[If connection lost, call reset tool to reconnect]';
-      return {
-        content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
-        isError: true,
-      };
+      if (page) setupConsoleCapture(page);
+      const execCtx = buildExecContext(page, ctx, userState, {
+        consoleLogs, setupConsoleCapture,
+      }, pluginHelpers);
+      try {
+        const result = await runCode(code, execCtx, timeout);
+        const formatted = formatResult(result);
+        return { content: [formatted] };
+      } catch (err) {
+        const isTimeout = err instanceof CodeExecutionTimeoutError;
+        const hint = isTimeout ? '' : '\n\n[If connection lost, call reset tool to reconnect]';
+        return {
+          content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
+          isError: true,
+        };
+      }
     }
-  }
-);
+  );
+}
 
 server.tool(
   'reset',
@@ -425,9 +433,26 @@ server.tool(
   }
 );
 
+// ─── Plugin Init ─────────────────────────────────────────────────────────────
+
+async function initPlugins() {
+  try {
+    plugins = await loadPlugins();
+    pluginHelpers = buildPluginHelpers(plugins);
+    if (plugins.length > 0) {
+      process.stderr.write(`[bf-mcp] Loaded ${plugins.length} plugin(s): ${plugins.map(p => p.name).join(', ')}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`[bf-mcp] Plugin load error: ${err.message}\n`);
+  }
+}
+
 // ─── Start Server ────────────────────────────────────────────────────────────
 
 async function main() {
+  await initPlugins();
+  registerExecuteTool(buildPluginSkillAppendix(plugins));
+
   try {
     await ensureBrowser();
     process.stderr.write('[bf-mcp] Connected to relay\n');
