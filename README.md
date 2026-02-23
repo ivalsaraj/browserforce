@@ -55,10 +55,22 @@ pnpm install
 
 ### 2. Load the Chrome extension
 
+**If you installed via npm:**
+
+1. Run: `browserforce install-extension`
+2. Open `chrome://extensions/` in Chrome
+3. Enable **Developer mode** (top-right toggle)
+4. Click **Load unpacked** → select the path printed in step 1
+
+❗ After every BrowserForce update, re-run `browserforce install-extension`, then reload the extension in `chrome://extensions/` (click the ↺ icon next to BrowserForce).
+
+**If you cloned the repo:**
+
 1. Open `chrome://extensions/` in Chrome
 2. Enable **Developer mode** (top-right toggle)
 3. Click **Load unpacked** → select the `extension/` folder
-4. Extension icon appears in your toolbar (gray = disconnected)
+
+After loading, the extension icon appears in your toolbar (gray = disconnected).
 
 ### 3. Done
 
@@ -79,7 +91,7 @@ Most OpenClaw users chat with their agent from Telegram or WhatsApp. BrowserForc
 **Quick setup** (copy-paste into your terminal):
 
 ```bash
-npm install -g browserforce && npx -y skills add ivalsaraj/browserforce
+npm install -g browserforce && browserforce install-extension && npx -y skills add ivalsaraj/browserforce
 ```
 
 Then start the relay (keep this running):
