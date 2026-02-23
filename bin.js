@@ -3,6 +3,7 @@
 
 import { parseArgs } from 'node:util';
 import http from 'node:http';
+import https from 'node:https';
 
 const { values, positionals } = parseArgs({
   options: {
@@ -66,6 +67,61 @@ function httpFetch(method, url, body, authToken) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+// ─── Update Notifier ────────────────────────────────────────────────────────
+
+function semverGt(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true;
+    if ((pa[i] || 0) < (pb[i] || 0)) return false;
+  }
+  return false;
+}
+
+async function checkForUpdate() {
+  try {
+    const { readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+
+    const current = JSON.parse(readFileSync(new URL('./package.json', import.meta.url).pathname, 'utf8')).version;
+    const cacheDir = join(homedir(), '.browserforce');
+    const cacheFile = join(cacheDir, 'update-check.json');
+
+    // Return cached result if fresh (< 24 h)
+    try {
+      const cached = JSON.parse(readFileSync(cacheFile, 'utf8'));
+      if (Date.now() - cached.checkedAt < 86_400_000) {
+        return semverGt(cached.latest, current) ? { current, latest: cached.latest } : null;
+      }
+    } catch { /* no cache yet */ }
+
+    // Fetch latest version from npm registry
+    const latest = await new Promise((resolve, reject) => {
+      const req = https.get(
+        'https://registry.npmjs.org/browserforce/latest',
+        { headers: { 'User-Agent': 'browserforce-cli' } },
+        (res) => {
+          if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+          let data = '';
+          res.on('data', d => (data += d));
+          res.on('end', () => { try { resolve(JSON.parse(data).version); } catch { reject(new Error('parse error')); } });
+        },
+      );
+      req.on('error', reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
+    });
+
+    // Persist cache
+    try { mkdirSync(cacheDir, { recursive: true }); writeFileSync(cacheFile, JSON.stringify({ checkedAt: Date.now(), latest })); } catch { /* ignore */ }
+
+    return semverGt(latest, current) ? { current, latest } : null;
+  } catch {
+    return null;
+  }
 }
 
 async function connectBrowser() {
@@ -356,9 +412,22 @@ if (!handler) {
   process.exit(1);
 }
 
+// Start update check in background — skipped for long-running commands
+const updatePromise = (command !== 'serve' && command !== 'mcp')
+  ? checkForUpdate()
+  : null;
+
 try {
   await handler();
 } catch (err) {
   console.error(`Error: ${err.message}`);
   process.exit(1);
+}
+
+// Show update notice after command finishes (wait at most 500 ms)
+if (updatePromise) {
+  const update = await Promise.race([updatePromise, new Promise(r => setTimeout(r, 500, null))]);
+  if (update) {
+    process.stderr.write(`\n  Update available: ${update.current} → ${update.latest}\n  Run: npm install -g browserforce\n\n`);
+  }
 }
