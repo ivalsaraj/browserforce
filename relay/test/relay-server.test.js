@@ -146,6 +146,100 @@ describe('HTTP Endpoints', () => {
   });
 });
 
+// ─── Plugin Endpoints ────────────────────────────────────────────────────────
+
+describe('Plugin API Endpoints', () => {
+  let relay, port, pluginsDir;
+
+  before(async () => {
+    port = getRandomPort();
+    pluginsDir = path.join(os.tmpdir(), `bf-plugins-test-${crypto.randomBytes(4).toString('hex')}`);
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    relay = new RelayServer(port, pluginsDir);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+    fs.rmSync(pluginsDir, { recursive: true, force: true });
+  });
+
+  function httpRequest(method, url, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+      const opts = new URL(url);
+      const payload = body ? JSON.stringify(body) : undefined;
+      const req = http.request({
+        hostname: opts.hostname, port: opts.port,
+        path: opts.pathname, method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+          ...headers,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', c => { data += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode, body: data }); }
+        });
+      });
+      req.on('error', reject);
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }
+
+  it('GET /plugins returns empty list when no plugins installed', async () => {
+    const { status, body } = await httpRequest('GET', `http://127.0.0.1:${port}/plugins`);
+    assert.equal(status, 200);
+    assert.deepEqual(body, { plugins: [] });
+  });
+
+  it('GET /plugins returns installed plugin names', async () => {
+    fs.mkdirSync(path.join(pluginsDir, 'my-plugin'), { recursive: true });
+    const { status, body } = await httpRequest('GET', `http://127.0.0.1:${port}/plugins`);
+    assert.equal(status, 200);
+    assert.ok(body.plugins.includes('my-plugin'));
+    fs.rmSync(path.join(pluginsDir, 'my-plugin'), { recursive: true });
+  });
+
+  it('POST /plugins/install requires Bearer token', async () => {
+    const { status, body } = await httpRequest('POST', `http://127.0.0.1:${port}/plugins/install`, { name: 'test' });
+    assert.equal(status, 401);
+    assert.ok(body.error.includes('Unauthorized'));
+  });
+
+  it('DELETE /plugins/:name requires Bearer token', async () => {
+    const { status } = await httpRequest('DELETE', `http://127.0.0.1:${port}/plugins/test`, null, {});
+    assert.equal(status, 401);
+  });
+
+  it('DELETE /plugins/:name returns 404 for non-existent plugin', async () => {
+    const { status, body } = await httpRequest('DELETE', `http://127.0.0.1:${port}/plugins/ghost`, null, {
+      Authorization: `Bearer ${relay.authToken}`,
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(status, 404);
+    assert.ok(body.error.includes('"ghost"'));
+  });
+
+  it('DELETE /plugins/:name removes installed plugin dir', async () => {
+    const pluginPath = path.join(pluginsDir, 'to-remove');
+    fs.mkdirSync(pluginPath, { recursive: true });
+    fs.writeFileSync(path.join(pluginPath, 'index.js'), 'module.exports = {};');
+
+    const { status, body } = await httpRequest('DELETE', `http://127.0.0.1:${port}/plugins/to-remove`, null, {
+      Authorization: `Bearer ${relay.authToken}`,
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(fs.existsSync(pluginPath), false);
+  });
+});
+
 // ─── WebSocket Security ──────────────────────────────────────────────────────
 
 describe('WebSocket Security', () => {
