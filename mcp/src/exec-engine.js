@@ -198,6 +198,7 @@ export async function smartWaitForPageLoad(page, timeout, pollInterval = 100, mi
 // computed accessible names. Supports Shadow DOM (open roots).
 
 export async function getAccessibilityTree(page, rootSelector) {
+  if (!page || typeof page.evaluate !== 'function') return null;
   return page.evaluate((sel) => {
     function getRole(el) {
       if (el.nodeType !== 1) return null;
@@ -403,7 +404,7 @@ export class CodeExecutionTimeoutError extends Error {
 
 // buildExecContext takes userState and optional console helpers as params
 // instead of referencing module-level singletons.
-export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {}) {
+export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {}, pluginHelpers = {}) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
 
   const activePage = () => {
@@ -443,7 +444,18 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     if (consoleLogs) consoleLogs.set(activePage(), []);
   };
 
+  // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
+  const wrappedPluginHelpers = {};
+  for (const [name, fn] of Object.entries(pluginHelpers)) {
+    wrappedPluginHelpers[name] = (...args) => {
+      let pg = null;
+      try { pg = activePage(); } catch { /* no active page */ }
+      return fn(pg, ctx, userState, ...args);
+    };
+  }
+
   return {
+    ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     page: defaultPage, context: ctx, state: userState,
     snapshot, waitForPageLoad, getLogs, clearLogs,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
