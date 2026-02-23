@@ -231,6 +231,22 @@ async function cmdExecute() {
 }
 
 async function cmdServe() {
+  // Warn if installed extension is outdated vs current package
+  try {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { homedir } = await import('node:os');
+    const pkgDir = dirname(fileURLToPath(import.meta.url));
+    const pkgVersion = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version;
+    const extDir = process.env.BF_EXT_DIR || join(homedir(), '.browserforce', 'extension');
+    const installedVersion = readFileSync(join(extDir, 'VERSION'), 'utf8').trim();
+    if (installedVersion !== pkgVersion) {
+      process.stderr.write(`⚠  Extension is outdated (installed: ${installedVersion}, current: ${pkgVersion}).\n`);
+      process.stderr.write(`   Run: browserforce install-extension\n`);
+      process.stderr.write(`❗ Then reload the extension in chrome://extensions/ (click the ↺ icon).\n\n`);
+    }
+  } catch { /* no VERSION file — git clone or first install; skip */ }
+
   const { RelayServer } = await import('./relay/src/index.js');
   const port = parseInt(process.env.RELAY_PORT || positionals[1] || '19222', 10);
   const relay = new RelayServer(port);
