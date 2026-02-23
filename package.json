@@ -27,6 +27,7 @@
     "browserforce": "./bin.js"
   },
   "files": [
+    "README.md",
     "bin.js",
     "relay/src/",
     "relay/package.json",
