@@ -222,6 +222,134 @@ When connected via MCP (OpenClaw, Claude Desktop, Claude Code), the AI has three
 
 The `execute` tool gives the agent full Playwright access — it can navigate, click, type, screenshot, read accessibility trees, and run JavaScript in the page context. All within your real browser session.
 
+## Examples
+
+These prompts show how 10x users work with BrowserForce. The AI generates the code and handles the work — you just describe what you need.
+
+### Foundation: Simple, Single-Tab
+
+<details>
+<summary><b>Example 1: Read page content</b></summary>
+
+**Prompt to AI:**
+> Go to x.com/search and search for "browserforce". Show me the top 5 tweets you find.
+
+**What the AI does:** Navigates to X, searches the term, extracts top tweets, returns them to you.
+
+**Use case:** Quick research, trend tracking, social listening.
+
+</details>
+
+<details>
+<summary><b>Example 2: Interact with a form</b></summary>
+
+**Prompt to AI:**
+> Go to GitHub and search for "ai agents". Show me the top 3 repositories and their star counts.
+
+**What the AI does:** Fills GitHub search, waits for results, extracts repo names + stars, returns them.
+
+**Use case:** Finding libraries, competitive research, project discovery.
+
+</details>
+
+### Multi-Tab Workflows: Coordination + State
+
+<details>
+<summary><b>Example 3: Search → Extract → Return</b></summary>
+
+**Prompt to AI:**
+> Search ProductHunt for "AI tools" and give me the top 5 products with their taglines and upvote counts.
+
+**What the AI does:** Navigates ProductHunt, searches, extracts product info, returns structured data.
+
+**Use case:** Market research, finding tools, competitive analysis.
+
+</details>
+
+<details>
+<summary><b>Example 4: Open result in new tab, process there</b></summary>
+
+**Prompt to AI:**
+> Find the #1 product from your last ProductHunt search, click into it, and read the full description. Tell me what it does.
+
+**What the AI does:** Opens the product page from previous results, reads the description, summarizes it.
+
+**Use case:** Deep-dive research, understanding competitors, due diligence.
+
+</details>
+
+<details>
+<summary><b>Example 5: Debugging workflow (inspect + verify)</b></summary>
+
+**Prompt to AI:**
+> Go to my staging site at staging.myapp.com/checkout and take a labeled screenshot. Tell me if the "Complete Purchase" button is visible and what's around it.
+
+**What the AI does:** Navigates, takes screenshot with interactive labels, analyzes button state and layout.
+
+**Use case:** Visual debugging, QA checks, spotting broken elements.
+
+</details>
+
+<details>
+<summary><b>Example 6: Test form with data</b></summary>
+
+**Prompt to AI:**
+> Sign up for Substack using the email test.user@example.com. Tell me if the signup completes successfully.
+
+**What the AI does:** Fills the form, submits, waits for confirmation, reports success/failure.
+
+**Use case:** Testing sign-up flows, QA automation, form validation.
+
+</details>
+
+<details>
+<summary><b>Example 7: Content pipeline (search → extract → compare)</b></summary>
+
+**Prompt to AI:**
+> Search for "AI regulation" on both X.com and LinkedIn. Give me the top 5 trending posts from each and tell me which topics overlap.
+
+**What the AI does:** Searches both platforms, extracts posts, compares content, returns analysis.
+
+**Use case:** Multi-source research, trend analysis, market sentiment.
+
+</details>
+
+<details>
+<summary><b>Example 8: Data extraction → CSV pipeline</b></summary>
+
+**Prompt to AI:**
+> Go to Hacker News and extract the top 10 stories with their titles and vote counts. Format as CSV so I can import into a spreadsheet.
+
+**What the AI does:** Navigates HN, extracts story data, formats as CSV, returns it ready to paste.
+
+**Use case:** Data workflows, trend tracking, content curation.
+
+</details>
+
+<details>
+<summary><b>Example 9: A/B testing across variants</b></summary>
+
+**Prompt to AI:**
+> Visit myapp.com/?variant=red and myapp.com/?variant=blue. Compare the two designs and tell me which button color is more prominent and what other differences exist.
+
+**What the AI does:** Opens both variants, compares layouts/colors/text, reports visual differences.
+
+**Use case:** Design QA, A/B testing, variant comparison.
+
+</details>
+
+<details>
+<summary><b>Example 10: Monitor + alert workflow</b></summary>
+
+**Prompt to AI:**
+> Check our status page at status.myapp.com every few minutes. Tell me the current status of the API and database. Alert me if anything changes from green to red.
+
+**What the AI does:** Monitors status page, reads indicators, alerts on degradation.
+
+**Use case:** Uptime monitoring, incident detection, SLA tracking.
+
+</details>
+
 ## Security
 
 - **Local only** — The relay server binds to `127.0.0.1`. Nothing is exposed to the network.
