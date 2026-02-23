@@ -46,8 +46,8 @@
     "relay": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node relay/src/index.js",
     "relay:dev": "lsof -ti tcp:19222 | xargs kill -9 2>/dev/null; sleep 0.3; node --watch relay/src/index.js",
     "mcp": "node mcp/src/index.js",
-    "test": "node --test relay/test/relay-server.test.js && node --test mcp/test/mcp-tools.test.js && node --test test/cli.test.js",
+    "test": "node --test relay/test/relay-server.test.js && node --test mcp/test/mcp-tools.test.js && node --test mcp/test/plugin-loader.test.js && node --test mcp/test/plugin-installer.test.js && node --test mcp/test/exec-engine-plugins.test.js && node --test mcp/test/mcp-plugin-integration.test.js && node --test test/cli.test.js",
     "test:relay": "node --test relay/test/relay-server.test.js",
-    "test:mcp": "node --test mcp/test/mcp-tools.test.js"
+    "test:mcp": "node --test mcp/test/mcp-tools.test.js && node --test mcp/test/plugin-loader.test.js && node --test mcp/test/plugin-installer.test.js && node --test mcp/test/exec-engine-plugins.test.js && node --test mcp/test/mcp-plugin-integration.test.js"
   }
 }
