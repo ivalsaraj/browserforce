@@ -323,6 +323,89 @@ Need concrete persona-based workflows? See [Actionable Use Cases](docs/USE_CASES
 
 The `execute` tool gives the agent full Playwright access — it can navigate, click, type, screenshot, read accessibility trees, and run JavaScript in the page context. All within your real browser session.
 
+### BrowserForce Tab Swarms // Parallel Tabs Processing
+
+Use this for read-only count/list/extraction tasks where each target is independent (different pages, dates, or items).
+
+- Start parallel-first with `Promise.all` and a concurrency cap (`3-8`, usually start at `5`).
+- If you hit `429`, anti-bot pages, or repeated timeout failures, automatically retry with reduced concurrency.
+- If reduced concurrency still fails, fall back to sequential processing.
+- Return telemetry on every swarm run: `peakConcurrentTasks`, `wallClockMs`, `sumTaskDurationsMs`, `failures`, `retries`.
+
+Example execute pattern:
+
+```javascript
+const items = state.items ?? [];
+const startedAt = Date.now();
+let peakConcurrentTasks = 0;
+let sumTaskDurationsMs = 0;
+let failures = 0;
+let retries = 0;
+
+async function runTask(item, page) {
+  const t0 = Date.now();
+  try {
+    await page.goto(item.url);
+    await waitForPageLoad({ timeout: 15000 });
+    const value = await page.locator(item.selector).first().textContent();
+    return { ok: true, item, value };
+  } catch (error) {
+    const msg = String(error?.message || error);
+    const retryable = /429|timeout|captcha|challenge|blocked/i.test(msg);
+    return { ok: false, item, retryable, error: msg };
+  } finally {
+    sumTaskDurationsMs += Date.now() - t0;
+  }
+}
+
+async function runWithCap(targetItems, cap) {
+  const results = [];
+  for (let i = 0; i < targetItems.length; i += cap) {
+    const batch = targetItems.slice(i, i + cap);
+    peakConcurrentTasks = Math.max(peakConcurrentTasks, batch.length);
+    const tabs = await Promise.all(batch.map(() => context.newPage()));
+    const batchResults = await Promise.all(batch.map((item, idx) => runTask(item, tabs[idx])));
+    await Promise.all(tabs.map((p) => p.close().catch(() => {})));
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+let results = await runWithCap(items, 5);
+let retryable = results.filter((r) => !r.ok && r.retryable).map((r) => r.item);
+
+if (retryable.length) {
+  retries += 1;
+  const retried = await runWithCap(retryable, 2); // reduced concurrency fallback
+  const settled = new Map(results.filter((r) => r.ok).map((r) => [r.item.url, r]));
+  for (const r of retried) settled.set(r.item.url, r);
+  results = [...settled.values()];
+  retryable = results.filter((r) => !r.ok && r.retryable).map((r) => r.item);
+}
+
+if (retryable.length) {
+  retries += 1;
+  for (const item of retryable) {
+    const tab = await context.newPage();
+    const r = await runTask(item, tab); // sequential fallback
+    await tab.close().catch(() => {});
+    results.push(r);
+  }
+}
+
+failures = results.filter((r) => !r.ok).length;
+return {
+  results,
+  telemetry: {
+    peakConcurrentTasks,
+    wallClockMs: Date.now() - startedAt,
+    sumTaskDurationsMs,
+    failures,
+    retries,
+  },
+};
+```
+
 ## Examples
 
 These prompts show how 10x users work with BrowserForce. The AI generates the code and handles the work — you just describe what you need.

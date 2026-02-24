@@ -148,6 +148,34 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('Downloads'), 'should include download pattern');
   });
 
+  it('execute prompt includes parallel-first swarm policy and telemetry contract', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+
+    assert.ok(
+      promptBlock.includes('BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING'),
+      'should include tab swarm policy section'
+    );
+    assert.ok(
+      promptBlock.includes('Promise.all with a concurrency cap'),
+      'should include parallel-first concurrency guidance'
+    );
+    assert.ok(
+      promptBlock.includes('Multi-step is allowed for read-only bulk extraction'),
+      'should include explicit anti-pattern exception for read-only bulk extraction'
+    );
+    assert.ok(promptBlock.includes('peakConcurrentTasks'), 'should require peakConcurrentTasks telemetry');
+    assert.ok(promptBlock.includes('wallClockMs'), 'should require wallClockMs telemetry');
+    assert.ok(promptBlock.includes('sumTaskDurationsMs'), 'should require sumTaskDurationsMs telemetry');
+    assert.ok(promptBlock.includes('failures'), 'should require failures telemetry');
+    assert.ok(promptBlock.includes('retries'), 'should require retries telemetry');
+  });
+
   it('execute tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
