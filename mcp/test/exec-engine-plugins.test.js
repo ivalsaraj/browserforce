@@ -45,6 +45,31 @@ test('buildExecContext exposes screenshot and content helpers in execute scope',
   assert.equal(typeof ctx.pageMarkdown, 'function');
 });
 
+test('buildExecContext exposes callable ref and CDP helpers', async () => {
+  const fakeSession = { send: async () => ({}) };
+  const page = {
+    isClosed: () => false,
+    context: () => ({
+      newCDPSession: async (targetPage) => {
+        assert.equal(targetPage, page);
+        return fakeSession;
+      },
+    }),
+  };
+
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+  assert.equal(typeof ctx.refToLocator, 'function');
+  assert.equal(typeof ctx.getCDPSession, 'function');
+
+  const session = await ctx.getCDPSession({ page });
+  assert.equal(session, fakeSession);
+
+  await assert.rejects(
+    () => ctx.getCDPSession({ page: { isClosed: () => true } }),
+    /Cannot create CDP session for closed page/
+  );
+});
+
 test('formatResult returns multi-content for labeled screenshot sentinel', () => {
   const fakeBuffer = Buffer.from('fake-jpeg-data');
   const formatted = formatResult({
