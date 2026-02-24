@@ -474,6 +474,14 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     if (consoleLogs) consoleLogs.set(activePage(), []);
   };
 
+  const getCDPSession = async ({ page: targetPage } = {}) => {
+    const p = targetPage || activePage();
+    if (!p || p.isClosed()) {
+      throw new Error('Cannot create CDP session for closed page');
+    }
+    return p.context().newCDPSession(p);
+  };
+
   const screenshotWithAccessibilityLabels = async ({ selector, interactiveOnly = true } = {}) => {
     const page = activePage();
     const { screenshot, snapshot: snapText, labelCount } = await screenshotWithLabels(page, {
@@ -500,7 +508,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
   return {
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     page: defaultPage, context: ctx, state: userState,
-    snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs,
+    snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,

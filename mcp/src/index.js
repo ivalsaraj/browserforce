@@ -148,6 +148,8 @@ Helpers:
   pageMarkdown()                     Article content via Mozilla Readability (Firefox Reader View).
                                      Strips nav/ads/sidebars. Returns title + metadata + body text.
                                      Falls back to raw body text for non-article pages.
+  getCDPSession({ page })            Create a relay-safe raw CDP session for a page.
+                                     Use this instead of page.context().newCDPSession(page).
 
 Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEncoder, TextDecoder
 
@@ -279,6 +281,10 @@ Stale locators:
 Newline typing:
   ✗ Don’t use keyboard Enter loops for multiline textareas unless explicitly needed
   ✓ Prefer locator.fill('line1\\nline2') for deterministic multiline input
+
+Raw CDP sessions:
+  ✗ Don’t call page.context().newCDPSession(page) directly
+  ✓ Use getCDPSession({ page }) for relay-safe CDP session creation
 
 ═══ EXTRACTION DECISION TREE ═══
 
