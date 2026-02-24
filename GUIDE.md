@@ -166,6 +166,37 @@ Add to your Claude config:
 }
 ```
 
+**Option B.1: Codex (via MCP)**
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.browserforce]
+command = "npx"
+args = ["-y", "browserforce@latest", "mcp"]
+```
+
+**Option B.2: Cursor (via MCP)**
+
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "browserforce": {
+      "command": "npx",
+      "args": ["-y", "browserforce@latest", "mcp"]
+    }
+  }
+}
+```
+
+If startup fails with `connection closed: initialize response`:
+
+1. Ensure args include `"mcp"` (without it, BrowserForce exits after printing help).
+2. If launching from a local clone, run `pnpm install` first.
+3. Verify manually: `npx -y browserforce@latest mcp`
+
 Then just talk to Claude: *"Open twitter.com and take a screenshot"*
 
 **Option C: Custom Playwright script**
