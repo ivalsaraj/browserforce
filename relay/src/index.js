@@ -182,7 +182,7 @@ class RelayServer {
 
     server.on('upgrade', (req, socket, head) => this._handleUpgrade(req, socket, head));
     this.extWss.on('connection', (ws) => this._onExtConnect(ws));
-    this.cdpWss.on('connection', (ws) => this._onCdpConnect(ws));
+    this.cdpWss.on('connection', (ws, req) => this._onCdpConnect(ws, req));
 
     this.server = server;
 
@@ -419,6 +419,16 @@ class RelayServer {
         socket.destroy();
         return;
       }
+      if (this.clientMode === CLIENT_MODE_SINGLE) {
+        if (this.activeClient && this.activeClient.ws.readyState === WebSocket.OPEN) {
+          const body = JSON.stringify({ error: 'Another CDP client is already connected' });
+          socket.write(
+            `HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`
+          );
+          socket.destroy();
+          return;
+        }
+      }
       this.cdpWss.handleUpgrade(req, socket, head, (ws) => {
         this.cdpWss.emit('connection', ws, req);
       });
@@ -644,11 +654,20 @@ class RelayServer {
 
   // ─── CDP Client Connection ──────────────────────────────────────────────
 
-  _onCdpConnect(ws) {
+  _onCdpConnect(ws, req) {
+    const clientId = `bf-cdp-${++this.clientSeq}`;
+    ws._bfClientId = clientId;
+    if (this.clientMode === CLIENT_MODE_SINGLE) {
+      const now = Date.now();
+      this.activeClient = { id: clientId, ws, connectedAt: now, lastSeenAt: now };
+    }
     log('[relay] CDP client connected');
     this.clients.add(ws);
 
     ws.on('message', (data) => {
+      if (this.clientMode === CLIENT_MODE_SINGLE && this.activeClient?.id === clientId) {
+        this.activeClient.lastSeenAt = Date.now();
+      }
       try {
         const msg = JSON.parse(data.toString());
         this._handleCdpClientMessage(ws, msg);
@@ -660,6 +679,9 @@ class RelayServer {
     ws.on('close', () => {
       log('[relay] CDP client disconnected');
       this.clients.delete(ws);
+      if (this.activeClient?.id === clientId) {
+        this.activeClient = null;
+      }
     });
 
     ws.on('error', (err) => {
