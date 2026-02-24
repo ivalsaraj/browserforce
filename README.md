@@ -608,10 +608,7 @@ In `single-active` mode, the relay enforces one active client slot. A second `/c
 
 **MCP standby polling (single-active mode):** if MCP sees a busy/`409` connect error, it enters standby and polls `GET /client-slot` until `busy: false` (about every 200-400ms, up to 30s), then retries connect.
 
-**Operational non-goals:**
-- No new dependencies for arbitration or standby logic.
-- No per-tab ownership complexity; arbitration is process-level client-slot control.
-- No extension protocol changes (no new extension↔relay message types).
+**Operational non-goals:** canonical list is maintained in [AGENTS.md](AGENTS.md#operational-non-goals).
 
 ## API
 
