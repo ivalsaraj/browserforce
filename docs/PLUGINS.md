@@ -252,7 +252,7 @@ export default {
     }
   },
 
-  // Standalone MCP tools registered alongside execute/reset/screenshot_with_labels.
+  // Standalone MCP tools registered alongside execute/reset.
   // Agents can call these directly by name.
   tools: [{
     name: 'my_tool',
@@ -443,4 +443,3 @@ The relay install endpoint only fetches from the known GitHub repo URL — no ar
 No sandboxing beyond that. Plugins are as trusted as any npm package you install.
 
 ---
-
