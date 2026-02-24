@@ -101,6 +101,12 @@ describe('Token Persistence', () => {
   const tmpDir = path.join(os.tmpdir(), `bf-test-${crypto.randomBytes(4).toString('hex')}`);
   const origBfDir = BF_DIR;
 
+  it('defaults to single-active client mode', () => {
+    delete process.env.BF_CLIENT_MODE;
+    const relay = new RelayServer(getRandomPort());
+    assert.equal(relay.clientMode, 'single-active');
+  });
+
   it('creates auth token file on first run', () => {
     // RelayServer reads token from the global BF_DIR.
     // We just verify the token is a non-empty string.

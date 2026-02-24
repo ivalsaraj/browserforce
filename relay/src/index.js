@@ -16,6 +16,8 @@ const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
 const CDP_URL_FILE = path.join(BF_DIR, 'cdp-url');
 const BF_PLUGINS_DIR = path.join(BF_DIR, 'plugins');
+const CLIENT_MODE_SINGLE = 'single-active';
+const CLIENT_MODE_MULTI = 'multi-client';
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +48,11 @@ function writeCdpUrlFile(cdpUrl) {
   } catch (e) {
     logErr('[relay] Failed to write CDP URL file:', e.message);
   }
+}
+
+function getClientMode() {
+  const mode = (process.env.BF_CLIENT_MODE || CLIENT_MODE_SINGLE).trim();
+  return mode === CLIENT_MODE_MULTI ? CLIENT_MODE_MULTI : CLIENT_MODE_SINGLE;
 }
 
 // ─── RelayServer ─────────────────────────────────────────────────────────────
@@ -130,6 +137,9 @@ class RelayServer {
     this.port = port;
     this.pluginsDir = pluginsDir;
     this.authToken = getOrCreateAuthToken();
+    this.clientMode = getClientMode();
+    this.activeClient = null; // { id, ws, connectedAt, lastSeenAt }
+    this.clientSeq = 0;
 
     // Extension connection (single slot)
     this.ext = null;
