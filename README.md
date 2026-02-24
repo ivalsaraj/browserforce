@@ -357,6 +357,17 @@ state.results = await page.evaluate(() => document.title);
 | `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `screenshotWithAccessibilityLabels()`, `cleanHTML()`, `pageMarkdown()`, and Node.js globals. |
 | `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
+### Diff-Aware Helpers
+
+Use `showDiffSinceLastCall` to control diff output vs full output in execute helper calls:
+
+```javascript
+await snapshot({ showDiffSinceLastCall: true });
+await snapshot({ showDiffSinceLastCall: false });
+await cleanHTML('body', { showDiffSinceLastCall: false });
+await pageMarkdown({ showDiffSinceLastCall: true });
+```
+
 ## Examples
 
 Get started with simple prompts. The AI generates code and does the work.
@@ -575,5 +586,11 @@ RELAY_PORT=19333 browserforce serve
 | Agent sees 0 pages | Open at least one regular webpage (not `chrome://`) |
 | Extension keeps reconnecting | Normal — MV3 kills idle workers; it auto-recovers |
 | Port in use | `lsof -ti:19222 \| xargs kill -9` |
+
+CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
+
+```bash
+jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.jsonl | uniq -c
+```
 
 > **Want the full walkthrough?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for a plain-English explanation of what this does and how to get started.
