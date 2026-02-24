@@ -72,6 +72,15 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function readJsonlEntries(logFilePath) {
+  const raw = fs.readFileSync(logFilePath, 'utf8').trim();
+  if (!raw) return [];
+  return raw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 // ─── Token Persistence ───────────────────────────────────────────────────────
 
 describe('Token Persistence', () => {
@@ -925,6 +934,140 @@ describe('CDP Event Forwarding', () => {
     cdp.close();
     ext.close();
     await sleep(100);
+  });
+});
+
+// ─── CDP JSONL Logging ──────────────────────────────────────────────────────
+
+describe('CDP JSONL Logging', () => {
+  let logDir;
+  let logFilePath;
+  let originalLogFileEnv;
+
+  beforeEach(() => {
+    logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-cdp-log-'));
+    logFilePath = path.join(logDir, 'cdp-traffic.jsonl');
+    originalLogFileEnv = process.env.BROWSERFORCE_CDP_LOG_FILE_PATH;
+    process.env.BROWSERFORCE_CDP_LOG_FILE_PATH = logFilePath;
+  });
+
+  afterEach(() => {
+    if (originalLogFileEnv === undefined) delete process.env.BROWSERFORCE_CDP_LOG_FILE_PATH;
+    else process.env.BROWSERFORCE_CDP_LOG_FILE_PATH = originalLogFileEnv;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  it('creates and truncates the CDP JSONL log file on relay start', async () => {
+    let firstRelay;
+    let secondRelay;
+
+    try {
+      firstRelay = new RelayServer(getRandomPort());
+      await firstRelay.start({ writeCdpUrl: false });
+      assert.equal(fs.existsSync(logFilePath), true, 'CDP log file should be created on start');
+
+      firstRelay.stop();
+      firstRelay = null;
+
+      fs.writeFileSync(logFilePath, '{"stale":true}\n');
+      assert.ok(fs.statSync(logFilePath).size > 0, 'CDP log file should contain stale data before restart');
+
+      secondRelay = new RelayServer(getRandomPort());
+      await secondRelay.start({ writeCdpUrl: false });
+      assert.equal(fs.existsSync(logFilePath), true, 'CDP log file should still exist after restart');
+      assert.equal(fs.readFileSync(logFilePath, 'utf8'), '', 'CDP log file should be truncated on each start');
+    } finally {
+      secondRelay?.stop();
+      firstRelay?.stop();
+    }
+  });
+
+  it('logs command/event traffic with direction and method in JSONL entries', async () => {
+    let relay;
+    let ext;
+    let cdp;
+
+    try {
+      relay = new RelayServer(getRandomPort());
+      await relay.start({ writeCdpUrl: false });
+
+      ext = await connectWs(`ws://127.0.0.1:${relay.port}/extension`, {
+        headers: { Origin: 'chrome-extension://test' },
+      });
+
+      ext.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+        if (msg.id === undefined) return;
+
+        if (msg.method === 'createTab') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: {
+              tabId: 501,
+              targetId: 'real-target-501',
+              sessionId: msg.params.sessionId,
+              targetInfo: {
+                targetId: 'real-target-501',
+                type: 'page',
+                title: 'Logging Test',
+                url: msg.params.url || 'about:blank',
+              },
+            },
+          }));
+        } else if (msg.method === 'cdpCommand' && msg.params.method === 'Runtime.evaluate') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: { result: { type: 'string', value: 'ok' } },
+          }));
+        }
+      });
+
+      cdp = await connectWs(`ws://127.0.0.1:${relay.port}/cdp?token=${relay.authToken}`);
+      const cdpMessages = [];
+      cdp.on('message', (data) => cdpMessages.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://example.com' } }));
+      await sleep(300);
+
+      const attached = cdpMessages.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attached, 'Expected Target.attachedToTarget after createTarget');
+      const sessionId = attached.params.sessionId;
+
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '"ok"' },
+        sessionId,
+      }));
+      await sleep(200);
+
+      ext.send(JSON.stringify({
+        method: 'cdpEvent',
+        params: {
+          tabId: 501,
+          method: 'Page.loadEventFired',
+          params: { timestamp: 42 },
+        },
+      }));
+      await sleep(300);
+
+      assert.equal(fs.existsSync(logFilePath), true, 'CDP log file should exist');
+      const entries = readJsonlEntries(logFilePath);
+      const directions = new Set(entries.map((entry) => entry.direction));
+      const methods = entries.map((entry) => entry?.message?.method).filter(Boolean);
+
+      assert.ok(directions.has('from-playwright'), 'Should log from-playwright direction');
+      assert.ok(directions.has('to-extension'), 'Should log to-extension direction');
+      assert.ok(directions.has('from-extension'), 'Should log from-extension direction');
+      assert.ok(directions.has('to-playwright'), 'Should log to-playwright direction');
+      assert.ok(methods.includes('Runtime.evaluate'), 'Should log Runtime.evaluate method');
+      assert.ok(methods.includes('Page.loadEventFired'), 'Should log Page.loadEventFired method');
+    } finally {
+      cdp?.close();
+      ext?.close();
+      relay?.stop();
+    }
   });
 });
 
