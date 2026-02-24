@@ -1,5 +1,7 @@
 # BrowserForce — User Guide
 
+**BrowserForce // Parallel AI Agents in "your" Chrome!**
+
 ## What is this?
 
 BrowserForce gives AI agents — like [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible tool — access to **your real Chrome browser**. The one you're already logged into. No headless browser, no fake profiles. The AI sees your actual tabs and can interact with any website using your existing sessions.
