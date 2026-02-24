@@ -130,6 +130,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('cookie') || promptBlock.includes('consent'), 'should include consent modal handling');
     assert.ok(promptBlock.includes('stale locator'), 'should include stale locator warning');
     assert.ok(promptBlock.includes('snapshot({ showDiffSinceLastCall'), 'should include diff usage guidance');
+    assert.ok(promptBlock.includes('options.showDiffSinceLastCall'), 'should document snapshot diff toggle in API reference');
   });
 
   it('execute prompt includes tool-selection and debugging decision trees', () => {
@@ -193,6 +194,14 @@ describe('Tool Definitions', () => {
 
     assert.ok(source.includes('refToLocator'), 'exec engine should expose refToLocator helper');
     assert.ok(source.includes('const getCDPSession = async'), 'exec engine should define getCDPSession helper');
+    assert.ok(
+      source.includes('No changes since last snapshot. Use showDiffSinceLastCall: false to see full content.'),
+      'exec engine should return snapshot no-change guidance'
+    );
+    assert.ok(
+      source.includes('!search && showDiffSinceLastCall') || source.includes('showDiffSinceLastCall && !search'),
+      'snapshot diff mode should only run when search is not provided'
+    );
   });
 });
 

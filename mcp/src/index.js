@@ -133,7 +133,7 @@ Variables:
   state       Persistent object across calls (cleared on reset). Store your working page here.
 
 Helpers:
-  snapshot({ selector?, search? })   Accessibility tree as text. 10-100x cheaper than screenshots.
+  snapshot({ selector?, search?, showDiffSinceLastCall? })   Accessibility tree as text. 10-100x cheaper than screenshots.
   refToLocator({ ref })              Resolve a snapshot ref (e.g., e3) to a Playwright locator string.
   waitForPageLoad({ timeout? })      Smart load detection (filters analytics/ads, polls readyState).
   getLogs({ count? })                Browser console logs captured for current page.
@@ -391,6 +391,7 @@ If timeout:          Increase timeout param, or break into smaller steps
 snapshot(options?)
   options.selector  CSS selector to scope the snapshot (e.g., '#main', '.sidebar')
   options.search    Regex string to filter tree nodes (e.g., 'button|link')
+  options.showDiffSinceLastCall  When true (default), returns a smart diff from previous snapshot when unchanged scope+search is not used
   Returns: Text accessibility tree with interactive element refs
 
 waitForPageLoad(options?)
