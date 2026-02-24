@@ -107,9 +107,11 @@ browserforce serve
 If your agent browses to the page and responds with the title, you're all set.
 
 <details>
-<summary><b>Alternative: MCP server</b> (advanced)</summary>
+<summary><b>MCP setup for OpenClaw, Claude, Codex, Cursor, and Antigravity</b></summary>
 
-If you prefer MCP over the skill, add to `~/.openclaw/openclaw.json`:
+#### OpenClaw (MCP adapter)
+
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -123,7 +125,7 @@ If you prefer MCP over the skill, add to `~/.openclaw/openclaw.json`:
               "name": "browserforce",
               "transport": "stdio",
               "command": "npx",
-              "args": ["-y", "browserforce", "mcp"]
+              "args": ["-y", "browserforce@latest", "mcp"]
             }
           ]
         }
@@ -133,9 +135,7 @@ If you prefer MCP over the skill, add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-</details>
-
-### Claude Desktop
+#### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -144,13 +144,13 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "browserforce": {
       "command": "npx",
-      "args": ["-y", "browserforce", "mcp"]
+      "args": ["-y", "browserforce@latest", "mcp"]
     }
   }
 }
 ```
 
-### Claude Code
+#### Claude Code
 
 Add to `~/.claude/mcp.json`:
 
@@ -159,11 +159,60 @@ Add to `~/.claude/mcp.json`:
   "mcpServers": {
     "browserforce": {
       "command": "npx",
-      "args": ["-y", "browserforce", "mcp"]
+      "args": ["-y", "browserforce@latest", "mcp"]
     }
   }
 }
 ```
+
+#### Codex
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.browserforce]
+command = "npx"
+args = ["-y", "browserforce@latest", "mcp"]
+```
+
+#### Cursor
+
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "browserforce": {
+      "command": "npx",
+      "args": ["-y", "browserforce@latest", "mcp"]
+    }
+  }
+}
+```
+
+#### Antigravity
+
+In Antigravity: Agent panel -> `...` -> `Manage MCP Servers` -> `View raw config`.
+Add the same `mcpServers` entry:
+
+```json
+{
+  "mcpServers": {
+    "browserforce": {
+      "command": "npx",
+      "args": ["-y", "browserforce@latest", "mcp"]
+    }
+  }
+}
+```
+
+If MCP startup fails with `connection closed: initialize response`:
+
+1. Ensure args include `"mcp"` (without it, BrowserForce prints help and exits).
+2. If running from a local clone, install deps first: `pnpm install`.
+3. Validate the launch command manually: `npx -y browserforce@latest mcp`
+
+</details>
 
 ### CLI
 
