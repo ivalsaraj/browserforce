@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
-  TEST_ID_ATTRS,
+  TEST_ID_ATTRS, createSmartDiff,
   buildSnapshotText, parseSearchPattern, annotateStableAttrs,
 } from './snapshot.js';
 import { screenshotWithLabels } from './a11y-labels.js';
@@ -508,7 +508,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
 
   const cleanHTML = (selector, opts) => getCleanHTML(activePage(), selector, opts);
 
-  const pageMarkdown = () => getPageMarkdown(activePage());
+  const pageMarkdown = (opts) => getPageMarkdown(activePage(), opts);
 
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
   const wrappedPluginHelpers = {};

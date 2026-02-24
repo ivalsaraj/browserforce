@@ -5,6 +5,74 @@ import { buildExecContext, runCode, formatResult } from '../src/exec-engine.js';
 const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => 'Test' };
 const mockCtx = { pages: () => [mockPage] };
 
+function createSnapshotPage() {
+  return {
+    isClosed: () => false,
+    url: () => 'https://example.test',
+    title: async () => 'Snapshot Test',
+    evaluate: async (_fn, arg) => {
+      if (arg && typeof arg === 'object' && Array.isArray(arg.testIdAttrs)) {
+        return {};
+      }
+      return {
+        role: 'WebArea',
+        name: '',
+        children: [
+          {
+            role: 'main',
+            name: '',
+            children: [{ role: 'button', name: 'Submit', children: [] }],
+          },
+        ],
+      };
+    },
+  };
+}
+
+function createCleanHtmlPage() {
+  return {
+    isClosed: () => false,
+    evaluate: async (_fn, arg) => {
+      if (arg && typeof arg === 'object' && Object.hasOwn(arg, 'maxAttrLen')) {
+        return '<html><body><main>clean body</main></body></html>';
+      }
+      throw new Error('Unexpected evaluate call in cleanHTML test');
+    },
+  };
+}
+
+function createPageMarkdownPage(content = 'Markdown content line', options = {}) {
+  const title = options.title === undefined ? 'Markdown Title' : options.title;
+  return {
+    isClosed: () => false,
+    evaluate: async (arg) => {
+      if (typeof arg === 'function') {
+        const fnSource = arg.toString();
+        if (fnSource.includes('!!globalThis.__readability')) {
+          return true;
+        }
+        if (fnSource.includes('isProbablyReaderable')) {
+          return {
+            content,
+            title,
+            author: null,
+            excerpt: null,
+            siteName: null,
+            lang: 'en',
+            publishedTime: null,
+            wordCount: 3,
+            readable: true,
+          };
+        }
+      }
+      if (typeof arg === 'string') {
+        return undefined;
+      }
+      throw new Error('Unexpected evaluate call in pageMarkdown test');
+    },
+  };
+}
+
 test('plugin helpers are available in execute scope', async () => {
   const pluginHelpers = {
     myHelper: async (page, ctx, state, arg) => `result:${arg}`,
@@ -88,4 +156,73 @@ test('formatResult returns multi-content for labeled screenshot sentinel', () =>
   });
   assert.equal(formatted[1].type, 'text');
   assert.ok(formatted[1].text.includes('Labels: 1 interactive elements'));
+});
+
+test('snapshot diff wiring returns full, then no-change guidance, then full when disabled', async () => {
+  const page = createSnapshotPage();
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+
+  const first = await ctx.snapshot({ showDiffSinceLastCall: true });
+  assert.ok(first.includes('Page: Snapshot Test (https://example.test)'));
+  assert.ok(first.includes('- button "Submit" [ref=e1]'));
+
+  const second = await ctx.snapshot({ showDiffSinceLastCall: true });
+  assert.ok(second.includes('No changes since last snapshot'));
+  assert.ok(second.includes('showDiffSinceLastCall: false'));
+
+  const full = await ctx.snapshot({ showDiffSinceLastCall: false });
+  assert.ok(full.includes('Page: Snapshot Test (https://example.test)'));
+});
+
+test('cleanHTML diff wiring returns no-change guidance on identical repeated calls', async () => {
+  const page = createCleanHtmlPage();
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+
+  const first = await ctx.cleanHTML('body', { showDiffSinceLastCall: true });
+  assert.ok(first.includes('<main>clean body</main>'));
+
+  const second = await ctx.cleanHTML('body', { showDiffSinceLastCall: true });
+  assert.ok(second.includes('No changes since last call'));
+  assert.ok(second.includes('showDiffSinceLastCall: false'));
+
+  const full = await ctx.cleanHTML('body', { showDiffSinceLastCall: false });
+  assert.ok(full.includes('<main>clean body</main>'));
+});
+
+test('pageMarkdown option forwarding and diff wiring returns no-change guidance on repeated calls', async () => {
+  const page = createPageMarkdownPage();
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+
+  const first = await ctx.pageMarkdown({ showDiffSinceLastCall: true });
+  assert.ok(first.includes('# Markdown Title'));
+  assert.ok(first.includes('Markdown content line'));
+
+  const second = await ctx.pageMarkdown({ showDiffSinceLastCall: true });
+  assert.ok(second.includes('No changes since last call'));
+  assert.ok(second.includes('showDiffSinceLastCall: false'));
+
+  const full = await ctx.pageMarkdown({ showDiffSinceLastCall: false });
+  assert.ok(full.includes('# Markdown Title'));
+});
+
+test('pageMarkdown search takes precedence over diff mode on repeated calls', async () => {
+  const page = createPageMarkdownPage('alpha line\nfind me here\nomega line');
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+
+  await ctx.pageMarkdown({ showDiffSinceLastCall: true });
+  const searched = await ctx.pageMarkdown({ search: 'find me' });
+
+  assert.ok(searched.includes('find me here'));
+  assert.ok(!searched.includes('No changes since last call'));
+});
+
+test('pageMarkdown search resets regex state for g/y regex flags', async () => {
+  const page = createPageMarkdownPage('target on only line', { title: null });
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+  const search = /target/g;
+  search.lastIndex = 1;
+
+  const result = await ctx.pageMarkdown({ search, showDiffSinceLastCall: false });
+  assert.ok(result.includes('target on only line'));
+  assert.ok(!result.includes('No matches found'));
 });
