@@ -594,11 +594,31 @@ RELAY_PORT=19333 browserforce serve
 }
 ```
 
+**Client arbitration mode (`BF_CLIENT_MODE`):**
+
+```bash
+# default: one active /cdp client at a time
+BF_CLIENT_MODE=single-active browserforce serve
+
+# fallback: allow concurrent /cdp clients
+BF_CLIENT_MODE=multi-client browserforce serve
+```
+
+In `single-active` mode, the relay enforces one active client slot. A second `/cdp` connection receives HTTP `409 Conflict` (busy). In `multi-client` mode, slot arbitration is disabled.
+
+**MCP standby polling (single-active mode):** if MCP sees a busy/`409` connect error, it enters standby and polls `GET /client-slot` until `busy: false` (about every 200-400ms, up to 30s), then retries connect.
+
+**Operational non-goals:**
+- No new dependencies for arbitration or standby logic.
+- No per-tab ownership complexity; arbitration is process-level client-slot control.
+- No extension protocol changes (no new extension↔relay message types).
+
 ## API
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /` | Health check (extension status, target count) |
+| `GET /client-slot` | Client-slot state: `{ mode, busy, activeClientId, connectedAt }` |
 | `GET /json/version` | CDP discovery |
 | `GET /json/list` | List attached targets |
 | `ws://.../extension` | Chrome extension WebSocket |
