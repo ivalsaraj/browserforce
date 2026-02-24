@@ -240,6 +240,113 @@ describe('Plugin API Endpoints', () => {
   });
 });
 
+// ─── Extension Reload Endpoint ───────────────────────────────────────────────
+
+describe('Extension Reload Endpoint', () => {
+  let relay, port;
+
+  function httpRequest(method, url, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+      const opts = new URL(url);
+      const payload = body ? JSON.stringify(body) : undefined;
+      const req = http.request({
+        hostname: opts.hostname, port: opts.port,
+        path: opts.pathname, method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+          ...headers,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', c => { data += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode, body: data }); }
+        });
+      });
+      req.on('error', reject);
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => relay.stop());
+
+  it('POST /extension/reload without token returns 401', async () => {
+    const { status, body } = await httpRequest('POST', `http://127.0.0.1:${port}/extension/reload`, {});
+    assert.equal(status, 401);
+    assert.ok(body.error.includes('Unauthorized'));
+  });
+
+  it('POST /extension/reload with invalid token returns 401', async () => {
+    const { status, body } = await httpRequest('POST', `http://127.0.0.1:${port}/extension/reload`, {}, {
+      Authorization: 'Bearer bad-token',
+    });
+    assert.equal(status, 401);
+    assert.ok(body.error.includes('Unauthorized'));
+  });
+
+  it('POST /extension/reload with valid token but no extension returns { reloaded: false }', async () => {
+    const { status, body } = await httpRequest('POST', `http://127.0.0.1:${port}/extension/reload`, {}, {
+      Authorization: `Bearer ${relay.authToken}`,
+    });
+    assert.equal(status, 200);
+    assert.equal(body.reloaded, false);
+  });
+
+  it('POST /extension/reload with extension connected and ack returns { reloaded: true }', async () => {
+    // Connect a mock extension that sends reload-ack
+    const extWs = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    extWs.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'reload') {
+        extWs.send(JSON.stringify({ method: 'reload-ack' }));
+      }
+    });
+
+    const { status, body } = await httpRequest('POST', `http://127.0.0.1:${port}/extension/reload`, {}, {
+      Authorization: `Bearer ${relay.authToken}`,
+    });
+
+    extWs.close();
+    assert.equal(status, 200);
+    assert.equal(body.reloaded, true);
+  });
+
+  it('POST /extension/reload with extension connected but no ack times out to { reloaded: false }', async () => {
+    // Re-start relay to get a fresh extension slot (previous test's close may not have fully cleaned up)
+    relay.stop();
+    await sleep(100);
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+
+    // Connect a mock extension that does NOT send reload-ack
+    const extWs = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const { status, body } = await httpRequest('POST', `http://127.0.0.1:${port}/extension/reload`, {}, {
+      Authorization: `Bearer ${relay.authToken}`,
+    });
+
+    extWs.close();
+    assert.equal(status, 200);
+    assert.equal(body.reloaded, false);
+  });
+});
+
 // ─── WebSocket Security ──────────────────────────────────────────────────────
 
 describe('WebSocket Security', () => {
