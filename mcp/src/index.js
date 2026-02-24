@@ -188,6 +188,7 @@ After every action, verify its result before proceeding:
 
 Never chain multiple actions blindly. If you click a button, verify it worked before clicking the next.
 Each execute call should do ONE meaningful action and return verification.
+Exception: Multi-step is allowed for read-only bulk extraction when actions are independent and no user-tab mutation occurs.
 
 When navigating:
   await state.page.goto(url);
@@ -302,6 +303,24 @@ snapshot vs cleanHTML vs pageMarkdown:
   3) Use pageMarkdown() for article/blog/news pages where nav/ads should be removed.
   4) Use screenshotWithAccessibilityLabels() only when layout/visual evidence is required.
 
+═══ BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING ═══
+
+Parallel-first policy for independent extraction:
+  1) For count/list/extraction across independent pages, dates, or items, start with parallel tabs first.
+  2) Use Promise.all with a concurrency cap (typically 3-8; start at 5 unless site limits are known).
+  3) Keep swarm runs read-only and isolated to agent-created tabs (no checkout/purchase/send/delete/profile changes).
+  4) If you hit 429, anti-bot challenges, or repeated timeouts, automatically retry with reduced concurrency.
+  5) If reduced concurrency still fails, retry sequentially.
+
+Always return telemetry for swarm runs:
+  {
+    peakConcurrentTasks,
+    wallClockMs,
+    sumTaskDurationsMs,
+    failures,
+    retries
+  }
+
 ═══ DEBUGGING WORKFLOW ═══
 
 Combine snapshot + logs:
@@ -383,7 +402,8 @@ When you need the full tree instead of diff output:
 ✗ Don't chain actions without verifying — observe after each action
 ✗ Don't use page.waitForTimeout() — use waitForPageLoad() or waitFor()
 ✗ Don't forget to return a value — every call should return verification
-✗ Don't write complex multi-step scripts — split into separate execute calls
+✗ Don't write complex multi-step scripts by default — split into separate execute calls
+✓ Exception: Multi-step is allowed for read-only bulk extraction when actions are independent and no user-tab mutation occurs
 ✗ Don't use page variable directly — use state.page after first call setup
 
 ═══ ERROR RECOVERY ═══
