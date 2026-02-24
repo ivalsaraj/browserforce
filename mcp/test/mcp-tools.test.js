@@ -106,6 +106,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('snapshot'), 'should mention snapshot-first approach');
     assert.ok(promptBlock.includes('waitForPageLoad'), 'should mention waitForPageLoad');
     assert.ok(promptBlock.includes('screenshotWithAccessibilityLabels'), 'should mention screenshotWithAccessibilityLabels helper');
+    assert.ok(promptBlock.includes('refToLocator({ ref })'), 'should mention refToLocator helper usage');
     assert.ok(promptBlock.includes('cleanHTML'), 'should mention cleanHTML helper');
     assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
     assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
@@ -181,6 +182,15 @@ describe('Tool Definitions', () => {
 
     assert.ok(!source.includes("'screenshot_with_labels'"), 'screenshot_with_labels tool should be removed');
     assert.ok(!source.includes('SCREENSHOT_LABELS_PROMPT'), 'dedicated screenshot prompt should be removed');
+  });
+
+  it('exec context source exposes refToLocator helper', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('refToLocator'), 'exec engine should expose refToLocator helper');
   });
 });
 
