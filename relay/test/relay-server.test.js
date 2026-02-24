@@ -465,6 +465,27 @@ describe('WebSocket Security', () => {
     }
   });
 
+  it('allows multiple /cdp clients when BF_CLIENT_MODE=multi-client', async () => {
+    const prevMode = process.env.BF_CLIENT_MODE;
+    process.env.BF_CLIENT_MODE = 'multi-client';
+    const multiRelay = new RelayServer(getRandomPort());
+    await multiRelay.start({ writeCdpUrl: false });
+    let c1;
+    let c2;
+    try {
+      c1 = await connectWs(`ws://127.0.0.1:${multiRelay.port}/cdp?token=${multiRelay.authToken}`);
+      c2 = await connectWs(`ws://127.0.0.1:${multiRelay.port}/cdp?token=${multiRelay.authToken}`);
+      assert.equal(c1.readyState, WebSocket.OPEN);
+      assert.equal(c2.readyState, WebSocket.OPEN);
+    } finally {
+      if (c1 && c1.readyState === WebSocket.OPEN) c1.close();
+      if (c2 && c2.readyState === WebSocket.OPEN) c2.close();
+      multiRelay.stop();
+      if (prevMode === undefined) delete process.env.BF_CLIENT_MODE;
+      else process.env.BF_CLIENT_MODE = prevMode;
+    }
+  });
+
   it('allows standby client after active client disconnects', async () => {
     const prevMode = process.env.BF_CLIENT_MODE;
     process.env.BF_CLIENT_MODE = 'single-active';
