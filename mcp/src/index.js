@@ -256,6 +256,76 @@ Avoid stale locator usage:
   // GOOD: refresh observation first, then act with new refs/locators
   await snapshot();
 
+Typing text with newlines:
+  // Use fill() for multiline blocks to avoid accidental Enter key submissions
+  await state.page.locator('role=textbox[name="Message"]').fill('Line 1\\nLine 2');
+
+═══ TACTICAL ANTI-PATTERNS ═══
+
+Popup control:
+  ✗ Don’t click through a popup without confirming what changed
+  ✓ Dismiss popup, then run snapshot() immediately to confirm main UI is usable
+
+Consent blockers:
+  ✗ Don’t continue form/page actions while consent banners block focus
+  ✓ Handle cookie/consent overlays first, then retry the intended action
+
+Stale locators:
+  ✗ Don’t reuse [ref=...] values after DOM/nav updates
+  ✓ Refresh snapshot() and use the newest refs/role locators
+
+Newline typing:
+  ✗ Don’t use keyboard Enter loops for multiline textareas unless explicitly needed
+  ✓ Prefer locator.fill('line1\\nline2') for deterministic multiline input
+
+═══ EXTRACTION DECISION TREE ═══
+
+snapshot vs cleanHTML vs pageMarkdown:
+  1) Use snapshot() when you need current interactive structure, labels, and refs.
+  2) Use cleanHTML(selector?) when you need structured DOM content for parsing/extraction.
+  3) Use pageMarkdown() for article/blog/news pages where nav/ads should be removed.
+  4) Use screenshotWithAccessibilityLabels() only when layout/visual evidence is required.
+
+═══ DEBUGGING WORKFLOW ═══
+
+Combine snapshot + logs:
+  1) snapshot({ search: /target text|button|error/i }) to verify element presence and naming
+  2) getLogs({ count: 30 }) for runtime/network/console errors
+  3) page.evaluate(() => { ...visibility checks... }) to validate hidden/disabled/overlay states
+
+Example visibility check:
+  return await state.page.evaluate(() => {
+    const el = document.querySelector('[data-testid="submit"]');
+    if (!el) return { found: false };
+    const s = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return { found: true, visible: s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0 };
+  });
+
+═══ ADVANCED PATTERNS ═══
+
+Authenticated fetch:
+  // Reuse browser session cookies/headers from the current page context
+  return await state.page.evaluate(async () => {
+    const res = await fetch('/api/me', { credentials: 'include' });
+    return { status: res.status, body: await res.text() };
+  });
+
+Network interception:
+  await state.page.route('**/api/**', async (route) => {
+    const request = route.request();
+    // Inspect/modify request here if needed before continuing
+    await route.continue();
+  });
+
+Downloads:
+  // Use expect_download pattern and save path after click/navigation trigger
+  const [download] = await Promise.all([
+    state.page.waitForEvent('download'),
+    state.page.locator('role=button[name="Export CSV"]').click(),
+  ]);
+  return { suggestedFilename: download.suggestedFilename() };
+
 ═══ COMMON PATTERNS ═══
 
 Navigate and read:
