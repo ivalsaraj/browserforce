@@ -4,10 +4,21 @@
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createSmartDiff } from './snapshot.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let readabilityCode = null;
+const lastMarkdownSnapshots = new WeakMap();
+
+function isRegExp(value) {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof value.test === 'function' &&
+    typeof value.exec === 'function'
+  );
+}
 
 function getReadabilityCode() {
   if (readabilityCode) return readabilityCode;
@@ -21,9 +32,13 @@ function getReadabilityCode() {
  * Strips nav, ads, sidebars — returns article body with metadata.
  *
  * @param {import('playwright-core').Page} page
+ * @param {{ search?: string | RegExp, showDiffSinceLastCall?: boolean }} [opts]
  * @returns {Promise<string>}
  */
-export async function getPageMarkdown(page) {
+export async function getPageMarkdown(page, opts = {}) {
+  const search = opts.search;
+  const showDiffSinceLastCall = opts.showDiffSinceLastCall ?? true;
+
   // Inject Readability if not already present
   const hasReadability = await page.evaluate(() => !!globalThis.__readability);
   if (!hasReadability) {
@@ -108,6 +123,59 @@ export async function getPageMarkdown(page) {
   // Sanitize unpaired surrogates that break JSON encoding
   if (typeof markdown.toWellFormed === 'function') {
     markdown = markdown.toWellFormed();
+  }
+
+  const previousSnapshot = lastMarkdownSnapshots.get(page);
+  lastMarkdownSnapshots.set(page, markdown);
+
+  if (showDiffSinceLastCall && previousSnapshot) {
+    const diffResult = createSmartDiff(previousSnapshot, markdown);
+    if (diffResult.type === 'no-change') {
+      return 'No changes since last call. Use showDiffSinceLastCall: false to see full content.';
+    }
+    return diffResult.content;
+  }
+
+  if (search) {
+    const lines = markdown.split('\n');
+    const matchIndices = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const isMatch = isRegExp(search)
+        ? search.test(line)
+        : line.toLowerCase().includes(String(search).toLowerCase());
+      if (isMatch) {
+        matchIndices.push(i);
+        if (matchIndices.length >= 10) break;
+      }
+    }
+
+    if (matchIndices.length === 0) {
+      return 'No matches found';
+    }
+
+    const CONTEXT_LINES = 5;
+    const includedLines = new Set();
+    for (const idx of matchIndices) {
+      const start = Math.max(0, idx - CONTEXT_LINES);
+      const end = Math.min(lines.length - 1, idx + CONTEXT_LINES);
+      for (let i = start; i <= end; i++) {
+        includedLines.add(i);
+      }
+    }
+
+    const sortedIndices = [...includedLines].sort((a, b) => a - b);
+    const resultLines = [];
+    for (let i = 0; i < sortedIndices.length; i++) {
+      const lineIdx = sortedIndices[i];
+      if (i > 0 && sortedIndices[i - 1] !== lineIdx - 1) {
+        resultLines.push('---');
+      }
+      resultLines.push(lines[lineIdx]);
+    }
+
+    return resultLines.join('\n');
   }
 
   return markdown;

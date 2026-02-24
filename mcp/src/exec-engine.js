@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
-  TEST_ID_ATTRS,
+  TEST_ID_ATTRS, createSmartDiff,
   buildSnapshotText, parseSearchPattern, annotateStableAttrs,
 } from './snapshot.js';
 import { screenshotWithLabels } from './a11y-labels.js';
@@ -409,6 +409,7 @@ export class CodeExecutionTimeoutError extends Error {
 // instead of referencing module-level singletons.
 export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {}, pluginHelpers = {}) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
+  const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
 
   const activePage = () => {
     if (userState.page && !userState.page.isClosed()) return userState.page;
@@ -416,7 +417,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     throw new Error('No active page. Create one first: state.page = await context.newPage()');
   };
 
-  const snapshot = async ({ selector, search } = {}) => {
+  const snapshot = async ({ selector, search, showDiffSinceLastCall = true } = {}) => {
     const page = activePage();
     const axRoot = await getAccessibilityTree(page, selector);
     if (!axRoot) return 'No accessibility tree available for this page.';
@@ -429,7 +430,23 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
       : '';
     const title = await page.title().catch(() => '');
     const pageUrl = page.url();
-    return `Page: ${title} (${pageUrl})\nRefs: ${refs.length} interactive elements\n\n${snapshotText}${refTable}`;
+    const fullSnapshot = `Page: ${title} (${pageUrl})\nRefs: ${refs.length} interactive elements\n\n${snapshotText}${refTable}`;
+
+    const shouldCacheSnapshot = !selector;
+    const previousSnapshot = shouldCacheSnapshot ? lastSnapshots.get(page) : undefined;
+    if (shouldCacheSnapshot) {
+      lastSnapshots.set(page, fullSnapshot);
+    }
+
+    if (showDiffSinceLastCall && previousSnapshot && shouldCacheSnapshot) {
+      const diffResult = createSmartDiff(previousSnapshot, fullSnapshot);
+      if (diffResult.type === 'no-change') {
+        return 'No changes since last snapshot. Use showDiffSinceLastCall: false to see full content.';
+      }
+      return diffResult.content;
+    }
+
+    return fullSnapshot;
   };
 
   const waitForPageLoad = (opts = {}) =>
@@ -458,7 +475,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
 
   const cleanHTML = (selector, opts) => getCleanHTML(activePage(), selector, opts);
 
-  const pageMarkdown = () => getPageMarkdown(activePage());
+  const pageMarkdown = (opts) => getPageMarkdown(activePage(), opts);
 
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
   const wrappedPluginHelpers = {};
