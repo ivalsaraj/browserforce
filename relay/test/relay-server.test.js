@@ -439,6 +439,28 @@ describe('WebSocket Security', () => {
     ws.close();
   });
 
+  it('rejects second /cdp client in single-active mode', async () => {
+    const prevMode = process.env.BF_CLIENT_MODE;
+    process.env.BF_CLIENT_MODE = 'single-active';
+    let c1;
+    let c2;
+    try {
+      c1 = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      await assert.rejects(
+        (async () => {
+          c2 = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+          c2.close();
+        })(),
+        /409|Unexpected/
+      );
+    } finally {
+      if (c1 && c1.readyState === WebSocket.OPEN) c1.close();
+      if (c2 && c2.readyState === WebSocket.OPEN) c2.close();
+      if (prevMode === undefined) delete process.env.BF_CLIENT_MODE;
+      else process.env.BF_CLIENT_MODE = prevMode;
+    }
+  });
+
   it('rejects second extension connection (single slot)', async () => {
     const ws1 = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://first' },
