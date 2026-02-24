@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { WebSocketServer, WebSocket } = require('ws');
+const { createCdpLogger } = require('./cdp-log.js');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -151,9 +152,13 @@ class RelayServer {
 
     // Pending extension reload ack resolver (at most one at a time)
     this._extReloadResolve = null;
+
+    // CDP traffic logger, initialized on start.
+    this.cdpLogger = null;
   }
 
   start({ writeCdpUrl = true } = {}) {
+    this.cdpLogger = createCdpLogger();
     const server = http.createServer((req, res) => this._handleHttp(req, res));
 
     this.extWss = new WebSocketServer({ noServer: true });
@@ -182,6 +187,16 @@ class RelayServer {
         console.log('');
         resolve({ port: this.port, authToken: this.authToken });
       });
+    });
+  }
+
+  _logCdp(entry) {
+    if (!this.cdpLogger || typeof this.cdpLogger.log !== 'function') {
+      return;
+    }
+    this.cdpLogger.log({
+      timestamp: new Date().toISOString(),
+      ...entry,
     });
   }
 
@@ -535,7 +550,13 @@ class RelayServer {
 
   _handleCdpEventFromExt({ tabId, method, params, childSessionId }) {
     const sessionId = this.tabToSession.get(tabId);
-    if (!sessionId) return;
+    if (!sessionId) {
+      this._logCdp({
+        direction: 'from-extension',
+        message: { method, params, tabId, childSessionId },
+      });
+      return;
+    }
 
     // Track child sessions (iframes / OOPIFs)
     if (method === 'Target.attachedToTarget' && params?.sessionId) {
@@ -549,6 +570,11 @@ class RelayServer {
     const outerSessionId = childSessionId
       ? (this.childSessions.get(childSessionId)?.parentSessionId || sessionId)
       : sessionId;
+
+    this._logCdp({
+      direction: 'from-extension',
+      message: { method, params, tabId, sessionId: outerSessionId, childSessionId },
+    });
 
     this._broadcastCdp({ method, params, sessionId: outerSessionId });
   }
@@ -627,17 +653,25 @@ class RelayServer {
 
   async _handleCdpClientMessage(ws, msg) {
     const { id, method, params, sessionId } = msg;
+    this._logCdp({
+      direction: 'from-playwright',
+      message: { id, method, params, sessionId },
+    });
 
     try {
       let result;
       if (sessionId) {
-        result = await this._forwardToTab(sessionId, method, params);
+        result = await this._forwardToTab(sessionId, method, params, id);
       } else {
         result = await this._handleBrowserCommand(ws, id, method, params);
       }
       if (result !== undefined) {
         const response = { id, result };
         if (sessionId) response.sessionId = sessionId;
+        this._logCdp({
+          direction: 'to-playwright',
+          message: response,
+        });
         ws.send(JSON.stringify(response));
       }
     } catch (err) {
@@ -646,6 +680,10 @@ class RelayServer {
         error: { code: -32000, message: err.message },
       };
       if (sessionId) response.sessionId = sessionId;
+      this._logCdp({
+        direction: 'to-playwright',
+        message: response,
+      });
       ws.send(JSON.stringify(response));
     }
   }
@@ -663,7 +701,7 @@ class RelayServer {
       case 'Target.setDiscoverTargets':
         // Emit targetCreated for all known targets
         for (const [, target] of this.targets) {
-          ws.send(JSON.stringify({
+          const event = {
             method: 'Target.targetCreated',
             params: {
               targetInfo: {
@@ -675,7 +713,12 @@ class RelayServer {
                 browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
               },
             },
-          }));
+          };
+          this._logCdp({
+            direction: 'to-playwright',
+            message: event,
+          });
+          ws.send(JSON.stringify(event));
         }
         return {};
 
@@ -683,6 +726,10 @@ class RelayServer {
         this.autoAttachEnabled = true;
         this.autoAttachParams = params;
         // Respond immediately, then attach tabs asynchronously
+        this._logCdp({
+          direction: 'to-playwright',
+          message: { id: msgId, result: {} },
+        });
         ws.send(JSON.stringify({ id: msgId, result: {} }));
         this._autoAttachAllTabs(ws).catch((e) => {
           logErr('[relay] Auto-attach error:', e.message);
@@ -804,7 +851,7 @@ class RelayServer {
   }
 
   _sendAttachedEvent(ws, sessionId, target) {
-    ws.send(JSON.stringify({
+    const event = {
       method: 'Target.attachedToTarget',
       params: {
         sessionId,
@@ -818,7 +865,12 @@ class RelayServer {
         },
         waitingForDebugger: false,
       },
-    }));
+    };
+    this._logCdp({
+      direction: 'to-playwright',
+      message: event,
+    });
+    ws.send(JSON.stringify(event));
   }
 
   async _createTarget(ws, params) {
@@ -891,7 +943,7 @@ class RelayServer {
 
   // ─── CDP Command Forwarding ─────────────────────────────────────────────
 
-  async _forwardToTab(sessionId, method, params) {
+  async _forwardToTab(sessionId, method, params, id) {
     // Main session
     const target = this.targets.get(sessionId);
     if (target) {
@@ -906,6 +958,16 @@ class RelayServer {
         target._triggerMethod = method;
         await this._ensureDebuggerAttached(target, sessionId);
       }
+      this._logCdp({
+        direction: 'to-extension',
+        message: {
+          id,
+          method,
+          params: params || {},
+          sessionId,
+          tabId: target.tabId,
+        },
+      });
       return this._sendToExt('cdpCommand', {
         tabId: target.tabId,
         method,
@@ -922,6 +984,18 @@ class RelayServer {
       if (parentTarget && !parentTarget.debuggerAttached) {
         await this._ensureDebuggerAttached(parentTarget, parentSessionId);
       }
+      this._logCdp({
+        direction: 'to-extension',
+        message: {
+          id,
+          method,
+          params: params || {},
+          sessionId,
+          tabId: child.tabId,
+          childSessionId: sessionId,
+          parentSessionId,
+        },
+      });
       return this._sendToExt('cdpCommand', {
         tabId: child.tabId,
         method,
@@ -936,6 +1010,10 @@ class RelayServer {
   // ─── Broadcast ──────────────────────────────────────────────────────────
 
   _broadcastCdp(msg) {
+    this._logCdp({
+      direction: 'to-playwright',
+      message: msg,
+    });
     const data = JSON.stringify(msg);
     for (const client of this.clients) {
       if (client.readyState === WebSocket.OPEN) {
