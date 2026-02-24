@@ -250,6 +250,17 @@ When connected via MCP (OpenClaw, Claude Desktop, Claude Code), the AI has two t
 | `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `screenshotWithAccessibilityLabels()`, `cleanHTML()`, `pageMarkdown()`, and Node.js globals. |
 | `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
+### Diff-Aware Helpers
+
+Use `showDiffSinceLastCall` to control diff output vs full output in execute helper calls:
+
+```javascript
+await snapshot({ showDiffSinceLastCall: true });
+await snapshot({ showDiffSinceLastCall: false });
+await cleanHTML('body', { showDiffSinceLastCall: false });
+await pageMarkdown({ showDiffSinceLastCall: true });
+```
+
 The `execute` tool gives the agent full Playwright access — it can navigate, click, type, screenshot, read accessibility trees, and run JavaScript in the page context. All within your real browser session.
 
 ## Examples
@@ -416,3 +427,9 @@ A: Yes. All tabs across all Chrome windows are visible.
 | AI sees 0 pages | Open at least one regular webpage (not `chrome://`) |
 | Extension keeps disconnecting | Normal MV3 behavior — it auto-reconnects |
 | Port already in use | Run `lsof -ti:19222 \| xargs kill -9` to kill stale process |
+
+CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
+
+```bash
+jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.jsonl | uniq -c
+```
