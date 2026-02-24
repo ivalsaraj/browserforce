@@ -451,7 +451,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     const previousSnapshot = pageSnapshots.get(snapshotKey);
     pageSnapshots.set(snapshotKey, fullSnapshot);
 
-    if (!search && showDiffSinceLastCall && previousSnapshot) {
+    if (!selector && !search && showDiffSinceLastCall && previousSnapshot) {
       const diffResult = createSmartDiff(previousSnapshot, fullSnapshot);
       if (diffResult.type === 'no-change') {
         return 'No changes since last snapshot. Use showDiffSinceLastCall: false to see full content.';
