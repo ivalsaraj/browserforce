@@ -224,6 +224,8 @@ async function attachTab(tabId, sessionId) {
   if (attachedTabs.has(tabId)) {
     const existing = attachedTabs.get(tabId);
     existing.sessionId = sessionId;
+    // Ensure attached tabs are always reconciled into the browserforce group.
+    queueSyncTabGroup();
     return existing;
   }
 
@@ -491,20 +493,27 @@ function onTabRemoved(tabId) {
 
 function onTabUpdated(tabId, changeInfo) {
   if (!attachedTabs.has(tabId)) return;
-  if (!changeInfo.url && !changeInfo.title) return;
+  if (!changeInfo.url && !changeInfo.title && changeInfo.groupId === undefined) return;
+
+  // Reconcile group membership/title if user or Chrome moved this attached tab.
+  if (changeInfo.groupId !== undefined) {
+    queueSyncTabGroup();
+  }
 
   const entry = attachedTabs.get(tabId);
   if (changeInfo.url) entry.targetInfo.url = changeInfo.url;
   if (changeInfo.title) entry.targetInfo.title = changeInfo.title;
 
-  send({
-    method: 'tabUpdated',
-    params: {
-      tabId,
-      url: changeInfo.url,
-      title: changeInfo.title,
-    },
-  });
+  if (changeInfo.url || changeInfo.title) {
+    send({
+      method: 'tabUpdated',
+      params: {
+        tabId,
+        url: changeInfo.url,
+        title: changeInfo.title,
+      },
+    });
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
