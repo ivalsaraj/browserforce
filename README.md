@@ -19,7 +19,7 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 | Tab access | N/A (new browser) | Managed by agent | Click each tab | Click each tab | **All tabs, automatic** |
 | Autonomous | Yes | Yes | No (manual click) | No (manual click) | **Yes (fully autonomous)** |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)** |
-| Tools | Many dedicated | 1 `browser` tool | 1 `execute` tool | Built-in | **1 `execute` tool** |
+| Tools | Many dedicated | 1 `browser` tool | 1 `execute` tool | Built-in | **3 tools: `execute`, `screenshot_with_labels`, `reset`** |
 | Agent support | Any MCP client | OpenClaw only | Any MCP client | Claude only | **Any MCP client** |
 | Playwright API | Partial | No | Full | No | **Full** |
 
@@ -57,10 +57,12 @@ pnpm install
 
 **If you installed via npm:**
 
-1. Run: `browserforce install-extension`
+1. Run: `browserforce install-extension` — note the path it prints (e.g. `/Users/you/.browserforce/extension`)
 2. Open `chrome://extensions/` in Chrome
 3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** → select the path printed in step 1
+4. Click **Load unpacked** → a file picker opens
+   - **macOS**: press `Cmd+Shift+G`, paste the path from step 1, press Enter
+   - **Windows/Linux**: paste the path directly into the address bar of the dialog
 
 ❗ After every BrowserForce update, re-run `browserforce install-extension`, then reload the extension in `chrome://extensions/` (click the ↺ icon next to BrowserForce).
 

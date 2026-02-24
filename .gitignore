@@ -8,3 +8,4 @@ node_modules/
 pnpm-debug.log*
 .worktrees/
 docs/plans/*
+.superset
