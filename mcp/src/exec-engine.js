@@ -410,6 +410,7 @@ export class CodeExecutionTimeoutError extends Error {
 export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {}, pluginHelpers = {}) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
+  const lastRefToLocator = userState.__lastRefToLocator || (userState.__lastRefToLocator = new WeakMap());
 
   const activePage = () => {
     if (userState.page && !userState.page.isClosed()) return userState.page;
@@ -425,6 +426,8 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     annotateStableAttrs(axRoot, stableIds);
     const searchPattern = parseSearchPattern(search);
     const { text: snapshotText, refs } = buildSnapshotText(axRoot, null, searchPattern);
+    const refMap = new Map(refs.map(({ ref, locator }) => [ref, locator]));
+    lastRefToLocator.set(page, refMap);
     const refTable = refs.length > 0
       ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
       : '';
@@ -447,6 +450,13 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     }
 
     return fullSnapshot;
+  };
+
+  const refToLocator = ({ ref, page: targetPage } = {}) => {
+    const p = targetPage || activePage();
+    const map = lastRefToLocator.get(p);
+    if (!map) return null;
+    return map.get(ref) ?? null;
   };
 
   const waitForPageLoad = (opts = {}) =>
@@ -490,7 +500,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
   return {
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     page: defaultPage, context: ctx, state: userState,
-    snapshot, waitForPageLoad, getLogs, clearLogs,
+    snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,
