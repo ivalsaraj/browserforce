@@ -303,8 +303,7 @@ state.results = await page.evaluate(() => document.title);
 
 | Tool | Description |
 |------|-------------|
-| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, and Node.js globals. |
-| `screenshot_with_labels` | Take a screenshot with Vimium-style accessibility labels overlaid on interactive elements. |
+| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `screenshotWithAccessibilityLabels()`, `cleanHTML()`, `pageMarkdown()`, and Node.js globals. |
 | `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
 ## Examples
