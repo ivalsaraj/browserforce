@@ -215,6 +215,62 @@ for (const page of pages) {
 }
 ```
 
+## Controlled Tabs Playbook
+
+Use this section when you want strict control over what the agent can touch.
+
+### 1) Manually Attach A Tab
+
+1. Open the exact tab you want the agent to use.
+2. Click the BrowserForce extension icon.
+3. In the popup, click **+ Attach Current Tab**.
+4. Confirm it appears under **Controlled Tabs**.
+
+This is the fastest way to grant access to an already logged-in page without exposing other tabs.
+
+### 2) Single-Tab Locked Workflow
+
+For high-safety tasks (admin pages, billing pages, production dashboards):
+
+1. Set **Mode** to `Manual`.
+2. Attach only one tab using **+ Attach Current Tab**.
+3. Enable **No new tabs**.
+4. Optionally enable **Lock URL** and **Read-only** depending on the task.
+
+Result: the agent is constrained to one attached tab and cannot open additional tabs.
+
+### 3) Multi-Tab Controlled Workflow
+
+If the task needs a few trusted tabs:
+
+1. Keep **Mode** on `Manual`.
+2. Switch to each required tab and click **+ Attach Current Tab**.
+3. Keep **No new tabs** on if you want to block any extra tab creation.
+
+Result: the agent can work only across the tabs you explicitly attached.
+
+### 4) Restriction Modes (How To Combine Them)
+
+- **Lock URL**: blocks navigation away from the current page (reload is still possible).
+- **No new tabs**: blocks agent-driven tab creation.
+- **Read-only**: blocks interaction methods (click/type/edit); useful for inspection-only runs.
+
+Common presets:
+
+- **Audit preset**: `Manual + No new tabs + Read-only`
+- **Form testing preset**: `Manual + No new tabs` (leave Read-only off)
+- **Pinned page preset**: `Manual + Lock URL + No new tabs`
+
+### 5) Auto-Cleanup After Use
+
+- **Auto-detach inactive tabs**: detaches tabs after 5-60 minutes of inactivity.
+- **Auto-close agent tabs**: closes tabs created by the agent after 5-60 minutes.
+
+Recommended:
+
+- Use `10-15 min` auto-detach for normal sessions.
+- Use auto-close when running broad exploration tasks that open many tabs.
+
 ## CLI
 
 Once installed globally (`npm install -g browserforce`), the CLI is available:
@@ -260,6 +316,8 @@ await snapshot({ showDiffSinceLastCall: false });
 await cleanHTML('body', { showDiffSinceLastCall: false });
 await pageMarkdown({ showDiffSinceLastCall: true });
 ```
+
+Need concrete persona-based workflows? See [Actionable Use Cases](docs/USE_CASES.md).
 
 The `execute` tool gives the agent full Playwright access — it can navigate, click, type, screenshot, read accessibility trees, and run JavaScript in the page context. All within your real browser session.
 
@@ -413,7 +471,7 @@ A: Any AI that supports MCP (OpenClaw, Claude Desktop, Claude Code) or any tool 
 A: Chrome aggressively kills MV3 extensions after 30 seconds of inactivity. The relay sends keepalive pings every 5 seconds to prevent this. If the extension does restart, it auto-reconnects.
 
 **Q: Can I control which tabs the AI accesses?**
-A: Yes. Click the extension icon to switch between Auto mode (agent sees all tabs) and Manual mode (you select which tabs). You can also lock URLs, block new tabs, or enable read-only mode.
+A: Yes. In Auto mode the agent can create and control its own tabs. In Manual mode, you explicitly attach tabs with **+ Attach Current Tab**. You can also lock URLs, block new tabs, or enable read-only mode.
 
 **Q: Does it work with multiple windows?**
 A: Yes. All tabs across all Chrome windows are visible.
@@ -433,3 +491,5 @@ CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay st
 ```bash
 jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.jsonl | uniq -c
 ```
+
+For incident/debug playbooks, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).

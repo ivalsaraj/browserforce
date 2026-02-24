@@ -6,7 +6,7 @@
 
 **You're giving an AI your real Chrome — your logins, cookies, and sessions. That takes conviction.** BrowserForce is built for people who use the best models and don't look back. Security is built in: lock URLs, block navigation, read-only mode, auto-cleanup — you stay in control.
 
-**Fully autonomous browser control.** No manual tab clicking. Your agent browses as you, even from WhatsApp. Other tools make you click each tab, spawn a fresh Chrome, or only work with one AI client. BrowserForce connects to **your running browser** and auto-attaches to all tabs. One Chrome extension, full Playwright API, completely hands-off.
+**Autonomous when you want it, controlled when you need it.** Your agent can run hands-off in Auto mode, or you can switch to Manual mode and explicitly attach only the tabs you trust. BrowserForce connects to **your running browser** with one Chrome extension and full Playwright API support.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
@@ -16,10 +16,10 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 |---|---|---|---|---|---|
 | Browser | Spawns new Chrome | Separate profile | Your Chrome | Your Chrome | **Your Chrome** |
 | Login state | Fresh | Fresh (isolated) | Yours | Yours | **Yours** |
-| Tab access | N/A (new browser) | Managed by agent | Click each tab | Click each tab | **All tabs, automatic** |
+| Tab access | N/A (new browser) | Managed by agent | Click each tab | Click each tab | **Auto mode + manual attached tabs** |
 | Autonomous | Yes | Yes | No (manual click) | No (manual click) | **Yes (fully autonomous)** |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)** |
-| Tools | Many dedicated | 1 `browser` tool | 1 `execute` tool | Built-in | **3 tools: `execute`, `screenshot_with_labels`, `reset`** |
+| Tools | Many dedicated | 1 `browser` tool | 1 `execute` tool | Built-in | **2 tools: `execute`, `reset`** |
 | Agent support | Any MCP client | OpenClaw only | Any MCP client | Claude only | **Any MCP client** |
 | Playwright API | Partial | No | Full | No | **Full** |
 
@@ -108,10 +108,10 @@ browserforce serve
 
 If your agent browses to the page and responds with the title, you're all set.
 
-<details>
-<summary><b>MCP setup for OpenClaw, Claude, Codex, Cursor, and Antigravity</b></summary>
+**MCP setup (advanced):**
 
-#### OpenClaw (MCP adapter)
+<details>
+<summary><b>OpenClaw (MCP adapter)</b></summary>
 
 Add to `~/.openclaw/openclaw.json`:
 
@@ -137,7 +137,10 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-#### Claude Desktop
+</details>
+
+<details>
+<summary><b>Claude Desktop</b></summary>
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -152,7 +155,10 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-#### Claude Code
+</details>
+
+<details>
+<summary><b>Claude Code</b></summary>
 
 Add to `~/.claude/mcp.json`:
 
@@ -167,7 +173,10 @@ Add to `~/.claude/mcp.json`:
 }
 ```
 
-#### Codex
+</details>
+
+<details>
+<summary><b>Codex</b></summary>
 
 Add to `~/.codex/config.toml`:
 
@@ -177,7 +186,10 @@ command = "npx"
 args = ["-y", "browserforce@latest", "mcp"]
 ```
 
-#### Cursor
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
 
 Add to `~/.cursor/mcp.json`:
 
@@ -192,7 +204,10 @@ Add to `~/.cursor/mcp.json`:
 }
 ```
 
-#### Antigravity
+</details>
+
+<details>
+<summary><b>Antigravity</b></summary>
 
 In Antigravity: Agent panel -> `...` -> `Manage MCP Servers` -> `View raw config`.
 Add the same `mcpServers` entry:
@@ -208,13 +223,13 @@ Add the same `mcpServers` entry:
 }
 ```
 
+</details>
+
 If MCP startup fails with `connection closed: initialize response`:
 
 1. Ensure args include `"mcp"` (without it, BrowserForce prints help and exits).
 2. If running from a local clone, install deps first: `pnpm install`.
 3. Validate the launch command manually: `npx -y browserforce@latest mcp`
-
-</details>
 
 ### CLI
 
@@ -368,6 +383,8 @@ await cleanHTML('body', { showDiffSinceLastCall: false });
 await pageMarkdown({ showDiffSinceLastCall: true });
 ```
 
+Need role-based, real workflows? See [Actionable Use Cases](docs/USE_CASES.md).
+
 ## Examples
 
 Get started with simple prompts. The AI generates code and does the work.
@@ -519,9 +536,9 @@ Get started with simple prompts. The AI generates code and does the work.
 
 The **relay server** runs on your machine (localhost only). It translates between the agent's CDP commands and the extension's debugger bridge.
 
-The **Chrome extension** lives in your browser. It attaches Chrome's built-in debugger to your tabs and forwards commands — exactly like DevTools does.
+The **Chrome extension** lives in your browser. It attaches Chrome's built-in debugger to permitted tabs and forwards commands — exactly like DevTools does.
 
-When the agent connects, it immediately sees all your open tabs as controllable Playwright pages. No clicking, no manual attachment.
+In **Auto mode**, the agent can create and control tabs it opens. In **Manual mode**, you decide access by clicking **+ Attach Current Tab**.
 
 ## You Stay in Control
 
@@ -536,6 +553,16 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Auto-detach** | Automatically detach inactive tabs after 5-60 minutes |
 | **Auto-close** | Automatically close agent-created tabs after 5-60 minutes |
 | **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
+
+### Controlled Tab Workflows
+
+- **Manually attach a tab:** Open the tab you want, click the extension popup, then click **+ Attach Current Tab**.
+- **Restrict to one controlled tab:** Use **Manual mode**, attach one tab, and enable **No new tabs**.
+- **Allow multiple controlled tabs:** Stay in **Manual mode** and attach each tab you want the agent to access.
+- **Restriction modes:** Use **Lock URL** (no navigation), **No new tabs**, and **Read-only** (observe only) together or separately.
+- **Auto-cleanup:** Use **Auto-detach** for inactive attached tabs and **Auto-close** for agent-created tabs.
+
+For step-by-step setups, see the [Controlled Tabs Playbook](GUIDE.md#controlled-tabs-playbook).
 
 ## Security
 
@@ -592,5 +619,7 @@ CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay st
 ```bash
 jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.jsonl | uniq -c
 ```
+
+For practical debugging and operations flows, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).
 
 > **Want the full walkthrough?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for a plain-English explanation of what this does and how to get started.
