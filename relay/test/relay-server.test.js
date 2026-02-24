@@ -442,13 +442,16 @@ describe('WebSocket Security', () => {
   it('rejects second /cdp client in single-active mode', async () => {
     const prevMode = process.env.BF_CLIENT_MODE;
     process.env.BF_CLIENT_MODE = 'single-active';
+    const singleRelay = new RelayServer(getRandomPort());
+    await singleRelay.start({ writeCdpUrl: false });
     let c1;
     let c2;
     try {
-      c1 = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      assert.equal(singleRelay.clientMode, 'single-active');
+      c1 = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
       await assert.rejects(
         (async () => {
-          c2 = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+          c2 = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
           c2.close();
         })(),
         /409|Unexpected/
@@ -456,6 +459,7 @@ describe('WebSocket Security', () => {
     } finally {
       if (c1 && c1.readyState === WebSocket.OPEN) c1.close();
       if (c2 && c2.readyState === WebSocket.OPEN) c2.close();
+      singleRelay.stop();
       if (prevMode === undefined) delete process.env.BF_CLIENT_MODE;
       else process.env.BF_CLIENT_MODE = prevMode;
     }
