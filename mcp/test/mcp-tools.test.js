@@ -107,6 +107,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('waitForPageLoad'), 'should mention waitForPageLoad');
     assert.ok(promptBlock.includes('screenshotWithAccessibilityLabels'), 'should mention screenshotWithAccessibilityLabels helper');
     assert.ok(promptBlock.includes('refToLocator({ ref })'), 'should mention refToLocator helper usage');
+    assert.ok(promptBlock.includes('getCDPSession({ page })'), 'should mention relay-safe getCDPSession helper usage');
     assert.ok(promptBlock.includes('cleanHTML'), 'should mention cleanHTML helper');
     assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
     assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
@@ -191,6 +192,7 @@ describe('Tool Definitions', () => {
     );
 
     assert.ok(source.includes('refToLocator'), 'exec engine should expose refToLocator helper');
+    assert.ok(source.includes('const getCDPSession = async'), 'exec engine should define getCDPSession helper');
   });
 });
 
