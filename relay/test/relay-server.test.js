@@ -81,6 +81,20 @@ function readJsonlEntries(logFilePath) {
     .map((line) => JSON.parse(line));
 }
 
+async function waitForCondition(check, {
+  timeoutMs = 3000,
+  intervalMs = 25,
+  description = 'condition',
+} = {}) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const result = check();
+    if (result) return result;
+    await sleep(intervalMs);
+  }
+  throw new Error(`Timed out waiting for ${description} after ${timeoutMs}ms`);
+}
+
 // ─── Token Persistence ───────────────────────────────────────────────────────
 
 describe('Token Persistence', () => {
@@ -1028,10 +1042,10 @@ describe('CDP JSONL Logging', () => {
       cdp.on('message', (data) => cdpMessages.push(JSON.parse(data.toString())));
 
       cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://example.com' } }));
-      await sleep(300);
-
-      const attached = cdpMessages.find((m) => m.method === 'Target.attachedToTarget');
-      assert.ok(attached, 'Expected Target.attachedToTarget after createTarget');
+      const attached = await waitForCondition(
+        () => cdpMessages.find((m) => m.method === 'Target.attachedToTarget'),
+        { description: 'Target.attachedToTarget event after createTarget' },
+      );
       const sessionId = attached.params.sessionId;
 
       cdp.send(JSON.stringify({
@@ -1040,7 +1054,10 @@ describe('CDP JSONL Logging', () => {
         params: { expression: '"ok"' },
         sessionId,
       }));
-      await sleep(200);
+      await waitForCondition(
+        () => cdpMessages.find((m) => m.id === 2),
+        { description: 'Runtime.evaluate response' },
+      );
 
       ext.send(JSON.stringify({
         method: 'cdpEvent',
@@ -1050,7 +1067,10 @@ describe('CDP JSONL Logging', () => {
           params: { timestamp: 42 },
         },
       }));
-      await sleep(300);
+      await waitForCondition(
+        () => cdpMessages.find((m) => m.method === 'Page.loadEventFired'),
+        { description: 'Page.loadEventFired event routed to CDP client' },
+      );
 
       assert.equal(fs.existsSync(logFilePath), true, 'CDP log file should exist');
       const entries = readJsonlEntries(logFilePath);
