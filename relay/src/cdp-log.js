@@ -6,6 +6,14 @@ const BF_DIR = path.join(os.homedir(), '.browserforce');
 const LOG_CDP_FILE_PATH = process.env.BROWSERFORCE_CDP_LOG_FILE_PATH || path.join(BF_DIR, 'cdp.jsonl');
 const DEFAULT_MAX_STRING_LENGTH = 2000;
 
+function chmodBestEffort(filePath, mode) {
+  try {
+    fs.chmodSync(filePath, mode);
+  } catch {
+    // Best effort only: some platforms/filesystems do not support POSIX modes.
+  }
+}
+
 function resolveMaxStringLength(maxStringLength) {
   if (Number.isFinite(maxStringLength) && maxStringLength > 0) {
     return Math.floor(maxStringLength);
@@ -43,8 +51,11 @@ function createTruncatingCircularReplacer(maxStringLength) {
 
 function createCdpLogger({ logFilePath, maxStringLength } = {}) {
   const resolvedLogFilePath = logFilePath || process.env.BROWSERFORCE_CDP_LOG_FILE_PATH || LOG_CDP_FILE_PATH;
-  fs.mkdirSync(path.dirname(resolvedLogFilePath), { recursive: true });
-  fs.writeFileSync(resolvedLogFilePath, '');
+  const logDir = path.dirname(resolvedLogFilePath);
+  fs.mkdirSync(logDir, { recursive: true });
+  chmodBestEffort(logDir, 0o700);
+  fs.writeFileSync(resolvedLogFilePath, '', { mode: 0o600 });
+  chmodBestEffort(resolvedLogFilePath, 0o600);
 
   const resolvedMaxStringLength = resolveMaxStringLength(maxStringLength);
   let queue = Promise.resolve();

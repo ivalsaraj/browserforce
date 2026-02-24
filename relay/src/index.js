@@ -158,7 +158,13 @@ class RelayServer {
   }
 
   start({ writeCdpUrl = true } = {}) {
-    this.cdpLogger = createCdpLogger();
+    try {
+      this.cdpLogger = createCdpLogger();
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      log('[relay] Warning: CDP logger disabled:', message);
+      this.cdpLogger = null;
+    }
     const server = http.createServer((req, res) => this._handleHttp(req, res));
 
     this.extWss = new WebSocketServer({ noServer: true });
