@@ -415,7 +415,7 @@ function registerExecuteTool(skillAppendix = '') {
     'execute',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/waitForPageLoad/getLogs/cleanHTML/pageMarkdown in scope'),
+      code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/getCDPSession/waitForPageLoad/getLogs/cleanHTML/pageMarkdown in scope'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
     },
     async ({ code, timeout = 30000 }) => {
