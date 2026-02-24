@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { chromium } from 'playwright-core';
 import {
-  getCdpUrl, getRelayHttpUrl, ensureRelay, isCdpBusyError, waitForFreeClientSlot,
+  getCdpUrl, getRelayHttpUrl, ensureRelay, connectOverCdpWithBusyRetry,
   CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
 import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
@@ -70,29 +70,12 @@ async function ensureBrowser() {
   if (browser?.isConnected()) return;
   await ensureRelay();
   const cdpUrl = getCdpUrl();
-  const baseUrl = getRelayHttpUrl();
-  const deadline = Date.now() + CONNECT_RETRY_TIMEOUT_MS;
-  let lastBusyError = null;
-
-  while (!browser && Date.now() < deadline) {
-    try {
-      browser = await chromium.connectOverCDP(cdpUrl);
-    } catch (err) {
-      if (!isCdpBusyError(err)) throw err;
-      lastBusyError = err;
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      const slotFreed = await waitForFreeClientSlot({
-        timeoutMs: remainingMs,
-        baseUrl,
-      });
-      if (!slotFreed) break;
-    }
-  }
-
-  if (!browser) {
-    throw lastBusyError || new Error('Failed to connect to CDP relay');
-  }
+  browser = await connectOverCdpWithBusyRetry({
+    connect: (url) => chromium.connectOverCDP(url),
+    cdpUrl,
+    baseUrl: getRelayHttpUrl(),
+    timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
+  });
 
   browser.on('disconnected', () => {
     browser = null;
