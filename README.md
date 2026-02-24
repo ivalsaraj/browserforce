@@ -115,7 +115,8 @@ If your agent browses to the page and responds with the title, you're all set.
 
 **MCP setup (advanced):**
 
-**OpenClaw (MCP adapter)**
+<details>
+<summary><b>OpenClaw (MCP adapter)</b></summary>
 
 Add to `~/.openclaw/openclaw.json`:
 
@@ -141,9 +142,10 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
+</details>
 
-
-**Claude Desktop**
+<details>
+<summary><b>Claude Desktop</b></summary>
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -158,9 +160,10 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
+</details>
 
-
-**Claude Code**
+<details>
+<summary><b>Claude Code</b></summary>
 
 Add to `~/.claude/mcp.json`:
 
@@ -175,9 +178,10 @@ Add to `~/.claude/mcp.json`:
 }
 ```
 
+</details>
 
-
-**Codex**
+<details>
+<summary><b>Codex</b></summary>
 
 Add to `~/.codex/config.toml`:
 
@@ -187,9 +191,10 @@ command = "npx"
 args = ["-y", "browserforce@latest", "mcp"]
 ```
 
+</details>
 
-
-**Cursor**
+<details>
+<summary><b>Cursor</b></summary>
 
 Add to `~/.cursor/mcp.json`:
 
@@ -204,9 +209,10 @@ Add to `~/.cursor/mcp.json`:
 }
 ```
 
+</details>
 
-
-**Antigravity**
+<details>
+<summary><b>Antigravity</b></summary>
 
 In Antigravity: Agent panel -> `...` -> `Manage MCP Servers` -> `View raw config`.
 Add the same `mcpServers` entry:
@@ -221,6 +227,8 @@ Add the same `mcpServers` entry:
   }
 }
 ```
+
+</details>
 
 
 
@@ -707,4 +715,3 @@ jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.
 For practical debugging and operations flows, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).
 
 > **Want the full walkthrough?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for a plain-English explanation of what this does and how to get started.
-
