@@ -1,4 +1,6 @@
-# BrowserForce // Parallel AI Agents in "your" Chrome!
+# BrowserForce // Parallel AI Agents in "your" Browser!
+
+Give AI agents controlled access to the browser you already use.
 
 > "a lion doesn't concern itself with token counting" — [@steipete](https://x.com/steipete), creator of [OpenClaw](https://github.com/openclaw/openclaw)
 >
@@ -12,16 +14,18 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 
 ## Comparison
 
-| | Playwright MCP | OpenClaw Browser | Playwriter | Claude Extension | BrowserForce |
-|---|---|---|---|---|---|
-| Browser | Spawns new Chrome | Separate profile | Your Chrome | Your Chrome | **Your Chrome** |
-| Login state | Fresh | Fresh (isolated) | Yours | Yours | **Yours** |
-| Tab access | N/A (new browser) | Managed by agent | Click each tab | Click each tab | **Auto mode + manual attached tabs** |
-| Autonomous | Yes | Yes | No (manual click) | No (manual click) | **Yes (fully autonomous)** |
-| Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)** |
-| Tools | Many dedicated | 1 `browser` tool | 1 `execute` tool | Built-in | **2 tools: `execute`, `reset`** |
-| Agent support | Any MCP client | OpenClaw only | Any MCP client | Claude only | **Any MCP client** |
-| Playwright API | Partial | No | Full | No | **Full** |
+
+|                | Playwright MCP       | OpenClaw Browser        | Playwriter              | Claude Extension     | BrowserForce                         |
+| -------------- | -------------------- | ----------------------- | ----------------------- | -------------------- | ------------------------------------ |
+| Browser        | Spawns new Chrome    | Separate profile        | Your Chrome             | Your Chrome          | **Your Chrome**                      |
+| Login state    | Fresh                | Fresh (isolated)        | Yours                   | Yours                | **Yours**                            |
+| Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Auto mode + manual attached tabs** |
+| Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
+| Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)**          |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset`**      |
+| Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
+| Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
+
 
 ## Your Credentials Stay Yours
 
@@ -30,6 +34,7 @@ Every other approach asks you to hand over something: an API key, an OAuth token
 **Why?** Because you're already logged in. BrowserForce talks to your running Chrome — it doesn't extract credentials, store cookies, or replay tokens. The browser handles auth exactly as it always has. Your agent inherits your sessions the same way a new Chrome tab does.
 
 What you never need to provide:
+
 - No passwords
 - No API keys
 - No OAuth tokens
@@ -61,8 +66,8 @@ pnpm install
 2. Open `chrome://extensions/` in Chrome
 3. Enable **Developer mode** (top-right toggle)
 4. Click **Load unpacked** → a file picker opens
-   - **macOS**: press `Cmd+Shift+G`, paste the path from step 1, press Enter
-   - **Windows/Linux**: paste the path directly into the address bar of the dialog
+  - **macOS**: press `Cmd+Shift+G`, paste the path from step 1, press Enter
+  - **Windows/Linux**: paste the path directly into the address bar of the dialog
 
 ❗ After every BrowserForce update, re-run `browserforce install-extension`, then reload the extension in `chrome://extensions/` (click the ↺ icon next to BrowserForce).
 
@@ -104,14 +109,13 @@ browserforce serve
 
 **Verify it works** — send this to your agent:
 
-> Go to https://x.com and give me top tweets
+> Go to [https://x.com](https://x.com) and give me top tweets
 
 If your agent browses to the page and responds with the title, you're all set.
 
 **MCP setup (advanced):**
 
-<details>
-<summary><b>OpenClaw (MCP adapter)</b></summary>
+**OpenClaw (MCP adapter)**
 
 Add to `~/.openclaw/openclaw.json`:
 
@@ -137,10 +141,9 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-</details>
 
-<details>
-<summary><b>Claude Desktop</b></summary>
+
+**Claude Desktop**
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -155,10 +158,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-</details>
 
-<details>
-<summary><b>Claude Code</b></summary>
+
+**Claude Code**
 
 Add to `~/.claude/mcp.json`:
 
@@ -173,10 +175,9 @@ Add to `~/.claude/mcp.json`:
 }
 ```
 
-</details>
 
-<details>
-<summary><b>Codex</b></summary>
+
+**Codex**
 
 Add to `~/.codex/config.toml`:
 
@@ -186,10 +187,9 @@ command = "npx"
 args = ["-y", "browserforce@latest", "mcp"]
 ```
 
-</details>
 
-<details>
-<summary><b>Cursor</b></summary>
+
+**Cursor**
 
 Add to `~/.cursor/mcp.json`:
 
@@ -204,10 +204,9 @@ Add to `~/.cursor/mcp.json`:
 }
 ```
 
-</details>
 
-<details>
-<summary><b>Antigravity</b></summary>
+
+**Antigravity**
 
 In Antigravity: Agent panel -> `...` -> `Manage MCP Servers` -> `View raw config`.
 Add the same `mcpServers` entry:
@@ -223,7 +222,7 @@ Add the same `mcpServers` entry:
 }
 ```
 
-</details>
+
 
 If MCP startup fails with `connection closed: initialize response`:
 
@@ -268,9 +267,11 @@ That's it. Restart MCP (or Claude Desktop) and `highlight()` is available in eve
 
 ### Official plugins
 
-| Plugin | What it adds | Install |
-|--------|-------------|---------|
+
+| Plugin      | What it adds                                                                                   | Install                                 |
+| ----------- | ---------------------------------------------------------------------------------------------- | --------------------------------------- |
 | `highlight` | `highlight(selector, color?)` — outlines matching elements; `clearHighlights()` — removes them | `browserforce plugin install highlight` |
+
 
 ### Use an installed plugin
 
@@ -367,10 +368,12 @@ state.results = await page.evaluate(() => document.title);
 
 ### MCP Tools
 
-| Tool | Description |
-|------|-------------|
+
+| Tool      | Description                                                                                                                                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `screenshotWithAccessibilityLabels()`, `cleanHTML()`, `pageMarkdown()`, and Node.js globals. |
-| `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
+| `reset`   | Reconnect to the relay and clear state. Use when the connection drops.                                                                                                                                                         |
+
 
 ### Diff-Aware Helpers
 
@@ -383,133 +386,204 @@ await cleanHTML('body', { showDiffSinceLastCall: false });
 await pageMarkdown({ showDiffSinceLastCall: true });
 ```
 
+### BrowserForce Tab Swarms // Parallel Tabs Processing
+
+BrowserForce uses a parallel-first policy for independent extraction jobs, so agents finish list/count/scrape tasks faster with bounded risk.
+
+- Rule: For count/list/extraction across independent pages, dates, or items, run parallel tabs first using `Promise.all` with a concurrency cap (`3-8`, typically start at `5`).
+- Fallback: If the site starts rate-limiting (`429`), anti-bot challenges appear, or timeouts repeat, automatically retry with reduced concurrency and then sequential as a final fallback.
+- Safety: This swarm exception is for read-only bulk extraction only; no user-tab mutation (checkout/purchase/send/delete/settings changes) during swarm runs.
+- Required telemetry return: `peakConcurrentTasks`, `wallClockMs`, `sumTaskDurationsMs`, `failures`, `retries`.
+
 Need role-based, real workflows? See [Actionable Use Cases](docs/USE_CASES.md).
 
 ## Examples
 
 Get started with simple prompts. The AI generates code and does the work.
 
-<details>
-<summary><b>Example 1: Read page content (X.com search)</b></summary>
+**Example 1: Read page content (X.com search)**
 
 **Prompt to AI:**
+
 > Go to x.com/search and search for "browserforce". Show me the top 5 tweets you find.
 
 **What the AI does:** Navigates to X, searches the term, extracts top tweets, returns them to you.
 
 **Use case:** Quick research, trend tracking, social listening.
 
-</details>
 
-<details>
-<summary><b>Example 2: Interact with a form (GitHub search)</b></summary>
+
+**Example 2: Interact with a form (GitHub search)**
 
 **Prompt to AI:**
+
 > Go to GitHub and search for "ai agents". Show me the top 3 repositories and their star counts.
 
 **What the AI does:** Fills GitHub search, waits for results, extracts repo names + stars, returns them.
 
 **Use case:** Finding libraries, competitive research, project discovery.
 
-</details>
+
 
 ### Multi-Tab Workflows
 
-<details>
-<summary><b>Example 3: Search → Extract → Return</b></summary>
+**Example 3: Search → Extract → Return**
 
 **Prompt to AI:**
+
 > Search ProductHunt for "AI tools" and give me the top 5 products with their taglines and upvote counts.
 
 **What the AI does:** Navigates ProductHunt, searches, extracts product info, returns structured data.
 
 **Use case:** Market research, finding tools, competitive analysis.
 
-</details>
 
-<details>
-<summary><b>Example 4: Open result in new tab, process there</b></summary>
+
+**Example 4: Open result in new tab, process there**
 
 **Prompt to AI:**
+
 > Find the #1 product from your last ProductHunt search, click into it, and read the full description. Tell me what it does.
 
 **What the AI does:** Opens the product page from previous results, reads the description, summarizes it.
 
 **Use case:** Deep-dive research, understanding competitors, due diligence.
 
-</details>
 
-<details>
-<summary><b>Example 5: Debugging workflow (inspect + verify)</b></summary>
+
+**Example 5: Debugging workflow (inspect + verify)**
 
 **Prompt to AI:**
+
 > Go to my staging site at staging.myapp.com/checkout and take a labeled screenshot. Tell me if the "Complete Purchase" button is visible and what's around it.
 
 **What the AI does:** Navigates, takes screenshot with interactive labels, analyzes button state and layout.
 
 **Use case:** Visual debugging, QA checks, spotting broken elements.
 
-</details>
 
-<details>
-<summary><b>Example 6: Test form with data</b></summary>
+
+**Example 6: Test form with data**
 
 **Prompt to AI:**
-> Sign up for Substack using the email test.user@example.com. Tell me if the signup completes successfully.
+
+> Sign up for Substack using the email [test.user@example.com](mailto:test.user@example.com). Tell me if the signup completes successfully.
 
 **What the AI does:** Fills the form, submits, waits for confirmation, reports success/failure.
 
 **Use case:** Testing sign-up flows, QA automation, form validation.
 
-</details>
 
-<details>
-<summary><b>Example 7: Content pipeline (search → extract → compare)</b></summary>
+
+**Example 7: Content pipeline (search → extract → compare)**
 
 **Prompt to AI:**
+
 > Search for "AI regulation" on both X.com and LinkedIn. Give me the top 5 trending posts from each and tell me which topics overlap.
 
 **What the AI does:** Searches both platforms, extracts posts, compares content, returns analysis.
 
 **Use case:** Multi-source research, trend analysis, market sentiment.
 
-</details>
 
-<details>
-<summary><b>Example 8: Data extraction → CSV pipeline</b></summary>
+
+**Example 8: Data extraction → CSV pipeline**
 
 **Prompt to AI:**
+
 > Go to Hacker News and extract the top 10 stories with their titles and vote counts. Format as CSV so I can import into a spreadsheet.
 
 **What the AI does:** Navigates HN, extracts story data, formats as CSV, returns it ready to paste.
 
 **Use case:** Data workflows, trend tracking, content curation.
 
-</details>
 
-<details>
-<summary><b>Example 9: A/B testing across variants</b></summary>
+
+**Example 9: A/B testing across variants**
 
 **Prompt to AI:**
+
 > Visit myapp.com/?variant=red and myapp.com/?variant=blue. Compare the two designs and tell me which button color is more prominent and what other differences exist.
 
 **What the AI does:** Opens both variants, compares layouts/colors/text, reports visual differences.
 
 **Use case:** Design QA, A/B testing, variant comparison.
 
-</details>
 
-<details>
-<summary><b>Example 10: Monitor + alert workflow</b></summary>
+
+**Example 10: Monitor + alert workflow**
 
 **Prompt to AI:**
+
 > Check our status page at status.myapp.com every few minutes. Tell me the current status of the API and database. Alert me if anything changes from green to red.
 
 **What the AI does:** Monitors status page, reads indicators, alerts on degradation.
 
 **Use case:** Uptime monitoring, incident detection, SLA tracking.
 
-</details>
+
+
+### Parallel Tab Swarms: Real-World Use Cases
+
+**Example 11: Retail price swarm (SKU × store matrix)**
+
+**Prompt to AI:**
+
+> For these 25 SKUs, check Amazon, Walmart, Target, and Best Buy in parallel tabs. Return the best price, in-stock status, and fastest delivery ETA per SKU.
+
+**What the AI does:** Runs independent `(sku, store)` checks in capped parallel tab batches, retries with reduced concurrency on `429`/timeouts, then falls back sequentially if needed.
+
+**Use case:** Pricing intelligence, buy-box monitoring, merchandising ops.
+
+
+
+**Example 12: Travel fare grid (date × route sweep)**
+
+**Prompt to AI:**
+
+> For SFO → JFK, scan the next 14 Fridays and Sundays across Google Flights, Kayak, and Expedia. Return the cheapest refundable option for each date.
+
+**What the AI does:** Opens independent `(date, site)` tasks in parallel, extracts fare + refundability, and returns a normalized comparison table.
+
+**Use case:** Travel operations, procurement, rapid itinerary optimization.
+
+
+
+**Example 13: Competitor launch radar (company × source)**
+
+**Prompt to AI:**
+
+> Track the last 7 days of updates for these 30 competitors across release notes, changelogs, docs, and blog posts. Group findings by feature category.
+
+**What the AI does:** Parallelizes `(company, source)` extraction, deduplicates announcements, and returns a launch digest with links.
+
+**Use case:** Product strategy, PM intelligence, competitive monitoring.
+
+
+
+**Example 14: Lead qualification swarm (account × signal source)**
+
+**Prompt to AI:**
+
+> For this account list, check careers pages, LinkedIn jobs, pricing pages, and press/news for expansion signals. Score each account and rank top opportunities.
+
+**What the AI does:** Executes independent account-source checks in parallel tabs, extracts signal evidence, and returns ranked lead scores with rationale.
+
+**Use case:** Sales research, outbound prioritization, RevOps signal mining.
+
+
+
+**Example 15: Security exposure triage (domain × surface)**
+
+**Prompt to AI:**
+
+> For these domains, inspect login pages, robots.txt, status pages, public docs, and likely staging links. Flag suspicious exposures with evidence links.
+
+**What the AI does:** Runs read-only `(domain, surface)` checks in a swarm, retries degraded paths safely, and returns a risk-prioritized findings report.
+
+**Use case:** Security reviews, surface mapping, pre-audit triage.
+
+
 
 **More examples** and detailed walkthrough available in the [User Guide](GUIDE.md#examples).
 
@@ -544,15 +618,17 @@ In **Auto mode**, the agent can create and control tabs it opens. In **Manual mo
 
 Click the extension icon to configure restrictions. Your browser, your rules:
 
-| Setting | What it does |
-|---------|-------------|
-| **Auto / Manual mode** | Let the agent create tabs freely, or hand-pick which tabs it can access |
-| **Lock URL** | Prevent the agent from navigating away from the current page |
-| **No new tabs** | Block the agent from opening new tabs |
-| **Read-only** | Observe only — no clicks, no typing, no interactions |
-| **Auto-detach** | Automatically detach inactive tabs after 5-60 minutes |
-| **Auto-close** | Automatically close agent-created tabs after 5-60 minutes |
+
+| Setting                 | What it does                                                             |
+| ----------------------- | ------------------------------------------------------------------------ |
+| **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
+| **Lock URL**            | Prevent the agent from navigating away from the current page             |
+| **No new tabs**         | Block the agent from opening new tabs                                    |
+| **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
+| **Auto-detach**         | Automatically detach inactive tabs after 5-60 minutes                    |
+| **Auto-close**          | Automatically close agent-created tabs after 5-60 minutes                |
 | **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
+
 
 ### Controlled Tab Workflows
 
@@ -566,19 +642,22 @@ For step-by-step setups, see the [Controlled Tabs Playbook](GUIDE.md#controlled-
 
 ## Security
 
-| Layer | Control |
-|-------|---------|
-| **Network** | Relay binds to `127.0.0.1` only — never exposed to the internet |
-| **Auth** | Random token required for every CDP connection |
-| **Origin** | Extension only accepts connections from its own Chrome origin |
-| **Visibility** | Chrome shows "controlled by automated test software" on active tabs |
+
+| Layer            | Control                                                                 |
+| ---------------- | ----------------------------------------------------------------------- |
+| **Network**      | Relay binds to `127.0.0.1` only — never exposed to the internet         |
+| **Auth**         | Random token required for every CDP connection                          |
+| **Origin**       | Extension only accepts connections from its own Chrome origin           |
+| **Visibility**   | Chrome shows "controlled by automated test software" on active tabs     |
 | **Restrictions** | Lock URLs, block navigation, read-only mode — enforced at the CDP level |
+
 
 Everything runs on your machine. The auth token is stored at `~/.browserforce/auth-token` with owner-only permissions.
 
 ## Configuration
 
 **Custom relay port:**
+
 ```bash
 RELAY_PORT=19333 browserforce serve
 ```
@@ -586,6 +665,7 @@ RELAY_PORT=19333 browserforce serve
 **Extension relay URL:** Click the extension icon → change the URL → Save. Default: `ws://127.0.0.1:19222/extension`
 
 **Override CDP URL for MCP:**
+
 ```json
 {
   "env": {
@@ -596,23 +676,27 @@ RELAY_PORT=19333 browserforce serve
 
 ## API
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Health check (extension status, target count) |
-| `GET /json/version` | CDP discovery |
-| `GET /json/list` | List attached targets |
-| `ws://.../extension` | Chrome extension WebSocket |
-| `ws://.../cdp?token=...` | Agent CDP connection |
+
+| Endpoint                 | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `GET /`                  | Health check (extension status, target count) |
+| `GET /json/version`      | CDP discovery                                 |
+| `GET /json/list`         | List attached targets                         |
+| `ws://.../extension`     | Chrome extension WebSocket                    |
+| `ws://.../cdp?token=...` | Agent CDP connection                          |
+
 
 ## Troubleshooting
 
-| Problem | Fix |
-|---------|-----|
-| Extension stays gray | Is the relay running? Check `http://127.0.0.1:19222/` |
-| "Another debugger attached" | Close DevTools for that tab |
-| Agent sees 0 pages | Open at least one regular webpage (not `chrome://`) |
-| Extension keeps reconnecting | Normal — MV3 kills idle workers; it auto-recovers |
-| Port in use | `lsof -ti:19222 \| xargs kill -9` |
+
+| Problem                      | Fix                                                   |
+| ---------------------------- | ----------------------------------------------------- |
+| Extension stays gray         | Is the relay running? Check `http://127.0.0.1:19222/` |
+| "Another debugger attached"  | Close DevTools for that tab                           |
+| Agent sees 0 pages           | Open at least one regular webpage (not `chrome://`)   |
+| Extension keeps reconnecting | Normal — MV3 kills idle workers; it auto-recovers     |
+| Port in use                  | `lsof -ti:19222 | xargs kill -9`                      |
+
 
 CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
 
@@ -623,3 +707,4 @@ jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.
 For practical debugging and operations flows, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).
 
 > **Want the full walkthrough?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for a plain-English explanation of what this does and how to get started.
+
