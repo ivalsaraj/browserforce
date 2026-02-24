@@ -465,6 +465,103 @@ describe('WebSocket Security', () => {
     }
   });
 
+  it('allows standby client after active client disconnects', async () => {
+    const prevMode = process.env.BF_CLIENT_MODE;
+    process.env.BF_CLIENT_MODE = 'single-active';
+    const singleRelay = new RelayServer(getRandomPort());
+    await singleRelay.start({ writeCdpUrl: false });
+
+    let activeClient;
+    let standbyClient;
+    let rejectedClient;
+    try {
+      activeClient = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
+      const slotWhileActive = await httpGet(`http://127.0.0.1:${singleRelay.port}/client-slot`);
+      assert.equal(slotWhileActive.status, 200);
+      assert.equal(slotWhileActive.body.busy, true);
+
+      await assert.rejects(
+        (async () => {
+          rejectedClient = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
+          rejectedClient.close();
+        })(),
+        /409|Unexpected/
+      );
+
+      const activeClosed = new Promise((resolve) => activeClient.once('close', resolve));
+      activeClient.close();
+      await activeClosed;
+
+      await waitForCondition(() => singleRelay.activeClient === null, {
+        description: 'active client slot release',
+      });
+
+      const slotAfterDisconnect = await httpGet(`http://127.0.0.1:${singleRelay.port}/client-slot`);
+      assert.equal(slotAfterDisconnect.status, 200);
+      assert.equal(slotAfterDisconnect.body.busy, false);
+
+      standbyClient = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
+      assert.equal(standbyClient.readyState, WebSocket.OPEN);
+    } finally {
+      if (activeClient && activeClient.readyState === WebSocket.OPEN) activeClient.close();
+      if (standbyClient && standbyClient.readyState === WebSocket.OPEN) standbyClient.close();
+      if (rejectedClient && rejectedClient.readyState === WebSocket.OPEN) rejectedClient.close();
+      singleRelay.stop();
+      if (prevMode === undefined) delete process.env.BF_CLIENT_MODE;
+      else process.env.BF_CLIENT_MODE = prevMode;
+    }
+  });
+
+  it('GET /client-slot returns mode and active status', async () => {
+    const prevMode = process.env.BF_CLIENT_MODE;
+    process.env.BF_CLIENT_MODE = 'single-active';
+    const singleRelay = new RelayServer(getRandomPort());
+    await singleRelay.start({ writeCdpUrl: false });
+
+    let activeClient;
+    try {
+      const before = await httpGet(`http://127.0.0.1:${singleRelay.port}/client-slot`);
+      assert.equal(before.status, 200);
+      assert.deepEqual(before.body, {
+        mode: 'single-active',
+        busy: false,
+        activeClientId: null,
+        connectedAt: null,
+      });
+
+      activeClient = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
+
+      const during = await httpGet(`http://127.0.0.1:${singleRelay.port}/client-slot`);
+      assert.equal(during.status, 200);
+      assert.equal(during.body.mode, 'single-active');
+      assert.equal(during.body.busy, true);
+      assert.equal(typeof during.body.activeClientId, 'string');
+      assert.equal(typeof during.body.connectedAt, 'number');
+
+      const activeClosed = new Promise((resolve) => activeClient.once('close', resolve));
+      activeClient.close();
+      await activeClosed;
+
+      await waitForCondition(() => singleRelay.activeClient === null, {
+        description: 'active client slot release',
+      });
+
+      const after = await httpGet(`http://127.0.0.1:${singleRelay.port}/client-slot`);
+      assert.equal(after.status, 200);
+      assert.deepEqual(after.body, {
+        mode: 'single-active',
+        busy: false,
+        activeClientId: null,
+        connectedAt: null,
+      });
+    } finally {
+      if (activeClient && activeClient.readyState === WebSocket.OPEN) activeClient.close();
+      singleRelay.stop();
+      if (prevMode === undefined) delete process.env.BF_CLIENT_MODE;
+      else process.env.BF_CLIENT_MODE = prevMode;
+    }
+  });
+
   it('rejects second extension connection (single slot)', async () => {
     const ws1 = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://first' },

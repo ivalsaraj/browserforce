@@ -233,6 +233,18 @@ class RelayServer {
       return;
     }
 
+    if (url.pathname === '/client-slot') {
+      const activeWsOpen = this.activeClient?.ws?.readyState === WebSocket.OPEN;
+      const busy = this.clientMode === CLIENT_MODE_SINGLE && activeWsOpen;
+      res.end(JSON.stringify({
+        mode: this.clientMode,
+        busy,
+        activeClientId: busy ? this.activeClient.id : null,
+        connectedAt: busy ? this.activeClient.connectedAt : null,
+      }));
+      return;
+    }
+
     if (url.pathname === '/json/version') {
       res.end(JSON.stringify({
         Browser: 'BrowserForce/1.0',
@@ -679,7 +691,7 @@ class RelayServer {
     ws.on('close', () => {
       log('[relay] CDP client disconnected');
       this.clients.delete(ws);
-      if (this.activeClient?.id === clientId) {
+      if (this.activeClient?.ws === ws) {
         this.activeClient = null;
       }
     });
