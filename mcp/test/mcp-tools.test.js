@@ -113,6 +113,23 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('ANTI-PATTERN') || promptBlock.includes('Don\'t') || promptBlock.includes('✗'), 'should include anti-patterns');
   });
 
+  it('execute prompt includes tactical anti-pattern and decision guidance', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+
+    assert.ok(promptBlock.includes('Selector priority'), 'should include selector ranking guidance');
+    assert.ok(promptBlock.includes('login popups'), 'should include login popup handling');
+    assert.ok(promptBlock.includes('cookie') || promptBlock.includes('consent'), 'should include consent modal handling');
+    assert.ok(promptBlock.includes('stale locator'), 'should include stale locator warning');
+    assert.ok(promptBlock.includes('snapshot({ showDiffSinceLastCall'), 'should include diff usage guidance');
+  });
+
   it('execute tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
