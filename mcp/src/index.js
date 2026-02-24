@@ -134,6 +134,7 @@ Variables:
 
 Helpers:
   snapshot({ selector?, search? })   Accessibility tree as text. 10-100x cheaper than screenshots.
+  refToLocator({ ref })              Resolve a snapshot ref (e.g., e3) to a Playwright locator string.
   waitForPageLoad({ timeout? })      Smart load detection (filters analytics/ads, polls readyState).
   getLogs({ count? })                Browser console logs captured for current page.
   clearLogs()                        Clear captured console logs.
@@ -235,8 +236,9 @@ Use Playwright locators with accessibility roles (from snapshot output):
   await state.page.locator('role=textbox[name="Search"]').fill('query');
   await state.page.locator('role=link[name="Settings"]').click();
 
-If snapshot shows [ref=some-id] for an element with a data-testid or id:
-  await state.page.locator('[data-testid="some-id"]').click();
+If snapshot shows [ref=e3], resolve it with refToLocator({ ref }) before acting:
+  const locator = refToLocator({ ref: 'e3' });
+  if (locator) await state.page.locator(locator).click();
 
 For text content:
   const text = await state.page.locator('role=heading').textContent();
@@ -406,7 +408,7 @@ function registerExecuteTool(skillAppendix = '') {
     'execute',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run — page/context/state/snapshot/waitForPageLoad/getLogs/cleanHTML/pageMarkdown in scope'),
+      code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/waitForPageLoad/getLogs/cleanHTML/pageMarkdown in scope'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
     },
     async ({ code, timeout = 30000 }) => {
