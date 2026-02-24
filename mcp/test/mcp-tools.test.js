@@ -56,7 +56,7 @@ describe('Tool Definitions', () => {
     assert.equal(result, '');
   });
 
-  it('registers exactly 3 tools: execute, reset, screenshot_with_labels', () => {
+  it('registers exactly 2 tools: execute, reset', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -69,8 +69,8 @@ describe('Tool Definitions', () => {
       toolNames.push(match[1]);
     }
 
-    assert.equal(toolNames.length, 3, `Should have exactly 3 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
-    assert.deepEqual(toolNames.sort(), ['execute', 'reset', 'screenshot_with_labels']);
+    assert.equal(toolNames.length, 2, `Should have exactly 2 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
+    assert.deepEqual(toolNames.sort(), ['execute', 'reset']);
   });
 
   it('tools have non-empty descriptions', () => {
@@ -105,6 +105,9 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('state.page'), 'should mention state.page for page management');
     assert.ok(promptBlock.includes('snapshot'), 'should mention snapshot-first approach');
     assert.ok(promptBlock.includes('waitForPageLoad'), 'should mention waitForPageLoad');
+    assert.ok(promptBlock.includes('screenshotWithAccessibilityLabels'), 'should mention screenshotWithAccessibilityLabels helper');
+    assert.ok(promptBlock.includes('cleanHTML'), 'should mention cleanHTML helper');
+    assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
     assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
     // Anti-patterns section
     assert.ok(promptBlock.includes('ANTI-PATTERN') || promptBlock.includes('Don\'t') || promptBlock.includes('✗'), 'should include anti-patterns');
@@ -138,31 +141,14 @@ describe('Tool Definitions', () => {
     assert.ok(paramsMatch, 'reset should have empty params {}');
   });
 
-  it('screenshot_with_labels tool has optional selector and interactiveOnly params', () => {
+  it('does not register screenshot_with_labels tool', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
-    const toolBlock = source.split("'screenshot_with_labels'")[1]?.split('server.tool(')[0] || '';
-    assert.ok(toolBlock.includes('z.string().optional()'), 'should have optional string param (selector)');
-    assert.ok(toolBlock.includes('z.boolean().optional()'), 'should have optional boolean param (interactiveOnly)');
-    assert.ok(toolBlock.includes('selector:'), 'should have selector param');
-    assert.ok(toolBlock.includes('interactiveOnly:'), 'should have interactiveOnly param');
-  });
-
-  it('screenshot_with_labels tool has descriptive prompt', () => {
-    const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
-      'utf8'
-    );
-
-    assert.ok(source.includes('SCREENSHOT_LABELS_PROMPT'), 'should reference SCREENSHOT_LABELS_PROMPT');
-    assert.ok(source.includes('const SCREENSHOT_LABELS_PROMPT'), 'SCREENSHOT_LABELS_PROMPT should be defined');
-    const promptIdx = source.indexOf('const SCREENSHOT_LABELS_PROMPT');
-    const promptBlock = source.slice(promptIdx, source.indexOf("server.tool(\n  'screenshot_with_labels'"));
-    assert.ok(promptBlock.includes('color-coded'), 'prompt should mention color coding');
-    assert.ok(promptBlock.includes('snapshot'), 'prompt should mention snapshot');
+    assert.ok(!source.includes("'screenshot_with_labels'"), 'screenshot_with_labels tool should be removed');
+    assert.ok(!source.includes('SCREENSHOT_LABELS_PROMPT'), 'dedicated screenshot prompt should be removed');
   });
 });
 
@@ -201,7 +187,7 @@ describe('MCP Response Format', () => {
     assert.equal(parsed[1].url, 'https://github.com');
   });
 
-  it('screenshot_with_labels multi-content format is valid', () => {
+  it('labeled screenshot multi-content format is valid', () => {
     const fakeBase64 = Buffer.from('fake-jpeg-data').toString('base64');
     const response = {
       content: [

@@ -10,6 +10,9 @@ import {
   TEST_ID_ATTRS,
   buildSnapshotText, parseSearchPattern, annotateStableAttrs,
 } from './snapshot.js';
+import { screenshotWithLabels } from './a11y-labels.js';
+import { getCleanHTML } from './clean-html.js';
+import { getPageMarkdown } from './page-markdown.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -444,6 +447,19 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     if (consoleLogs) consoleLogs.set(activePage(), []);
   };
 
+  const screenshotWithAccessibilityLabels = async ({ selector, interactiveOnly = true } = {}) => {
+    const page = activePage();
+    const { screenshot, snapshot: snapText, labelCount } = await screenshotWithLabels(page, {
+      selector,
+      interactiveOnly,
+    });
+    return { _bf_type: 'labeled_screenshot', screenshot, snapshot: snapText, labelCount };
+  };
+
+  const cleanHTML = (selector, opts) => getCleanHTML(activePage(), selector, opts);
+
+  const pageMarkdown = () => getPageMarkdown(activePage());
+
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
   const wrappedPluginHelpers = {};
   for (const [name, fn] of Object.entries(pluginHelpers)) {
@@ -458,6 +474,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     page: defaultPage, context: ctx, state: userState,
     snapshot, waitForPageLoad, getLogs, clearLogs,
+    screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,
   };
@@ -480,6 +497,12 @@ export async function runCode(code, execCtx, timeoutMs) {
 export function formatResult(result) {
   if (result === undefined || result === null) {
     return { type: 'text', text: String(result) };
+  }
+  if (result && typeof result === 'object' && result._bf_type === 'labeled_screenshot') {
+    return [
+      { type: 'image', data: result.screenshot.toString('base64'), mimeType: 'image/jpeg' },
+      { type: 'text', text: `Labels: ${result.labelCount} interactive elements\n\n${result.snapshot}` },
+    ];
   }
   if (Buffer.isBuffer(result)) {
     return { type: 'image', data: result.toString('base64'), mimeType: 'image/png' };

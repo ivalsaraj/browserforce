@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildExecContext, runCode } from '../src/exec-engine.js';
+import { buildExecContext, runCode, formatResult } from '../src/exec-engine.js';
 
 const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => 'Test' };
 const mockCtx = { pages: () => [mockPage] };
@@ -36,4 +36,31 @@ test('plugin helper receives null page gracefully when no page open', async () =
   // Calling safeHelper should not throw
   const result = await runCode('return await safeHelper()', ctx, 5000);
   assert.equal(result, 'no-page');
+});
+
+test('buildExecContext exposes screenshot and content helpers in execute scope', () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  assert.equal(typeof ctx.screenshotWithAccessibilityLabels, 'function');
+  assert.equal(typeof ctx.cleanHTML, 'function');
+  assert.equal(typeof ctx.pageMarkdown, 'function');
+});
+
+test('formatResult returns multi-content for labeled screenshot sentinel', () => {
+  const fakeBuffer = Buffer.from('fake-jpeg-data');
+  const formatted = formatResult({
+    _bf_type: 'labeled_screenshot',
+    screenshot: fakeBuffer,
+    snapshot: '- button "Submit" [ref=e1]',
+    labelCount: 1,
+  });
+
+  assert.ok(Array.isArray(formatted));
+  assert.equal(formatted.length, 2);
+  assert.deepEqual(formatted[0], {
+    type: 'image',
+    data: fakeBuffer.toString('base64'),
+    mimeType: 'image/jpeg',
+  });
+  assert.equal(formatted[1].type, 'text');
+  assert.ok(formatted[1].text.includes('Labels: 1 interactive elements'));
 });
