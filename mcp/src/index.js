@@ -1,5 +1,5 @@
 // BrowserForce — MCP Server
-// 3-tool architecture: execute (run Playwright code) + reset (reconnect) + screenshot_with_labels (visual a11y labels)
+// 2-tool architecture: execute (run Playwright code) + reset (reconnect)
 // Connects to the relay via Playwright's CDP client.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -9,7 +9,6 @@ import { chromium } from 'playwright-core';
 import {
   getCdpUrl, ensureRelay, CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
-import { screenshotWithLabels } from './a11y-labels.js';
 import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
 import { checkForUpdate } from './update-check.js';
 
@@ -138,6 +137,16 @@ Helpers:
   waitForPageLoad({ timeout? })      Smart load detection (filters analytics/ads, polls readyState).
   getLogs({ count? })                Browser console logs captured for current page.
   clearLogs()                        Clear captured console logs.
+  screenshotWithAccessibilityLabels({ selector?, interactiveOnly? })
+                                     Vimium-style labeled screenshot + accessibility snapshot.
+                                     Returns image with color-coded element labels (e1, e2...) and
+                                     matching text snapshot. Use when visual layout matters.
+  cleanHTML(selector?, opts?)        Cleaned HTML — strips scripts, styles, decorative elements.
+                                     Keeps semantic attrs: href, src, role, aria-*, data-testid.
+                                     opts: { maxAttrLen?, maxContentLen? }
+  pageMarkdown()                     Article content via Mozilla Readability (Firefox Reader View).
+                                     Strips nav/ads/sidebars. Returns title + metadata + body text.
+                                     Falls back to raw body text for non-article pages.
 
 Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEncoder, TextDecoder
 
@@ -309,7 +318,7 @@ function registerExecuteTool(skillAppendix = '') {
     'execute',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run — page/context/state/snapshot/waitForPageLoad/getLogs in scope'),
+      code: z.string().describe('JavaScript to run — page/context/state/snapshot/waitForPageLoad/getLogs/cleanHTML/pageMarkdown in scope'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
     },
     async ({ code, timeout = 30000 }) => {
@@ -326,9 +335,9 @@ function registerExecuteTool(skillAppendix = '') {
       try {
         const result = await runCode(code, execCtx, timeout);
         const formatted = formatResult(result);
-        const content = [formatted];
+        const content = Array.isArray(formatted) ? [...formatted] : [formatted];
         // Append update notice as a separate content item (once only per session)
-        if (pendingUpdate && !updateNoticeSent && formatted.type === 'text') {
+        if (pendingUpdate && !updateNoticeSent && content[0]?.type === 'text') {
           updateNoticeSent = true;
           content.push({ type: 'text', text: `[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]` });
         }
@@ -367,79 +376,6 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: 'text', text: `Reset failed: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── Screenshot with Labels Tool ──────────────────────────────────────────────
-
-const SCREENSHOT_LABELS_PROMPT = `Take a screenshot with Vimium-style accessibility labels on interactive elements.
-
-Returns TWO content items:
-1. JPEG screenshot with color-coded labels (e1, e2, e3...) on buttons, links, inputs, etc.
-2. Text accessibility snapshot with matching refs and role/name locators
-
-Labels are color-coded by role:
-- Yellow: links
-- Orange: buttons, menu items, tabs
-- Red/pink: text inputs, search boxes
-- Green: checkboxes, radio buttons
-- Blue: sliders, spinbuttons, media
-- Purple: switches
-
-Use this tool when:
-- You need to understand the visual layout of a page
-- Text snapshot alone can't convey spatial relationships
-- You need to verify element positions (dashboards, grids, maps)
-- You need both visual context AND element refs for interaction
-
-After getting the screenshot, use the refs to interact via the execute tool:
-  await state.page.locator('role=button[name="Submit"]').click();
-
-Parameters:
-- selector: CSS selector to scope labels to part of the page (e.g., '#main', '.sidebar'). Main frame only.
-- interactiveOnly: Only label interactive elements like buttons/links/inputs (default: true)
-
-Limitations:
-- Main frame only — does not label elements inside cross-origin iframes
-- Locators are role/name based — no data-testid matching`;
-
-server.tool(
-  'screenshot_with_labels',
-  SCREENSHOT_LABELS_PROMPT,
-  {
-    selector: z.string().optional().describe('CSS selector to scope labels to a subtree of the main frame'),
-    interactiveOnly: z.boolean().optional().describe('Only label interactive elements (default: true)'),
-  },
-  async ({ selector, interactiveOnly = true }) => {
-    await ensureBrowser();
-    const ctx = getContext();
-    const page = (userState.page && !userState.page.isClosed())
-      ? userState.page
-      : ctx.pages()[0] || null;
-    if (!page) {
-      return {
-        content: [{ type: 'text', text: 'Error: No pages available. Open a tab first.' }],
-        isError: true,
-      };
-    }
-
-    try {
-      const { screenshot, snapshot, labelCount } = await screenshotWithLabels(page, {
-        selector,
-        interactiveOnly,
-      });
-      return {
-        content: [
-          { type: 'image', data: screenshot.toString('base64'), mimeType: 'image/jpeg' },
-          { type: 'text', text: `Labels: ${labelCount} interactive elements\n\n${snapshot}` },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text', text: `Error: ${err.message}` }],
         isError: true,
       };
     }

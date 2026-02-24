@@ -212,12 +212,11 @@ browserforce navigate https://gmail.com
 
 ## MCP Tools Reference
 
-When connected via MCP (OpenClaw, Claude Desktop, Claude Code), the AI has three tools:
+When connected via MCP (OpenClaw, Claude Desktop, Claude Code), the AI has two tools:
 
 | Tool | What it does |
 |------|-------------|
-| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, and Node.js globals. |
-| `screenshot_with_labels` | Take a screenshot with Vimium-style accessibility labels overlaid on interactive elements. |
+| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `screenshotWithAccessibilityLabels()`, `cleanHTML()`, `pageMarkdown()`, and Node.js globals. |
 | `reset` | Reconnect to the relay and clear state. Use when the connection drops. |
 
 The `execute` tool gives the agent full Playwright access — it can navigate, click, type, screenshot, read accessibility trees, and run JavaScript in the page context. All within your real browser session.
