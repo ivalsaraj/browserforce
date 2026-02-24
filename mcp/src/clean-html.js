@@ -1,18 +1,23 @@
 // Clean HTML extraction — runs entirely in the browser via page.evaluate().
 // Strips scripts, styles, decorative elements; keeps semantic attributes.
 
+import { createSmartDiff } from './snapshot.js';
+
+const lastHtmlSnapshots = new WeakMap();
+
 /**
  * Extracts cleaned HTML from a Playwright page or locator.
  * All processing happens in-page via DOM manipulation — no server-side parsing deps.
  *
  * @param {import('playwright-core').Page} page
  * @param {string} [selector] - CSS selector to scope extraction (default: document)
- * @param {{ maxAttrLen?: number, maxContentLen?: number }} [opts]
+ * @param {{ maxAttrLen?: number, maxContentLen?: number, showDiffSinceLastCall?: boolean }} [opts]
  * @returns {Promise<string>}
  */
 export async function getCleanHTML(page, selector, opts = {}) {
   const maxAttrLen = opts.maxAttrLen ?? 200;
   const maxContentLen = opts.maxContentLen ?? 500;
+  const showDiffSinceLastCall = opts.showDiffSinceLastCall ?? true;
 
   const html = await page.evaluate(({ selector, maxAttrLen, maxContentLen }) => {
     const TAGS_TO_REMOVE = new Set([
@@ -161,6 +166,24 @@ export async function getCleanHTML(page, selector, opts = {}) {
 
     return root.outerHTML || root.innerHTML || '';
   }, { selector: selector || null, maxAttrLen, maxContentLen });
+
+  let pageSnapshots = lastHtmlSnapshots.get(page);
+  if (!pageSnapshots) {
+    pageSnapshots = new Map();
+    lastHtmlSnapshots.set(page, pageSnapshots);
+  }
+
+  const snapshotKey = selector || '__full_page__';
+  const previousSnapshot = pageSnapshots.get(snapshotKey);
+  pageSnapshots.set(snapshotKey, html);
+
+  if (showDiffSinceLastCall && previousSnapshot) {
+    const diffResult = createSmartDiff(previousSnapshot, html);
+    if (diffResult.type === 'no-change') {
+      return 'No changes since last call. Use showDiffSinceLastCall: false to see full content.';
+    }
+    return diffResult.content;
+  }
 
   return html;
 }
