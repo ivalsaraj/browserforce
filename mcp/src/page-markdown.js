@@ -20,6 +20,16 @@ function isRegExp(value) {
   );
 }
 
+function lineMatchesSearch(search, line) {
+  if (!isRegExp(search)) {
+    return line.toLowerCase().includes(String(search).toLowerCase());
+  }
+  if (search.global || search.sticky) {
+    search.lastIndex = 0;
+  }
+  return search.test(line);
+}
+
 function getReadabilityCode() {
   if (readabilityCode) return readabilityCode;
   const bundlePath = join(__dirname, 'vendor', 'readability.bundle.js');
@@ -128,24 +138,13 @@ export async function getPageMarkdown(page, opts = {}) {
   const previousSnapshot = lastMarkdownSnapshots.get(page);
   lastMarkdownSnapshots.set(page, markdown);
 
-  if (showDiffSinceLastCall && previousSnapshot) {
-    const diffResult = createSmartDiff(previousSnapshot, markdown);
-    if (diffResult.type === 'no-change') {
-      return 'No changes since last call. Use showDiffSinceLastCall: false to see full content.';
-    }
-    return diffResult.content;
-  }
-
   if (search) {
     const lines = markdown.split('\n');
     const matchIndices = [];
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const isMatch = isRegExp(search)
-        ? search.test(line)
-        : line.toLowerCase().includes(String(search).toLowerCase());
-      if (isMatch) {
+      if (lineMatchesSearch(search, line)) {
         matchIndices.push(i);
         if (matchIndices.length >= 10) break;
       }
@@ -176,6 +175,14 @@ export async function getPageMarkdown(page, opts = {}) {
     }
 
     return resultLines.join('\n');
+  }
+
+  if (showDiffSinceLastCall && previousSnapshot) {
+    const diffResult = createSmartDiff(previousSnapshot, markdown);
+    if (diffResult.type === 'no-change') {
+      return 'No changes since last call. Use showDiffSinceLastCall: false to see full content.';
+    }
+    return diffResult.content;
   }
 
   return markdown;

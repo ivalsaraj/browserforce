@@ -41,7 +41,8 @@ function createCleanHtmlPage() {
   };
 }
 
-function createPageMarkdownPage() {
+function createPageMarkdownPage(content = 'Markdown content line', options = {}) {
+  const title = options.title === undefined ? 'Markdown Title' : options.title;
   return {
     isClosed: () => false,
     evaluate: async (arg) => {
@@ -52,8 +53,8 @@ function createPageMarkdownPage() {
         }
         if (fnSource.includes('isProbablyReaderable')) {
           return {
-            content: 'Markdown content line',
-            title: 'Markdown Title',
+            content,
+            title,
             author: null,
             excerpt: null,
             siteName: null,
@@ -177,4 +178,26 @@ test('pageMarkdown option forwarding and diff wiring returns no-change guidance 
 
   const full = await ctx.pageMarkdown({ showDiffSinceLastCall: false });
   assert.ok(full.includes('# Markdown Title'));
+});
+
+test('pageMarkdown search takes precedence over diff mode on repeated calls', async () => {
+  const page = createPageMarkdownPage('alpha line\nfind me here\nomega line');
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+
+  await ctx.pageMarkdown({ showDiffSinceLastCall: true });
+  const searched = await ctx.pageMarkdown({ search: 'find me' });
+
+  assert.ok(searched.includes('find me here'));
+  assert.ok(!searched.includes('No changes since last call'));
+});
+
+test('pageMarkdown search resets regex state for g/y regex flags', async () => {
+  const page = createPageMarkdownPage('target on only line', { title: null });
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+  const search = /target/g;
+  search.lastIndex = 1;
+
+  const result = await ctx.pageMarkdown({ search, showDiffSinceLastCall: false });
+  assert.ok(result.includes('target on only line'));
+  assert.ok(!result.includes('No matches found'));
 });
