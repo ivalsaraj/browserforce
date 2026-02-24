@@ -352,11 +352,36 @@ async function cmdUpdate() {
   let hasVersion = false;
   try { readFs(pathJoin(extDir, 'VERSION'), 'utf8'); hasVersion = true; } catch { /* not installed */ }
   if (hasVersion) {
-    const { dest } = await doInstallExtension(true);
+    const { dest, reloaded } = await doInstallExtension(true);
     console.log(`Extension updated in ${dest}`);
-    console.log('❗ Reload the extension in chrome://extensions/ (click the ↺ icon).');
+    if (reloaded) {
+      console.log('  Reloading extension... ✓');
+    } else {
+      console.log('❗ Reload the extension in chrome://extensions/ (click the ↺ icon).');
+    }
   } else {
     console.log('Tip: run browserforce install-extension to set up the Chrome extension.');
+  }
+}
+
+async function attemptExtensionReload() {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { homedir } = await import('node:os');
+  const tokenFile = join(homedir(), '.browserforce', 'auth-token');
+  let authToken = '';
+  try { authToken = readFileSync(tokenFile, 'utf8').trim(); } catch { return false; }
+  if (!authToken) return false;
+
+  const { getRelayHttpUrl } = await import('./mcp/src/exec-engine.js');
+  let baseUrl;
+  try { baseUrl = getRelayHttpUrl(); } catch { baseUrl = 'http://127.0.0.1:19222'; }
+
+  try {
+    const { status, body } = await httpFetch('POST', `${baseUrl}/extension/reload`, {}, authToken);
+    return status === 200 && body?.reloaded === true;
+  } catch {
+    return false; // relay not running
   }
 }
 
@@ -381,6 +406,8 @@ async function doInstallExtension(quiet) {
   const pkgVersion = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version;
   writeFileSync(join(dest, 'VERSION'), pkgVersion);
 
+  const reloaded = await attemptExtensionReload();
+
   if (!quiet) {
     console.log(`Extension installed to: ${dest}`);
     console.log('');
@@ -390,11 +417,15 @@ async function doInstallExtension(quiet) {
     console.log('  3. Click "Load unpacked" → select:');
     console.log(`     ${dest}`);
     console.log('');
-    console.log('❗ After any BrowserForce update, re-run: browserforce install-extension');
-    console.log('   Then reload the extension in chrome://extensions/ (click the ↺ icon).');
+    if (reloaded) {
+      console.log('  Reloading extension... ✓');
+    } else {
+      console.log('❗ After any BrowserForce update, re-run: browserforce install-extension');
+      console.log('   Then reload the extension in chrome://extensions/ (click the ↺ icon).');
+    }
   }
 
-  return { dest, pkgVersion };
+  return { dest, pkgVersion, reloaded };
 }
 
 async function cmdInstallExtension() {

@@ -148,6 +148,9 @@ class RelayServer {
     // State
     this.autoAttachEnabled = false;
     this.autoAttachParams = null;
+
+    // Pending extension reload ack resolver (at most one at a time)
+    this._extReloadResolve = null;
   }
 
   start({ writeCdpUrl = true } = {}) {
@@ -295,6 +298,35 @@ class RelayServer {
       return;
     }
 
+    if (url.pathname === '/extension/reload' && req.method === 'POST') {
+      if (!this._requireAuth(req, res)) return;
+      if (!this.ext || this.ext.ws.readyState !== WebSocket.OPEN) {
+        res.end(JSON.stringify({ reloaded: false, reason: 'not connected' }));
+        return;
+      }
+      // Await ack with 2.5s timeout; extension sends 'reload-ack' before restarting
+      const reloaded = await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          this._extReloadResolve = null;
+          resolve(false);
+        }, 2500);
+        this._extReloadResolve = () => {
+          clearTimeout(timer);
+          this._extReloadResolve = null;
+          resolve(true);
+        };
+        try {
+          this.ext.ws.send(JSON.stringify({ method: 'reload' }));
+        } catch {
+          clearTimeout(timer);
+          this._extReloadResolve = null;
+          resolve(false);
+        }
+      });
+      res.end(JSON.stringify({ reloaded }));
+      return;
+    }
+
     res.statusCode = 404;
     res.end(JSON.stringify({ error: 'Not found' }));
   }
@@ -438,6 +470,11 @@ class RelayServer {
 
     // Events from extension
     if (msg.method === 'pong') return;
+
+    if (msg.method === 'reload-ack') {
+      if (this._extReloadResolve) this._extReloadResolve();
+      return;
+    }
 
     if (msg.method === 'cdpEvent') {
       this._handleCdpEventFromExt(msg.params);

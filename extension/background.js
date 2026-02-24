@@ -146,6 +146,14 @@ function handleRelayMessage(msg) {
     return;
   }
 
+  if (msg.method === 'reload') {
+    // Ack before restarting so relay knows the message was received
+    send({ method: 'reload-ack' });
+    // Yield so the send flushes before the service worker restarts
+    setTimeout(() => chrome.runtime.reload(), 0);
+    return;
+  }
+
   // Command from relay (has id)
   if (msg.id !== undefined) {
     executeCommand(msg)
