@@ -130,6 +130,21 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('snapshot({ showDiffSinceLastCall'), 'should include diff usage guidance');
   });
 
+  it('execute prompt includes tool-selection and debugging decision trees', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+
+    assert.ok(promptBlock.includes('snapshot vs cleanHTML vs pageMarkdown'), 'should include extraction decision tree');
+    assert.ok(promptBlock.includes('Combine snapshot + logs'), 'should include debugging workflow');
+    assert.ok(promptBlock.includes('Authenticated fetch'), 'should include authenticated fetch pattern');
+    assert.ok(promptBlock.includes('Downloads'), 'should include download pattern');
+  });
+
   it('execute tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
