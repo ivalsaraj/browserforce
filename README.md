@@ -1,4 +1,4 @@
-# BrowserForce // 
+# BrowserForce // Parallel AI Agents in "your" Chrome!
 
 > "a lion doesn't concern itself with token counting" — [@steipete](https://x.com/steipete), creator of [OpenClaw](https://github.com/openclaw/openclaw)
 >
