@@ -425,28 +425,43 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
     const stableIds = await getStableIds(page, selector);
     annotateStableAttrs(axRoot, stableIds);
     const searchPattern = parseSearchPattern(search);
-    const { text: snapshotText, refs } = buildSnapshotText(axRoot, null, searchPattern);
-    const refMap = new Map(refs.map(({ ref, locator }) => [ref, locator]));
+    const { text: fullSnapshotText, refs: fullRefs } = buildSnapshotText(axRoot, null, null);
+    const refMap = new Map(fullRefs.map(({ ref, locator }) => [ref, locator]));
     lastRefToLocator.set(page, refMap);
-    const refTable = refs.length > 0
-      ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
-      : '';
     const title = await page.title().catch(() => '');
     const pageUrl = page.url();
-    const fullSnapshot = `Page: ${title} (${pageUrl})\nRefs: ${refs.length} interactive elements\n\n${snapshotText}${refTable}`;
+    const formatSnapshot = (snapshotText, refs) => {
+      const refTable = refs.length > 0
+        ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
+        : '';
+      return `Page: ${title} (${pageUrl})\nRefs: ${refs.length} interactive elements\n\n${snapshotText}${refTable}`;
+    };
+    const fullSnapshot = formatSnapshot(fullSnapshotText, fullRefs);
 
-    const shouldCacheSnapshot = !selector;
-    const previousSnapshot = shouldCacheSnapshot ? lastSnapshots.get(page) : undefined;
-    if (shouldCacheSnapshot) {
-      lastSnapshots.set(page, fullSnapshot);
+    let pageSnapshots = lastSnapshots.get(page);
+    if (!(pageSnapshots instanceof Map)) {
+      const migratedSnapshots = new Map();
+      if (typeof pageSnapshots === 'string') {
+        migratedSnapshots.set('__full_page__', pageSnapshots);
+      }
+      pageSnapshots = migratedSnapshots;
+      lastSnapshots.set(page, pageSnapshots);
     }
+    const snapshotKey = selector || '__full_page__';
+    const previousSnapshot = pageSnapshots.get(snapshotKey);
+    pageSnapshots.set(snapshotKey, fullSnapshot);
 
-    if (showDiffSinceLastCall && previousSnapshot && shouldCacheSnapshot) {
+    if (!search && showDiffSinceLastCall && previousSnapshot) {
       const diffResult = createSmartDiff(previousSnapshot, fullSnapshot);
       if (diffResult.type === 'no-change') {
         return 'No changes since last snapshot. Use showDiffSinceLastCall: false to see full content.';
       }
       return diffResult.content;
+    }
+
+    if (searchPattern) {
+      const { text: filteredSnapshotText, refs: filteredRefs } = buildSnapshotText(axRoot, null, searchPattern);
+      return formatSnapshot(filteredSnapshotText, filteredRefs);
     }
 
     return fullSnapshot;
