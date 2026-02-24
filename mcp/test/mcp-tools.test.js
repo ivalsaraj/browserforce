@@ -544,3 +544,13 @@ describe('smartWaitForPageLoad', () => {
     assert.equal(expectedShape.timedOut, false);
   });
 });
+
+// ─── CDP Busy Helpers ───────────────────────────────────────────────────────
+
+describe('CDP Busy Helpers', () => {
+  it('detects relay slot contention errors', async () => {
+    const { isCdpBusyError } = await import('../src/exec-engine.js');
+    assert.equal(isCdpBusyError(new Error('Unexpected server response: 409')), true);
+    assert.equal(isCdpBusyError(new Error('ECONNREFUSED')), false);
+  });
+});

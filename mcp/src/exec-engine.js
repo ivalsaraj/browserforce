@@ -45,6 +45,43 @@ export function getRelayHttpUrl() {
   }
 }
 
+export function isCdpBusyError(err) {
+  const message = String(err?.message || '').toLowerCase();
+  return (
+    message.includes('409') ||
+    message.includes('slot busy') ||
+    message.includes('slot is busy') ||
+    message.includes('busy') ||
+    message.includes('already connected') ||
+    message.includes('already in use') ||
+    message.includes('another cdp client')
+  );
+}
+
+export async function waitForFreeClientSlot({ timeoutMs = 30000, baseUrl } = {}) {
+  const start = Date.now();
+  const resolvedBaseUrl = String(baseUrl || getRelayHttpUrl()).replace(/\/+$/, '');
+  const slotUrl = `${resolvedBaseUrl}/client-slot`;
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch(slotUrl, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.busy === false) return true;
+      }
+    } catch { /* keep polling until timeout */ }
+
+    const elapsed = Date.now() - start;
+    const remaining = timeoutMs - elapsed;
+    if (remaining <= 0) break;
+    const jitteredDelayMs = 200 + Math.floor(Math.random() * 200);
+    await new Promise((r) => globalThis.setTimeout(r, Math.min(jitteredDelayMs, remaining)));
+  }
+
+  return false;
+}
+
 // ─── Auto-start relay ───────────────────────────────────────────────────────
 
 function getRelayPort() {
