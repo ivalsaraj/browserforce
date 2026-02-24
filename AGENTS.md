@@ -157,6 +157,18 @@ When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the 
 
 `RelayServer.start()` accepts `{ writeCdpUrl: false }` to prevent test instances from clobbering `~/.browserforce/cdp-url`. **All test `relay.start()` calls must pass `{ writeCdpUrl: false }`** or the production cdp-url file gets overwritten with random test ports.
 
+### Client Arbitration: BF_CLIENT_MODE
+
+`BF_CLIENT_MODE` controls agent-side CDP arbitration:
+- `single-active` (default): only one active `/cdp` client connection at a time.
+- `multi-client`: fallback mode that allows concurrent `/cdp` clients.
+
+In `single-active`, contention returns HTTP `409 Conflict` for additional `/cdp` connects while the slot is busy. Slot state is exposed at `GET /client-slot` (`mode`, `busy`, `activeClientId`, `connectedAt`).
+
+### MCP Standby Polling
+
+MCP handles `409`/busy connect errors by entering standby and polling `GET /client-slot` with short jittered intervals (~200-400ms), then reconnecting when `busy: false` (up to a 30s connect timeout).
+
 ## Security Rules
 
 - Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.
@@ -164,6 +176,12 @@ When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the 
 - CDP clients require auth token in query param. Token is random 32 bytes (base64url).
 - Token file permissions: `0o600` (owner read/write only).
 - Single extension slot. Second extension connection gets HTTP 409.
+
+## Operational Non-Goals
+
+- No new dependencies for client arbitration or standby behavior.
+- No per-tab ownership model; arbitration is one relay-level client slot.
+- No extension protocol changes for this feature area.
 
 ## Development Workflow
 
