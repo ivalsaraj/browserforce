@@ -241,6 +241,21 @@ If snapshot shows [ref=some-id] for an element with a data-testid or id:
 For text content:
   const text = await state.page.locator('role=heading').textContent();
 
+Selector priority:
+  1. Use [ref=...] locators from snapshot output immediately after observing
+  2. Use role/name locators from snapshot
+  3. Use stable test IDs (data-testid) if present
+  4. Avoid brittle nth()/deep CSS selectors unless no stable option exists
+
+Before interacting, handle page blockers (cookie/consent banners, age gates, login popups):
+  const blockers = await snapshot({ search: /cookie|consent|accept|reject|allow|age|verify|login|sign.in/i });
+  // Dismiss blockers first, then continue with the main task
+
+Avoid stale locator usage:
+  // BAD: using a stale locator from an old snapshot after DOM changes
+  // GOOD: refresh observation first, then act with new refs/locators
+  await snapshot();
+
 ═══ COMMON PATTERNS ═══
 
 Navigate and read:
@@ -271,6 +286,9 @@ Wait for specific element:
 
 Debug with console logs:
   return getLogs({ count: 20 });
+
+When you need the full tree instead of diff output:
+  return await snapshot({ showDiffSinceLastCall: false });
 
 ═══ ANTI-PATTERNS ═══
 
