@@ -113,8 +113,7 @@ browserforce serve
 
 If your agent browses to the page and responds with the title, you're all set.
 
-<details>
-<summary><b>MCP setup (advanced)</b></summary>
+**MCP setup (advanced):**
 
 **OpenClaw (MCP adapter)**
 
@@ -142,6 +141,8 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
+
+
 **Claude Desktop**
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -156,6 +157,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   }
 }
 ```
+
+
 
 **Claude Code**
 
@@ -172,6 +175,8 @@ Add to `~/.claude/mcp.json`:
 }
 ```
 
+
+
 **Codex**
 
 Add to `~/.codex/config.toml`:
@@ -181,6 +186,8 @@ Add to `~/.codex/config.toml`:
 command = "npx"
 args = ["-y", "browserforce@latest", "mcp"]
 ```
+
+
 
 **Cursor**
 
@@ -196,6 +203,8 @@ Add to `~/.cursor/mcp.json`:
   }
 }
 ```
+
+
 
 **Antigravity**
 
@@ -213,13 +222,13 @@ Add the same `mcpServers` entry:
 }
 ```
 
+
+
 If MCP startup fails with `connection closed: initialize response`:
 
 1. Ensure args include `"mcp"` (without it, BrowserForce prints help and exits).
 2. If running from a local clone, install deps first: `pnpm install`.
 3. Validate the launch command manually: `npx -y browserforce@latest mcp`
-
-</details>
 
 ### CLI
 
@@ -698,3 +707,4 @@ jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.
 For practical debugging and operations flows, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).
 
 > **Want the full walkthrough?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for a plain-English explanation of what this does and how to get started.
+
