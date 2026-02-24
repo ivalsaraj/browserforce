@@ -553,4 +553,58 @@ describe('CDP Busy Helpers', () => {
     assert.equal(isCdpBusyError(new Error('Unexpected server response: 409')), true);
     assert.equal(isCdpBusyError(new Error('ECONNREFUSED')), false);
   });
+
+  it('retries busy connect and succeeds after slot is free', async () => {
+    const { connectOverCdpWithBusyRetry } = await import('../src/exec-engine.js');
+
+    let connectCalls = 0;
+    const expectedBrowser = { connected: true };
+    const connect = async () => {
+      connectCalls += 1;
+      if (connectCalls === 1) {
+        throw new Error('Unexpected server response: 409');
+      }
+      return expectedBrowser;
+    };
+
+    let waitCalls = 0;
+    const waitForFreeSlot = async () => {
+      waitCalls += 1;
+      return true;
+    };
+
+    const browser = await connectOverCdpWithBusyRetry({
+      connect,
+      cdpUrl: 'ws://127.0.0.1:19222/cdp?token=test',
+      baseUrl: 'http://127.0.0.1:19222',
+      timeoutMs: 5000,
+      waitForFreeSlot,
+    });
+
+    assert.equal(browser, expectedBrowser);
+    assert.equal(connectCalls, 2);
+    assert.equal(waitCalls, 1);
+  });
+
+  it('does not retry non-busy connect errors', async () => {
+    const { connectOverCdpWithBusyRetry } = await import('../src/exec-engine.js');
+
+    let waitCalls = 0;
+    const error = new Error('ECONNREFUSED');
+
+    await assert.rejects(
+      () => connectOverCdpWithBusyRetry({
+        connect: async () => { throw error; },
+        cdpUrl: 'ws://127.0.0.1:19222/cdp?token=test',
+        timeoutMs: 5000,
+        waitForFreeSlot: async () => {
+          waitCalls += 1;
+          return true;
+        },
+      }),
+      /ECONNREFUSED/
+    );
+
+    assert.equal(waitCalls, 0);
+  });
 });

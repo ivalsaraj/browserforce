@@ -82,6 +82,32 @@ export async function waitForFreeClientSlot({ timeoutMs = 30000, baseUrl } = {})
   return false;
 }
 
+export async function connectOverCdpWithBusyRetry({
+  connect,
+  cdpUrl,
+  baseUrl = getRelayHttpUrl(),
+  timeoutMs = 30000,
+  waitForFreeSlot = waitForFreeClientSlot,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastBusyError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      return await connect(cdpUrl);
+    } catch (err) {
+      if (!isCdpBusyError(err)) throw err;
+      lastBusyError = err;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const slotFreed = await waitForFreeSlot({ timeoutMs: remainingMs, baseUrl });
+      if (!slotFreed) break;
+    }
+  }
+
+  throw lastBusyError || new Error('Failed to connect to CDP relay');
+}
+
 // ─── Auto-start relay ───────────────────────────────────────────────────────
 
 function getRelayPort() {
