@@ -260,6 +260,25 @@ describe('Logs Viewer Endpoints', () => {
     await sleep(50);
   });
 
+  it('GET /logs/status accepts extension referer when Origin is absent', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/status`, {
+      Referer: 'chrome-extension://test/options.html',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.extension?.connected, true);
+
+    ext.close();
+    await sleep(50);
+  });
+
   it('GET /logs/cdp supports incremental polling with after/limit', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },
