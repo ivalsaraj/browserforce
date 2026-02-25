@@ -717,12 +717,24 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | Setting                 | What it does                                                             |
 | ----------------------- | ------------------------------------------------------------------------ |
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
+| **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
+| **Parallel visibility** | `foreground-tab` keeps new tabs visible in the current window             |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
 | **Auto-detach**         | Automatically detach inactive tabs after 5-60 minutes                    |
 | **Auto-close**          | Automatically close agent-created tabs after 5-60 minutes                |
 | **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
+
+`parallelVisibilityMode` is currently enforced as `foreground-tab` (visible tabs in the active window, no new windows). If `rotate-visible` is selected, BrowserForce normalizes to `foreground-tab` in this release.
+
+### Execution Strategy Preferences
+
+- **Visible parallel with current-window tabs (`foreground-tab`)**: New agent tabs open visibly in your current Chrome window and stay there.
+- **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
+- **Rotate-visible demo mode (`rotate-visible`)**: Temporarily normalized to `foreground-tab` while the visibility lock is enforced.
+
+MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new execute calls.
 
 
 ### Controlled Tab Workflows

@@ -232,6 +232,54 @@ describe('Tool Definitions', () => {
       'snapshot diff mode should only run for full-page snapshots with no search'
     );
   });
+
+  it('execute context includes browserforceSettings', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('browserforceSettings'),
+      'exec context should expose browserforceSettings in the sandbox scope'
+    );
+    assert.ok(
+      source.includes('executionMode') && source.includes('parallelVisibilityMode'),
+      'browserforceSettings should include executionMode and parallelVisibilityMode'
+    );
+  });
+
+  it('MCP preferences fetch is cached once per session', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('cachedAgentPreferences'), 'should track cached agent preferences');
+    assert.ok(
+      source.includes('if (cachedAgentPreferences)'),
+      'should return cached preferences without refetching'
+    );
+    assert.ok(
+      source.includes('/agent-preferences'),
+      'should fetch preferences from relay /agent-preferences endpoint'
+    );
+  });
+
+  it('reset clears cached preferences', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const resetIdx = source.indexOf("'reset'");
+    assert.ok(resetIdx !== -1, 'reset tool should exist');
+    const resetBlock = source.slice(resetIdx, resetIdx + 2500);
+    assert.ok(
+      resetBlock.includes('cachedAgentPreferences = null'),
+      'reset should clear cached agent preferences'
+    );
+  });
 });
 
 // ─── MCP Response Format ─────────────────────────────────────────────────────
