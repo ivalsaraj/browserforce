@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BrowserForce Logs</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="layout">
+    <header class="topbar">
+      <div>
+        <h1>BrowserForce Logs</h1>
+        <p class="subtitle">Live CDP traffic from relay, polled every second while this page is visible.</p>
+      </div>
+      <div class="controls">
+        <button id="bf-refresh" type="button">Refresh</button>
+        <button id="bf-pause" type="button">Pause</button>
+        <button id="bf-clear" type="button" class="ghost">Clear View</button>
+      </div>
+    </header>
+
+    <section class="cards">
+      <article class="card">
+        <h2>Relay</h2>
+        <p id="bf-relay-url" class="mono">-</p>
+        <p id="bf-relay-health">-</p>
+      </article>
+      <article class="card">
+        <h2>Connections</h2>
+        <p id="bf-conn-summary">-</p>
+        <ul id="bf-clients" class="client-list"></ul>
+      </article>
+      <article class="card">
+        <h2>Log Stats</h2>
+        <p id="bf-log-summary">-</p>
+        <p id="bf-last-updated">-</p>
+      </article>
+    </section>
+
+    <section class="notes">
+      <strong>Entry fields:</strong>
+      <span><code>seq</code>, <code>timestamp</code>, <code>direction</code>, optional <code>clientId</code>/<code>clientLabel</code>, and nested <code>message</code> payload.</span>
+    </section>
+
+    <p id="bf-error" class="error" hidden></p>
+
+    <section class="logs-panel">
+      <div class="logs-header">
+        <h2>CDP Entries</h2>
+        <span id="bf-entry-count">0 entries</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Seq</th>
+              <th>Time</th>
+              <th>Direction</th>
+              <th>Client</th>
+              <th>Method</th>
+              <th>Session</th>
+            </tr>
+          </thead>
+          <tbody id="bf-log-rows">
+            <tr><td colspan="6" class="empty">No logs yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="details-panel">
+      <h2>Selected Entry</h2>
+      <pre id="bf-entry-details" class="mono">Select a row to inspect full JSON payload.</pre>
+    </section>
+  </main>
+
+  <script src="options.js"></script>
+</body>
+</html>

@@ -237,6 +237,26 @@ button:active { background: #388e3c; }
 .attach-btn:hover { background: #eee; border-color: #aaa; }
 .attach-btn:active { background: #e0e0e0; }
 
+.logs-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px;
+  background: #fff;
+  color: #333;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+}
+
+.logs-btn:hover {
+  background: #f7f7f7;
+}
+
+.logs-btn:active {
+  background: #efefef;
+}
+
 /* Settings groups */
 .settings-group {
   border: 1px solid #eee;
