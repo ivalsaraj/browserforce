@@ -66,17 +66,31 @@ function ensureAllPagesCapture() {
 let browser = null;
 const CONNECT_RETRY_TIMEOUT_MS = 30000;
 
+function withClientLabel(cdpUrl) {
+  try {
+    const url = new URL(cdpUrl);
+    if (!url.searchParams.get('label')) {
+      url.searchParams.set(
+        'label',
+        process.env.BROWSERFORCE_CDP_CLIENT_LABEL || 'browserforce-mcp',
+      );
+    }
+    return url.toString();
+  } catch {
+    return cdpUrl;
+  }
+}
+
 async function ensureBrowser() {
   if (browser?.isConnected()) return;
   await ensureRelay();
-  const cdpUrl = getCdpUrl();
+  const cdpUrl = withClientLabel(getCdpUrl());
   browser = await connectOverCdpWithBusyRetry({
     connect: (url) => chromium.connectOverCDP(url),
     cdpUrl,
     baseUrl: getRelayHttpUrl(),
     timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
   });
-
   browser.on('disconnected', () => {
     browser = null;
     contextListenerAttached = false;
