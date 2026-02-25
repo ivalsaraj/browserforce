@@ -641,6 +641,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 ### Controlled Tab Workflows
 
 - **Manually attach a tab:** Open the tab you want, click the extension popup, then click **+ Attach Current Tab**.
+- **Open full log viewer:** In the popup, click **View Full Logs** to open the extension options page.
 - **Restrict to one controlled tab:** Use **Manual mode**, attach one tab, and enable **No new tabs**.
 - **Allow multiple controlled tabs:** Stay in **Manual mode** and attach each tab you want the agent to access.
 - **Restriction modes:** Use **Lock URL** (no navigation), **No new tabs**, and **Read-only** (observe only) together or separately.
@@ -706,8 +707,12 @@ In `single-active` mode, the relay enforces one active client slot. A second `/c
 | `GET /client-slot`       | Client-slot state: `{ mode, busy, activeClientId, connectedAt }` |
 | `GET /json/version`      | CDP discovery                                 |
 | `GET /json/list`         | List attached targets                         |
-| `ws://.../extension`     | Chrome extension WebSocket                    |
-| `ws://.../cdp?token=...` | Agent CDP connection                          |
+| `GET /logs/status` | Logs viewer status (extension-only origin) |
+| `GET /logs/cdp?after=&limit=` | Incremental CDP log polling feed (extension-only origin) |
+| `ws://.../extension` | Chrome extension WebSocket |
+| `ws://.../cdp?token=...` | Agent CDP connection |
+
+Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
 
 ## Troubleshooting
 
