@@ -11,6 +11,7 @@ const { createCdpLogger } = require('./cdp-log.js');
 const DEFAULT_PORT = 19222;
 const COMMAND_TIMEOUT_MS = 30000;
 const PING_INTERVAL_MS = 5000;
+const DEFAULT_CDP_LOG_BUFFER_LIMIT = 10000;
 
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
@@ -24,6 +25,21 @@ const CLIENT_MODE_MULTI = 'multi-client';
 function ts() { return new Date().toTimeString().slice(0, 8); }
 function log(...args) { console.log(`[${ts()}]`, ...args); }
 function logErr(...args) { console.error(`[${ts()}]`, ...args); }
+
+function resolvePositiveInt(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+function sanitizeClientLabel(label) {
+  if (typeof label !== 'string') return null;
+  const cleaned = label.trim().replace(/[^\w .:@/-]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, 80);
+}
 
 // ─── Token Persistence ──────────────────────────────────────────────────────
 
@@ -149,6 +165,8 @@ class RelayServer {
 
     // CDP clients
     this.clients = new Set();
+    this.clientMeta = new WeakMap();
+    this.clientById = new Map();
 
     // Target tracking
     this.targets = new Map();      // sessionId -> { tabId, targetId, targetInfo }
@@ -165,9 +183,23 @@ class RelayServer {
 
     // CDP traffic logger, initialized on start.
     this.cdpLogger = null;
+
+    // In-memory log buffer for options UI polling.
+    this.cdpLogEntries = [];
+    this.cdpLogSeq = 0;
+    this.cdpLogBufferLimit = resolvePositiveInt(
+      process.env.BROWSERFORCE_CDP_LOG_BUFFER_LIMIT,
+      DEFAULT_CDP_LOG_BUFFER_LIMIT,
+    );
+
+    this.startedAt = Date.now();
   }
 
   start({ writeCdpUrl = true } = {}) {
+    this.startedAt = Date.now();
+    this.cdpLogEntries = [];
+    this.cdpLogSeq = 0;
+    this.clientById.clear();
     try {
       this.cdpLogger = createCdpLogger();
     } catch (err) {
@@ -181,7 +213,7 @@ class RelayServer {
     this.cdpWss = new WebSocketServer({ noServer: true });
 
     server.on('upgrade', (req, socket, head) => this._handleUpgrade(req, socket, head));
-    this.extWss.on('connection', (ws) => this._onExtConnect(ws));
+    this.extWss.on('connection', (ws, req) => this._onExtConnect(ws, req));
     this.cdpWss.on('connection', (ws, req) => this._onCdpConnect(ws, req));
 
     this.server = server;
@@ -207,13 +239,29 @@ class RelayServer {
   }
 
   _logCdp(entry) {
+    const withClientLabel = { ...entry };
+    if (withClientLabel.clientId && !withClientLabel.clientLabel) {
+      const meta = this.clientById.get(withClientLabel.clientId);
+      if (meta?.label) {
+        withClientLabel.clientLabel = meta.label;
+      }
+    }
+
+    const withTimestamp = {
+      timestamp: new Date().toISOString(),
+      ...withClientLabel,
+    };
+    this.cdpLogSeq += 1;
+    const bufferedEntry = { seq: this.cdpLogSeq, ...withTimestamp };
+    this.cdpLogEntries.push(bufferedEntry);
+    if (this.cdpLogEntries.length > this.cdpLogBufferLimit) {
+      this.cdpLogEntries.shift();
+    }
+
     if (!this.cdpLogger || typeof this.cdpLogger.log !== 'function') {
       return;
     }
-    this.cdpLogger.log({
-      timestamp: new Date().toISOString(),
-      ...entry,
-    });
+    this.cdpLogger.log(withTimestamp);
   }
 
   // ─── HTTP ────────────────────────────────────────────────────────────────
@@ -278,6 +326,20 @@ class RelayServer {
         res.statusCode = 502;
         res.end(JSON.stringify({ error: 'Extension not responding' }));
       }
+      return;
+    }
+
+    if (url.pathname === '/logs/status' && req.method === 'GET') {
+      if (!this._requireExtensionOrigin(req, res)) return;
+      res.end(JSON.stringify(this._logsStatus()));
+      return;
+    }
+
+    if (url.pathname === '/logs/cdp' && req.method === 'GET') {
+      if (!this._requireExtensionOrigin(req, res)) return;
+      const after = resolvePositiveInt(url.searchParams.get('after'), 0);
+      const limit = Math.min(resolvePositiveInt(url.searchParams.get('limit'), 300), 1000);
+      res.end(JSON.stringify(this._logsSlice({ after, limit })));
       return;
     }
 
@@ -399,6 +461,140 @@ class RelayServer {
     return true;
   }
 
+  _extensionOriginFromReq(req) {
+    const origin = req?.headers?.origin || '';
+    if (!origin.startsWith('chrome-extension://')) {
+      return null;
+    }
+    return origin;
+  }
+
+  _deriveClientLabel(req) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+      const fromQuery = sanitizeClientLabel(
+        url.searchParams.get('label')
+          || url.searchParams.get('clientLabel')
+          || url.searchParams.get('client')
+          || '',
+      );
+      if (fromQuery) return fromQuery;
+    } catch {
+      // Ignore malformed request URL; fall back to header-based label.
+    }
+
+    const origin = req?.headers?.origin || '';
+    if (origin.startsWith('chrome-extension://')) {
+      const extensionId = origin.replace('chrome-extension://', '');
+      return `extension:${extensionId.slice(0, 12)}`;
+    }
+
+    const ua = (req?.headers?.['user-agent'] || '').toLowerCase();
+    if (ua.includes('claude')) return 'claude-client';
+    if (ua.includes('openai')) return 'openai-client';
+    if (ua.includes('playwright')) return 'playwright-client';
+    if (ua.includes('node')) return 'node-client';
+
+    return 'cdp-client';
+  }
+
+  _requireExtensionOrigin(req, res) {
+    const origin = this._extensionOriginFromReq(req);
+    if (!origin) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: 'Forbidden — extension origin required' }));
+      return false;
+    }
+
+    const trustedOrigin = this.ext?.origin;
+    if (!trustedOrigin) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ error: 'Extension not connected' }));
+      return false;
+    }
+    if (trustedOrigin && origin !== trustedOrigin) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: 'Forbidden — extension origin mismatch' }));
+      return false;
+    }
+    return true;
+  }
+
+  _logsStatus() {
+    const clients = [];
+    for (const client of this.clients) {
+      const meta = this.clientMeta.get(client);
+      if (!meta) continue;
+      clients.push({
+        id: meta.id,
+        label: meta.label,
+        connectedAt: meta.connectedAt,
+        origin: meta.origin,
+        userAgent: meta.userAgent,
+        remoteAddress: meta.remoteAddress,
+      });
+    }
+
+    const counts = {
+      fromPlaywright: 0,
+      toPlaywright: 0,
+      fromExtension: 0,
+      toExtension: 0,
+    };
+    for (const entry of this.cdpLogEntries) {
+      if (entry.direction === 'from-playwright') counts.fromPlaywright += 1;
+      if (entry.direction === 'to-playwright') counts.toPlaywright += 1;
+      if (entry.direction === 'from-extension') counts.fromExtension += 1;
+      if (entry.direction === 'to-extension') counts.toExtension += 1;
+    }
+
+    return {
+      relay: {
+        connectedSince: new Date(this.startedAt).toISOString(),
+        uptimeMs: Date.now() - this.startedAt,
+      },
+      extension: this.ext
+        ? {
+            connected: true,
+            connectedAt: this.ext.connectedAt,
+            origin: this.ext.origin,
+            userAgent: this.ext.userAgent,
+            remoteAddress: this.ext.remoteAddress,
+          }
+        : { connected: false },
+      clients: {
+        count: this.clients.size,
+        items: clients,
+      },
+      targets: this.targets.size,
+      logs: {
+        entriesBuffered: this.cdpLogEntries.length,
+        latestSeq: this.cdpLogSeq,
+        directionCounts: counts,
+      },
+    };
+  }
+
+  _logsSlice({ after = 0, limit = 300 } = {}) {
+    const oldestSeq = this.cdpLogEntries.length > 0
+      ? this.cdpLogEntries[0].seq
+      : this.cdpLogSeq + 1;
+    const tooOld = after > 0 && after < oldestSeq - 1;
+
+    const newer = this.cdpLogEntries.filter((entry) => entry.seq > after);
+    const skipped = Math.max(0, newer.length - limit);
+    const entries = skipped > 0 ? newer.slice(skipped) : newer;
+
+    return {
+      after,
+      latestSeq: this.cdpLogSeq,
+      oldestSeq,
+      resetRequired: tooOld,
+      skipped,
+      entries,
+    };
+  }
+
   // ─── WebSocket Upgrade ───────────────────────────────────────────────────
 
   _handleUpgrade(req, socket, head) {
@@ -406,8 +602,8 @@ class RelayServer {
 
     if (url.pathname === '/extension') {
       // Validate origin
-      const origin = req.headers.origin || '';
-      if (!origin.startsWith('chrome-extension://')) {
+      const origin = this._extensionOriginFromReq(req);
+      if (!origin) {
         socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
         socket.destroy();
         return;
@@ -453,9 +649,16 @@ class RelayServer {
 
   // ─── Extension Connection ────────────────────────────────────────────────
 
-  _onExtConnect(ws) {
+  _onExtConnect(ws, req) {
     log('[relay] Extension connected');
-    this.ext = { ws };
+    const origin = this._extensionOriginFromReq(req);
+    this.ext = {
+      ws,
+      connectedAt: new Date().toISOString(),
+      origin: origin || null,
+      userAgent: req?.headers?.['user-agent'] || null,
+      remoteAddress: req?.socket?.remoteAddress || null,
+    };
 
     ws.on('message', (data) => {
       try {
@@ -673,7 +876,17 @@ class RelayServer {
       const now = Date.now();
       this.activeClient = { id: clientId, ws, connectedAt: now, lastSeenAt: now };
     }
-    log('[relay] CDP client connected');
+    const clientMeta = {
+      id: clientId,
+      label: this._deriveClientLabel(req),
+      connectedAt: new Date().toISOString(),
+      origin: req?.headers?.origin || null,
+      userAgent: req?.headers?.['user-agent'] || null,
+      remoteAddress: req?.socket?.remoteAddress || null,
+    };
+    this.clientMeta.set(ws, clientMeta);
+    this.clientById.set(clientId, clientMeta);
+    log(`[relay] CDP client connected (${clientId})`);
     this.clients.add(ws);
 
     ws.on('message', (data) => {
@@ -689,7 +902,9 @@ class RelayServer {
     });
 
     ws.on('close', () => {
-      log('[relay] CDP client disconnected');
+      const meta = this.clientMeta.get(ws);
+      log(`[relay] CDP client disconnected (${meta?.id || 'unknown'})`);
+      if (meta?.id) this.clientById.delete(meta.id);
       this.clients.delete(ws);
       if (this.activeClient?.ws === ws) {
         this.activeClient = null;
@@ -702,24 +917,27 @@ class RelayServer {
   }
 
   async _handleCdpClientMessage(ws, msg) {
+    const clientId = this.clientMeta.get(ws)?.id || null;
     const { id, method, params, sessionId } = msg;
     this._logCdp({
       direction: 'from-playwright',
+      clientId,
       message: { id, method, params, sessionId },
     });
 
     try {
       let result;
       if (sessionId) {
-        result = await this._forwardToTab(sessionId, method, params, id);
+        result = await this._forwardToTab(sessionId, method, params, id, clientId);
       } else {
-        result = await this._handleBrowserCommand(ws, id, method, params);
+        result = await this._handleBrowserCommand(ws, id, method, params, clientId);
       }
       if (result !== undefined) {
         const response = { id, result };
         if (sessionId) response.sessionId = sessionId;
         this._logCdp({
           direction: 'to-playwright',
+          clientId,
           message: response,
         });
         ws.send(JSON.stringify(response));
@@ -732,13 +950,14 @@ class RelayServer {
       if (sessionId) response.sessionId = sessionId;
       this._logCdp({
         direction: 'to-playwright',
+        clientId,
         message: response,
       });
       ws.send(JSON.stringify(response));
     }
   }
 
-  async _handleBrowserCommand(ws, msgId, method, params) {
+  async _handleBrowserCommand(ws, msgId, method, params, clientId) {
     switch (method) {
       case 'Browser.getVersion':
         return {
@@ -766,6 +985,7 @@ class RelayServer {
           };
           this._logCdp({
             direction: 'to-playwright',
+            clientId,
             message: event,
           });
           ws.send(JSON.stringify(event));
@@ -778,6 +998,7 @@ class RelayServer {
         // Respond immediately, then attach tabs asynchronously
         this._logCdp({
           direction: 'to-playwright',
+          clientId,
           message: { id: msgId, result: {} },
         });
         ws.send(JSON.stringify({ id: msgId, result: {} }));
@@ -993,7 +1214,7 @@ class RelayServer {
 
   // ─── CDP Command Forwarding ─────────────────────────────────────────────
 
-  async _forwardToTab(sessionId, method, params, id) {
+  async _forwardToTab(sessionId, method, params, id, clientId) {
     // Main session
     const target = this.targets.get(sessionId);
     if (target) {
@@ -1010,6 +1231,7 @@ class RelayServer {
       }
       this._logCdp({
         direction: 'to-extension',
+        clientId,
         message: {
           id,
           method,
@@ -1036,6 +1258,7 @@ class RelayServer {
       }
       this._logCdp({
         direction: 'to-extension',
+        clientId,
         message: {
           id,
           method,

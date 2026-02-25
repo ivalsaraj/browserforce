@@ -32,6 +32,32 @@ function httpGet(url) {
   });
 }
 
+/** HTTP GET with custom headers */
+function httpGetWithHeaders(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const opts = new URL(url);
+    const req = http.request({
+      hostname: opts.hostname,
+      port: opts.port,
+      path: opts.pathname + opts.search,
+      method: 'GET',
+      headers,
+    }, (res) => {
+      let body = '';
+      res.on('data', (d) => (body += d));
+      res.on('end', () => {
+        try {
+          resolve({ status: res.statusCode, body: JSON.parse(body) });
+        } catch {
+          resolve({ status: res.statusCode, body });
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** Connect a WebSocket and wait for open */
 function connectWs(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -172,6 +198,121 @@ describe('HTTP Endpoints', () => {
   it('GET /unknown returns 404', async () => {
     const { status } = await httpGet(`http://127.0.0.1:${port}/unknown`);
     assert.equal(status, 404);
+  });
+});
+
+// ─── Logs Viewer Endpoints ───────────────────────────────────────────────────
+
+describe('Logs Viewer Endpoints', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('GET /logs/status requires chrome-extension origin', async () => {
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/logs/status`);
+    assert.equal(status, 403);
+    assert.match(body.error, /extension origin required/);
+  });
+
+  it('GET /logs/cdp requires chrome-extension origin', async () => {
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/logs/cdp`);
+    assert.equal(status, 403);
+    assert.match(body.error, /extension origin required/);
+  });
+
+  it('GET /logs/status returns active client metadata and direction counters', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.send(JSON.stringify({ id: 1, method: 'Browser.getVersion' }));
+    await readMessage(cdp, 3000);
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/status`, {
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.clients.count, 1);
+    assert.ok(Array.isArray(body.clients.items));
+    assert.equal(body.clients.items.length, 1);
+    assert.match(body.clients.items[0].id, /^bf-(cdp|client)-\d+$/);
+    assert.ok(body.clients.items[0].label, 'client label should be present');
+    assert.ok(body.logs.directionCounts.fromPlaywright >= 1);
+    assert.ok(body.logs.directionCounts.toPlaywright >= 1);
+
+    cdp.close();
+    ext.close();
+    await sleep(50);
+  });
+
+  it('GET /logs/cdp supports incremental polling with after/limit', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.send(JSON.stringify({ id: 10, method: 'Browser.getVersion' }));
+    await readMessage(cdp, 3000);
+
+    const first = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/cdp?after=0&limit=200`, {
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(first.status, 200);
+    assert.ok(Array.isArray(first.body.entries));
+    assert.ok(first.body.entries.length > 0);
+    const newestSeq = first.body.latestSeq;
+    const hasBrowserGetVersion = first.body.entries.some((entry) => entry.message?.method === 'Browser.getVersion');
+    assert.equal(hasBrowserGetVersion, true, 'Should include Browser.getVersion CDP entry');
+
+    const second = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/cdp?after=${newestSeq}&limit=200`, {
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(second.status, 200);
+    assert.equal(second.body.entries.length, 0);
+    assert.equal(second.body.after, newestSeq);
+    assert.equal(second.body.resetRequired, false);
+
+    cdp.close();
+    ext.close();
+    await sleep(50);
+  });
+
+  it('GET /logs/status rejects extension origins that do not match connected extension', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/status`, {
+      Origin: 'chrome-extension://other',
+    });
+    assert.equal(status, 403);
+    assert.match(body.error, /origin mismatch/);
+
+    ext.close();
+    await sleep(50);
   });
 });
 
@@ -1226,6 +1367,7 @@ describe('CDP JSONL Logging', () => {
       const entries = readJsonlEntries(logFilePath);
       const directions = new Set(entries.map((entry) => entry.direction));
       const methods = entries.map((entry) => entry?.message?.method).filter(Boolean);
+      const labeledClientEntry = entries.find((entry) => entry.clientId);
 
       assert.ok(directions.has('from-playwright'), 'Should log from-playwright direction');
       assert.ok(directions.has('to-extension'), 'Should log to-extension direction');
@@ -1233,6 +1375,7 @@ describe('CDP JSONL Logging', () => {
       assert.ok(directions.has('to-playwright'), 'Should log to-playwright direction');
       assert.ok(methods.includes('Runtime.evaluate'), 'Should log Runtime.evaluate method');
       assert.ok(methods.includes('Page.loadEventFired'), 'Should log Page.loadEventFired method');
+      assert.ok(labeledClientEntry?.clientLabel, 'Client-labeled entries should include clientLabel');
     } finally {
       cdp?.close();
       ext?.close();
