@@ -462,11 +462,22 @@ class RelayServer {
   }
 
   _extensionOriginFromReq(req) {
-    const origin = req?.headers?.origin || '';
-    if (!origin.startsWith('chrome-extension://')) {
-      return null;
-    }
-    return origin;
+    const parseExtensionOrigin = (value) => {
+      if (!value || !value.startsWith('chrome-extension://')) return null;
+      try {
+        const parsed = new URL(value);
+        if (parsed.protocol !== 'chrome-extension:' || !parsed.host) return null;
+        return `chrome-extension://${parsed.host}`;
+      } catch {
+        return null;
+      }
+    };
+
+    const origin = parseExtensionOrigin(req?.headers?.origin || '');
+    if (origin) return origin;
+
+    const referer = req?.headers?.referer || req?.headers?.referrer || '';
+    return parseExtensionOrigin(referer);
   }
 
   _deriveClientLabel(req) {
