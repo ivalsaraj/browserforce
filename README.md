@@ -726,6 +726,55 @@ Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs vi
 | Port in use                  | `lsof -ti:19222 | xargs kill -9`                      |
 
 
+### MCP Error: `Protocol error (Target.createTarget): Extension not connected`
+
+This usually means MCP is talking to a relay process that is not the one your extension is connected to.
+
+Quick checks:
+
+```bash
+curl -s http://127.0.0.1:19222/ | jq
+cat ~/.browserforce/cdp-url
+echo "${BF_CDP_URL:-<unset>}"
+```
+
+If MCP is reading a stale `~/.browserforce/cdp-url` (or `BF_CDP_URL` override), it may connect to the wrong port.
+
+Recovery steps (npm/npx workflow):
+
+```bash
+# 1) Stop stale relay listeners
+lsof -tiTCP:19222 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
+lsof -tiTCP:19888 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
+
+# 2) Clear stale override for this shell
+unset BF_CDP_URL
+
+# 3) Start one fresh relay on default port
+RELAY_PORT=19222 npx -y browserforce@latest serve
+```
+
+Then verify:
+
+```bash
+cat ~/.browserforce/cdp-url
+curl -s http://127.0.0.1:19222/client-slot | jq
+```
+
+Expected: `cdp-url` points to `ws://127.0.0.1:19222/...` and `/client-slot` returns `{ mode, busy, activeClientId, connectedAt }`.
+
+### MCP Error: `Unexpected server response: 409`
+
+This means single-active arbitration is working and another CDP client is currently holding the slot.
+
+Check:
+
+```bash
+curl -s http://127.0.0.1:19222/client-slot | jq
+```
+
+If `busy: true`, close the other MCP/CDP session or set `BF_CLIENT_MODE=multi-client` for explicit concurrent-client fallback.
+
 CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
 
 ```bash
