@@ -230,6 +230,67 @@ Add the same `mcpServers` entry:
 
 </details>
 
+Need deterministic single-owner handoff for sensitive workflows?
+Set `BF_CLIENT_MODE=single-active` in the MCP server command.
+
+Why use `single-active`:
+- Prevents two MCP clients from driving the browser at the same time.
+- Makes contention explicit (`409` + `/client-slot`), which is easier to debug.
+- Better for write-heavy flows where accidental concurrent actions are risky.
+
+<details>
+<summary><b>Set BF_CLIENT_MODE=single-active (all MCP clients)</b></summary>
+
+These examples use the POSIX `env` wrapper. If your MCP client supports an `env` object/map, set `BF_CLIENT_MODE=single-active` there instead.
+
+**OpenClaw (MCP adapter):**
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "mcp-adapter": {
+        "enabled": true,
+        "config": {
+          "servers": [
+            {
+              "name": "browserforce",
+              "transport": "stdio",
+              "command": "env",
+              "args": ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp"]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop / Claude Code / Cursor / Antigravity:**
+
+```json
+{
+  "mcpServers": {
+    "browserforce": {
+      "command": "env",
+      "args": ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp"]
+    }
+  }
+}
+```
+
+**Codex (`~/.codex/config.toml`):**
+
+```toml
+[mcp_servers.browserforce]
+command = "env"
+args = ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp"]
+startup_timeout_sec = 45
+```
+
+</details>
+
 
 
 If MCP startup fails with `connection closed: initialize response`:
@@ -712,14 +773,14 @@ RELAY_PORT=19333 browserforce serve
 **Client arbitration mode (`BF_CLIENT_MODE`):**
 
 ```bash
-# default: one active /cdp client at a time
-BF_CLIENT_MODE=single-active browserforce serve
-
-# fallback: allow concurrent /cdp clients
+# default: allow concurrent /cdp clients
 BF_CLIENT_MODE=multi-client browserforce serve
+
+# opt-in: enforce one active /cdp client slot
+BF_CLIENT_MODE=single-active browserforce serve
 ```
 
-In `single-active` mode, the relay enforces one active client slot. A second `/cdp` connection receives HTTP `409 Conflict` (busy). In `multi-client` mode, slot arbitration is disabled.
+In `multi-client` mode (default), slot arbitration is disabled. In `single-active` mode, the relay enforces one active client slot and a second `/cdp` connection receives HTTP `409 Conflict` (busy).
 
 **MCP standby polling (single-active mode):** if MCP sees a busy/`409` connect error, it enters standby and polls `GET /client-slot` until `busy: false` (about every 200-400ms, up to 30s), then retries connect.
 
@@ -797,7 +858,7 @@ Expected: `cdp-url` points to `ws://127.0.0.1:19222/...` and `/client-slot` retu
 
 ### MCP Error: `Unexpected server response: 409`
 
-This means single-active arbitration is working and another CDP client is currently holding the slot.
+This appears when `BF_CLIENT_MODE=single-active` and another CDP client currently holds the slot.
 
 Check:
 
@@ -805,11 +866,11 @@ Check:
 curl -s http://127.0.0.1:19222/client-slot | jq
 ```
 
-If `busy: true`, close the other MCP/CDP session or set `BF_CLIENT_MODE=multi-client` for explicit concurrent-client fallback.
+If `busy: true`, either close the current active MCP/CDP session, or remove single-active mode (default is `multi-client`).
 
 ### MCP Error: `MCP client for "browserforce" timed out after 10 seconds`
 
-This can happen when a second MCP session starts while BrowserForce is still connecting/retrying in the background.
+This is most common when you intentionally run `single-active` mode and a second MCP session starts while the slot is busy.
 
 Why: the MCP process currently attempts browser connection during startup, and Codex's default MCP startup timeout can be shorter than BrowserForce's connect retry window.
 
@@ -817,8 +878,8 @@ Fix in Codex config (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.browserforce]
-command = "npx"
-args = ["-y", "browserforce@latest", "mcp"]
+command = "env"
+args = ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp"]
 startup_timeout_sec = 45
 ```
 

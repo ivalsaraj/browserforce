@@ -160,8 +160,8 @@ When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the 
 ### Client Arbitration: BF_CLIENT_MODE
 
 `BF_CLIENT_MODE` controls agent-side CDP arbitration:
-- `single-active` (default): only one active `/cdp` client connection at a time.
-- `multi-client`: fallback mode that allows concurrent `/cdp` clients.
+- `multi-client` (default): allows concurrent `/cdp` clients.
+- `single-active`: opt-in mode that allows only one active `/cdp` client connection at a time.
 
 In `single-active`, contention returns HTTP `409 Conflict` for additional `/cdp` connects while the slot is busy. Slot state is exposed at `GET /client-slot` (`mode`, `busy`, `activeClientId`, `connectedAt`).
 
