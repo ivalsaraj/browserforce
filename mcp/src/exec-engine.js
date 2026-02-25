@@ -470,7 +470,14 @@ export class CodeExecutionTimeoutError extends Error {
 
 // buildExecContext takes userState and optional console helpers as params
 // instead of referencing module-level singletons.
-export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {}, pluginHelpers = {}) {
+export function buildExecContext(
+  defaultPage,
+  ctx,
+  userState,
+  consoleHelpers = {},
+  pluginHelpers = {},
+  agentPreferences = {},
+) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
   const lastRefToLocator = userState.__lastRefToLocator || (userState.__lastRefToLocator = new WeakMap());
@@ -573,6 +580,11 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
 
   const pageMarkdown = (opts) => getPageMarkdown(activePage(), opts);
 
+  const browserforceSettings = {
+    executionMode: agentPreferences?.executionMode === 'sequential' ? 'sequential' : 'parallel',
+    parallelVisibilityMode: 'foreground-tab',
+  };
+
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
   const wrappedPluginHelpers = {};
   for (const [name, fn] of Object.entries(pluginHelpers)) {
@@ -585,6 +597,7 @@ export function buildExecContext(defaultPage, ctx, userState, consoleHelpers = {
 
   return {
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
+    browserforceSettings,
     page: defaultPage, context: ctx, state: userState,
     snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,

@@ -181,6 +181,39 @@ function getPages() {
 // ─── Persistent State ────────────────────────────────────────────────────────
 
 let userState = {};
+const DEFAULT_AGENT_PREFERENCES = Object.freeze({
+  executionMode: 'parallel',
+  parallelVisibilityMode: 'foreground-tab',
+});
+let cachedAgentPreferences = null;
+
+function normalizeAgentPreferences(raw) {
+  const executionMode = raw?.executionMode === 'sequential' ? 'sequential' : 'parallel';
+  // Keep behavior locked to visible tabs in the current window.
+  const parallelVisibilityMode = 'foreground-tab';
+  return { executionMode, parallelVisibilityMode };
+}
+
+async function getAgentPreferencesForSession() {
+  if (cachedAgentPreferences) {
+    return cachedAgentPreferences;
+  }
+
+  try {
+    const response = await fetch(`${getRelayHttpUrl()}/agent-preferences`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const raw = await response.json();
+    cachedAgentPreferences = normalizeAgentPreferences(raw);
+    return cachedAgentPreferences;
+  } catch {
+    cachedAgentPreferences = { ...DEFAULT_AGENT_PREFERENCES };
+    return cachedAgentPreferences;
+  }
+}
 
 // ─── Plugin State ────────────────────────────────────────────────────────────
 
@@ -211,6 +244,8 @@ Variables:
   page        Default page (first tab in context — shared, avoid navigating it)
   context     Browser context — access all pages via context.pages()
   state       Persistent object across calls (cleared on reset). Store your working page here.
+  browserforceSettings Session defaults loaded once per MCP session (refresh on reset).
+                      Keys: executionMode, parallelVisibilityMode.
 
 Helpers:
   snapshot({ selector?, search?, showDiffSinceLastCall? })   Accessibility tree as text. 10-100x cheaper than screenshots.
@@ -378,6 +413,7 @@ snapshot vs cleanHTML vs pageMarkdown:
 ═══ BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING ═══
 
 Parallel-first policy for independent extraction:
+  Read browserforceSettings.executionMode before choosing swarm strategy. Settings are session defaults.
   1) For count/list/extraction across independent pages, dates, or items, start with parallel tabs first.
   2) Use Promise.all with a concurrency cap (typically 3-8; start at 5 unless site limits are known).
   3) Keep swarm runs read-only and isolated to agent-created tabs (no checkout/purchase/send/delete/profile changes).
@@ -521,6 +557,7 @@ function registerExecuteTool(skillAppendix = '') {
     async ({ code, timeout = 30000 }) => {
       await ensureBrowser();
       ensureAllPagesCapture();
+      const agentPreferences = await getAgentPreferencesForSession();
       const ctx = getContext();
       const pages = ctx.pages();
       const page = pages[0] || null;
@@ -528,7 +565,7 @@ function registerExecuteTool(skillAppendix = '') {
       if (page) setupConsoleCapture(page);
       const execCtx = buildExecContext(page, ctx, userState, {
         consoleLogs, setupConsoleCapture,
-      }, pluginHelpers);
+      }, pluginHelpers, agentPreferences);
       try {
         const result = await runCode(code, execCtx, timeout);
         const formatted = formatResult(result);
@@ -561,6 +598,7 @@ server.tool(
     }
     browser = null;
     userState = {};
+    cachedAgentPreferences = null;
     contextListenerAttached = false;
     consoleLogs.clear();
     try {
