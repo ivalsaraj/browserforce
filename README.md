@@ -12,7 +12,7 @@ Give AI agents controlled access to the browser you already use.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
-## Comparison
+## Why BrowserForce?
 
 
 |                | Playwright MCP       | OpenClaw Browser        | Playwriter              | Claude Extension     | BrowserForce                         |
@@ -21,8 +21,8 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 | Login state    | Fresh                | Fresh (isolated)        | Yours                   | Yours                | **Yours**                            |
 | Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Auto mode + manual attached tabs** |
 | Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
-| Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)**          |
-| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset`**      |
+| Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB), also support screenshots**          |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset` + extend via plugins**      |
 | Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
 | Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
 
@@ -261,6 +261,14 @@ browserforce install-extension  # Copy extension to ~/.browserforce/extension/
 
 Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
 
+
+## Deep Dive Sections
+
+The core onboarding above stays visible. The sections below keep full detail, organized with progressive disclosure.
+
+<details>
+<summary><b>Plugins (Install, Official, Usage, Manage, Authoring)</b></summary>
+
 ## Plugins
 
 Plugins add custom helpers directly into the `execute` tool scope. Install once — your agent calls them like built-in functions.
@@ -347,6 +355,12 @@ await gmail.screenshot({ path: 'gmail.png' });
 
 No token config needed for MCP — the server reads it automatically from `~/.browserforce/cdp-url`.
 
+
+</details>
+
+<details>
+<summary><b>Agent Capabilities (Tools, Helpers, Swarms)</b></summary>
+
 ## What Your Agent Can Do
 
 Once connected, your agent has full Playwright access to your real browser:
@@ -404,6 +418,12 @@ BrowserForce uses a parallel-first policy for independent extraction jobs, so ag
 - Required telemetry return: `peakConcurrentTasks`, `wallClockMs`, `sumTaskDurationsMs`, `failures`, `retries`.
 
 Need role-based, real workflows? See [Actionable Use Cases](docs/USE_CASES.md).
+
+
+</details>
+
+<details>
+<summary><b>Examples and Multi-Tab Workflows</b></summary>
 
 ## Examples
 
@@ -595,6 +615,12 @@ Get started with simple prompts. The AI generates code and does the work.
 
 **More examples** and detailed walkthrough available in the [User Guide](GUIDE.md#examples).
 
+
+</details>
+
+<details>
+<summary><b>Architecture, Control, Security, Configuration, API</b></summary>
+
 ## How It Works
 
 ```
@@ -714,6 +740,12 @@ In `single-active` mode, the relay enforces one active client slot. A second `/c
 
 Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
 
+
+</details>
+
+<details>
+<summary><b>Troubleshooting and Diagnostics</b></summary>
+
 ## Troubleshooting
 
 
@@ -817,3 +849,5 @@ jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.
 For practical debugging and operations flows, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).
 
 > **Need advanced operator playbooks?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for controlled-tab workflows, parallel swarm patterns, and production diagnostics.
+
+</details>
