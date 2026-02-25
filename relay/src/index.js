@@ -75,6 +75,10 @@ function getClientMode() {
 // ─── RelayServer ─────────────────────────────────────────────────────────────
 
 const DEFAULT_BROWSER_CONTEXT_ID = 'bf-default-context';
+const DEFAULT_AGENT_PREFERENCES = Object.freeze({
+  executionMode: 'parallel',
+  parallelVisibilityMode: 'foreground-tab',
+});
 
 // Commands Playwright sends automatically to every page during initialization.
 // We intercept these on unattached tabs and return synthetic responses so
@@ -147,6 +151,13 @@ function syntheticInitResponse(method, target) {
     default:
       return {};
   }
+}
+
+function normalizeAgentPreferences(raw) {
+  const executionMode = raw?.executionMode === 'sequential' ? 'sequential' : 'parallel';
+  // Keep relay behavior locked to visible tabs in the current window.
+  const parallelVisibilityMode = 'foreground-tab';
+  return { executionMode, parallelVisibilityMode };
 }
 
 class RelayServer {
@@ -326,6 +337,20 @@ class RelayServer {
       } catch (err) {
         res.statusCode = 502;
         res.end(JSON.stringify({ error: 'Extension not responding' }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/agent-preferences') {
+      if (!this.ext) {
+        res.end(JSON.stringify(DEFAULT_AGENT_PREFERENCES));
+        return;
+      }
+      try {
+        const preferences = await this._sendToExt('getAgentPreferences');
+        res.end(JSON.stringify(normalizeAgentPreferences(preferences)));
+      } catch {
+        res.end(JSON.stringify(DEFAULT_AGENT_PREFERENCES));
       }
       return;
     }

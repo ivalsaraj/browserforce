@@ -21,6 +21,8 @@ const autoTimerEl = document.getElementById('bf-auto-timer');
 const attachBtn = document.getElementById('bf-attach-tab');
 const openLogsBtn = document.getElementById('bf-open-logs');
 const modeSelect = document.getElementById('bf-mode');
+const executionModeSelect = document.getElementById('bf-execution-mode');
+const parallelVisibilitySelect = document.getElementById('bf-parallel-visibility');
 const lockUrlCb = document.getElementById('bf-lock-url');
 const noNewTabsCb = document.getElementById('bf-no-new-tabs');
 const readOnlyCb = document.getElementById('bf-read-only');
@@ -44,6 +46,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 const SETTINGS_KEYS = [
   'relayUrl', 'autoDetachMinutes', 'autoCloseMinutes',
   'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions',
+  'executionMode', 'parallelVisibilityMode',
 ];
 
 chrome.storage.local.get(SETTINGS_KEYS, (s) => {
@@ -51,6 +54,8 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   autoDetachSelect.value = String(s.autoDetachMinutes || 0);
   autoCloseSelect.value = String(s.autoCloseMinutes || 0);
   modeSelect.value = s.mode || 'auto';
+  executionModeSelect.value = s.executionMode || 'parallel';
+  parallelVisibilitySelect.value = s.parallelVisibilityMode || 'foreground-tab';
   lockUrlCb.checked = !!s.lockUrl;
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
@@ -70,6 +75,14 @@ saveUrlBtn.addEventListener('click', () => {
 
 modeSelect.addEventListener('change', () => {
   chrome.storage.local.set({ mode: modeSelect.value });
+});
+
+executionModeSelect.addEventListener('change', () => {
+  chrome.storage.local.set({ executionMode: executionModeSelect.value });
+});
+
+parallelVisibilitySelect.addEventListener('change', () => {
+  chrome.storage.local.set({ parallelVisibilityMode: parallelVisibilitySelect.value });
 });
 
 autoDetachSelect.addEventListener('change', () => {

@@ -1673,6 +1673,93 @@ describe('GET /restrictions endpoint', () => {
   });
 });
 
+// ─── GET /agent-preferences Endpoint ────────────────────────────────────────
+
+describe('GET /agent-preferences endpoint', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('returns defaults when no extension is connected', async () => {
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/agent-preferences`);
+    assert.equal(status, 200);
+    assert.deepEqual(body, {
+      executionMode: 'parallel',
+      parallelVisibilityMode: 'foreground-tab',
+    });
+  });
+
+  it('forwards getAgentPreferences to extension and returns its response', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const extPreferences = {
+      executionMode: 'sequential',
+      parallelVisibilityMode: 'foreground-tab',
+    };
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id !== undefined && msg.method === 'getAgentPreferences') {
+        ext.send(JSON.stringify({ id: msg.id, result: extPreferences }));
+      }
+    });
+
+    await sleep(50);
+
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/agent-preferences`);
+    assert.equal(status, 200);
+    assert.deepEqual(body, extPreferences);
+
+    ext.close();
+    await sleep(100);
+  });
+
+  it('normalizes rotate-visible to foreground-tab', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id !== undefined && msg.method === 'getAgentPreferences') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            executionMode: 'parallel',
+            parallelVisibilityMode: 'rotate-visible',
+          },
+        }));
+      }
+    });
+
+    await sleep(50);
+
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/agent-preferences`);
+    assert.equal(status, 200);
+    assert.deepEqual(body, {
+      executionMode: 'parallel',
+      parallelVisibilityMode: 'foreground-tab',
+    });
+
+    ext.close();
+    await sleep(100);
+  });
+});
+
 // ─── manualTabAttached Handler ───────────────────────────────────────────────
 
 describe('manualTabAttached handler', () => {
