@@ -189,12 +189,39 @@ async function executeCommand(msg) {
           });
         });
       });
+    case 'getAgentPreferences':
+      return getAgentExecutionSettings();
     default:
       throw new Error(`Unknown command: ${msg.method}`);
   }
 }
 
 // ─── Tab Operations ──────────────────────────────────────────────────────────
+
+async function getAgentExecutionSettings() {
+  const s = await chrome.storage.local.get(['executionMode', 'parallelVisibilityMode']);
+  const executionMode = s.executionMode === 'sequential' ? 'sequential' : 'parallel';
+  const parallelVisibilityMode =
+    s.parallelVisibilityMode === 'rotate-visible'
+      ? 'rotate-visible'
+      : 'foreground-tab';
+
+  return { executionMode, parallelVisibilityMode };
+}
+
+async function getCurrentWindowId() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs[0] && typeof tabs[0].windowId === 'number') {
+    return tabs[0].windowId;
+  }
+
+  const win = await chrome.windows.getLastFocused();
+  if (win && typeof win.id === 'number') {
+    return win.id;
+  }
+
+  return undefined;
+}
 
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
@@ -294,10 +321,23 @@ async function createTab(params) {
     throw new Error(`BLOCKED: ${msg}`);
   }
 
-  const tab = await chrome.tabs.create({
+  const agentSettings = await getAgentExecutionSettings();
+  const windowId = await getCurrentWindowId();
+  const createOptions = {
     url: params.url || 'about:blank',
-    active: false,
-  });
+    // Keep agent-created tabs visible; do not spawn separate windows.
+    active: true,
+  };
+  if (typeof windowId === 'number') {
+    createOptions.windowId = windowId;
+  }
+
+  // rotate-visible remains normalized to visible tab creation in current window.
+  if (agentSettings.parallelVisibilityMode === 'rotate-visible') {
+    createOptions.active = true;
+  }
+
+  const tab = await chrome.tabs.create(createOptions);
 
   // Brief delay for Chrome to finalize tab creation
   await sleep(200);
