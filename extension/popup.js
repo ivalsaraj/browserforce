@@ -19,6 +19,7 @@ const tabCountEl = document.getElementById('bf-tab-count');
 const tabsListEl = document.getElementById('bf-tabs-list');
 const autoTimerEl = document.getElementById('bf-auto-timer');
 const attachBtn = document.getElementById('bf-attach-tab');
+const openLogsBtn = document.getElementById('bf-open-logs');
 const modeSelect = document.getElementById('bf-mode');
 const lockUrlCb = document.getElementById('bf-lock-url');
 const noNewTabsCb = document.getElementById('bf-no-new-tabs');
@@ -145,6 +146,10 @@ attachBtn.addEventListener('click', () => {
     }
     setTimeout(() => { attachBtn.textContent = '+ Attach Current Tab'; }, 1500);
   });
+});
+
+openLogsBtn.addEventListener('click', () => {
+  chrome.runtime.openOptionsPage();
 });
 
 // --- Status Polling ---
