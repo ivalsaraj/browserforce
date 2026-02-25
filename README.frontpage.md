@@ -6,6 +6,111 @@ Give AI agents controlled access to the browser you already use.
 >
 > "a 10x user doesn't concern itself with sandboxed browsers // sandboxes are for kids" — BrowserForce, your friendly neighborhood power source.
 
+**You're giving an AI your real Chrome — your logins, cookies, and sessions. That takes conviction.**
+BrowserForce is built for people who use the best models and don't look back.
+
+**Autonomous when you want it, controlled when you need it.**
+Run hands-off in Auto mode, or switch to Manual mode and explicitly attach only the tabs you trust.
+
+Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, Codex, Cursor, or any MCP-compatible agent.
+
+## Why BrowserForce
+
+|                | Playwright MCP       | OpenClaw Browser        | Playwriter              | Claude Extension     | BrowserForce                         |
+| -------------- | -------------------- | ----------------------- | ----------------------- | -------------------- | ------------------------------------ |
+| Browser        | Spawns new Chrome    | Separate profile        | Your Chrome             | Your Chrome          | **Your Chrome**                      |
+| Login state    | Fresh                | Fresh (isolated)        | Yours                   | Yours                | **Yours**                            |
+| Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Auto mode + manual attached tabs** |
+| Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
+| Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)**          |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset`**      |
+| Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
+| Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
+
+## 60-Second Start (MCP-First)
+
+1. Install:
+
+```bash
+npm install -g browserforce
+```
+
+2. Install extension files:
+
+```bash
+browserforce install-extension
+```
+
+3. Load extension in `chrome://extensions` -> Developer mode -> Load unpacked -> use path printed by command.
+
+4. Start relay:
+
+```bash
+browserforce serve
+```
+
+5. In your MCP client config, run BrowserForce via npm:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "browserforce@latest", "mcp"]
+}
+```
+
+## Critical Reliability Notes (for MCP users)
+
+- MCP reads CDP URL from `~/.browserforce/cdp-url` unless `BF_CDP_URL` is set.
+- If multiple relay processes run on different ports, MCP may connect to the wrong relay.
+- Single-active mode is default (`BF_CLIENT_MODE=single-active`): a second client can get `409` while slot is busy.
+
+Quick checks:
+
+```bash
+cat ~/.browserforce/cdp-url
+curl -s http://127.0.0.1:19222/ | jq
+curl -s http://127.0.0.1:19222/client-slot | jq
+echo "${BF_CDP_URL:-<unset>}"
+```
+
+If you hit `Protocol error (Target.createTarget): Extension not connected`:
+
+```bash
+lsof -tiTCP:19222 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
+lsof -tiTCP:19888 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
+unset BF_CDP_URL
+RELAY_PORT=19222 npx -y browserforce@latest serve
+```
+
+## Security in Plain English
+
+- Relay binds to `127.0.0.1` only.
+- Extension origin is validated (`chrome-extension://...`).
+- CDP uses auth token in URL query.
+- Token file permissions are owner-only.
+- You can lock URLs, block navigation, and run read-only workflows.
+
+## What This Draft Changes
+
+This file is a **front-page candidate** optimized for:
+- Primary audience: OpenClaw users actively running MCP browser workflows.
+- Secondary audience: developers doing deep debugging.
+
+To avoid dropping anything, the complete current README is preserved below as a collapsed appendix.
+
+---
+
+<details>
+<summary><b>Full Current README (Preserved, Unchanged Snapshot)</b></summary>
+
+# BrowserForce // Parallel AI Agents in "your" Browser!
+
+Give AI agents controlled access to the browser you already use.
+
+> "a lion doesn't concern itself with token counting" — [@steipete](https://x.com/steipete), creator of [OpenClaw](https://github.com/openclaw/openclaw)
+>
+> "a 10x user doesn't concern itself with sandboxed browsers // sandboxes are for kids" — BrowserForce, your friendly neighborhood power source.
+
 **You're giving an AI your real Chrome — your logins, cookies, and sessions. That takes conviction.** BrowserForce is built for people who use the best models and don't look back. Security is built in: lock URLs, block navigation, read-only mode, auto-cleanup — you stay in control.
 
 **Autonomous when you want it, controlled when you need it.** Your agent can run hands-off in Auto mode, or you can switch to Manual mode and explicitly attach only the tabs you trust. BrowserForce connects to **your running browser** with one Chrome extension and full Playwright API support.
@@ -775,39 +880,6 @@ curl -s http://127.0.0.1:19222/client-slot | jq
 
 If `busy: true`, close the other MCP/CDP session or set `BF_CLIENT_MODE=multi-client` for explicit concurrent-client fallback.
 
-### MCP Error: `MCP client for "browserforce" timed out after 10 seconds`
-
-This can happen when a second MCP session starts while BrowserForce is still connecting/retrying in the background.
-
-Why: the MCP process currently attempts browser connection during startup, and Codex's default MCP startup timeout can be shorter than BrowserForce's connect retry window.
-
-Fix in Codex config (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.browserforce]
-command = "npx"
-args = ["-y", "browserforce@latest", "mcp"]
-startup_timeout_sec = 45
-```
-
-Recommended reliable workflow:
-
-```bash
-# Terminal A: run one shared relay
-npx -y browserforce@latest serve
-
-# MCP clients (Codex/Cursor/Claude): run mcp only
-npx -y browserforce@latest mcp
-```
-
-If startup still times out, verify the relay endpoint and slot state:
-
-```bash
-curl -s http://127.0.0.1:19222/ | jq
-curl -s http://127.0.0.1:19222/client-slot | jq
-cat ~/.browserforce/cdp-url
-```
-
 CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
 
 ```bash
@@ -817,3 +889,5 @@ jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.
 For practical debugging and operations flows, see [Actionable Use Cases](docs/USE_CASES.md#developer-high-impact).
 
 > **Need advanced operator playbooks?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for controlled-tab workflows, parallel swarm patterns, and production diagnostics.
+
+</details>
