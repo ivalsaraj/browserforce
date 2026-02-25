@@ -59,6 +59,27 @@ Result: the agent can operate only in your approved set.
 
 Use both in long-running sessions to limit drift and memory growth.
 
+## Execution Strategy Settings
+
+Popup settings include:
+
+- `executionMode`: `parallel` or `sequential`
+- `parallelVisibilityMode`: `foreground-tab` or `rotate-visible`
+
+Current behavior lock:
+
+- Agent-created tabs stay visible in the current window (`foreground-tab` behavior).
+- No new windows are created for parallel workers.
+- `rotate-visible` is treated as `foreground-tab` in this release.
+
+MCP reads these preferences once per session and caches them. If you change popup settings mid-session, call `reset` so new execute calls pick up updated values.
+
+### Operational examples
+
+- Visible parallel in current window: `executionMode=parallel`, `parallelVisibilityMode=foreground-tab`
+- Sequential low-detection run: `executionMode=sequential`
+- Rotate-visible demo toggle: `parallelVisibilityMode=rotate-visible` (currently normalized to `foreground-tab`)
+
 ## BrowserForce Tab Swarms // Parallel Tabs Processing
 
 This is the operating policy for independent read-only extraction at scale.
