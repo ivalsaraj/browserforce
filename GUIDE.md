@@ -19,8 +19,9 @@ Use this when you need hard boundaries on what an agent can touch.
 
 1. Open the exact target tab.
 2. Click the BrowserForce extension icon.
-3. Click `+ Attach Current Tab`.
-4. Confirm it appears in `Controlled Tabs`.
+3. In the popup, click **+ Attach Current Tab**.
+4. Confirm it appears under **Controlled Tabs**.
+5. For full CDP traffic, click **View Full Logs** to open the dedicated logs page.
 
 This is the safest default for logged-in or sensitive pages.
 
@@ -209,12 +210,13 @@ Need broader persona workflows? See [Actionable Use Cases](docs/USE_CASES.md).
 ## Troubleshooting and Diagnostics
 
 | Problem | Fix |
-|---|---|
-| Extension stays gray | Start relay: `browserforce serve` |
-| `Another debugger is attached` | Close DevTools for that tab |
-| Agent sees 0 pages | Open at least one normal webpage (not `chrome://`) |
-| Frequent disconnections | MV3 worker churn is expected; relay keepalive should reconnect |
-| Port collision on `19222` | `lsof -ti:19222 | xargs kill -9` |
+|---------|-----|
+| Extension icon stays gray | Is the relay running? Run `browserforce serve` |
+| "Another debugger is attached" | Close DevTools for that tab |
+| AI sees 0 pages | Open at least one regular webpage (not `chrome://`) |
+| Extension keeps disconnecting | Normal MV3 behavior — it auto-reconnects |
+| Port already in use | Run `lsof -ti:19222 \| xargs kill -9` to kill stale process |
+| Need full traffic visibility | Popup → **View Full Logs** (polls relay logs while page is open) |
 
 CDP traffic log: `~/.browserforce/cdp.jsonl` (recreated each relay start).
 
