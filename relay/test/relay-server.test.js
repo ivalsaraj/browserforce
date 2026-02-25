@@ -127,10 +127,10 @@ describe('Token Persistence', () => {
   const tmpDir = path.join(os.tmpdir(), `bf-test-${crypto.randomBytes(4).toString('hex')}`);
   const origBfDir = BF_DIR;
 
-  it('defaults to single-active client mode', () => {
+  it('defaults to multi-client mode', () => {
     delete process.env.BF_CLIENT_MODE;
     const relay = new RelayServer(getRandomPort());
-    assert.equal(relay.clientMode, 'single-active');
+    assert.equal(relay.clientMode, 'multi-client');
   });
 
   it('creates auth token file on first run', () => {
