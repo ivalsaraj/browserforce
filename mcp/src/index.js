@@ -65,6 +65,14 @@ function ensureAllPagesCapture() {
 
 let browser = null;
 const CONNECT_RETRY_TIMEOUT_MS = 30000;
+const BACKGROUND_CONNECT_RETRY_INTERVAL_MS = 1500;
+let browserConnectPromise = null;
+let backgroundConnectLoopStarted = false;
+let lastBackgroundConnectError = null;
+
+function sleep(ms) {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
 
 function withClientLabel(cdpUrl) {
   try {
@@ -83,30 +91,80 @@ function withClientLabel(cdpUrl) {
 
 async function ensureBrowser() {
   if (browser?.isConnected()) return;
-  await ensureRelay();
-  const cdpUrl = withClientLabel(getCdpUrl());
-  browser = await connectOverCdpWithBusyRetry({
-    connect: (url) => chromium.connectOverCDP(url),
-    cdpUrl,
-    baseUrl: getRelayHttpUrl(),
-    timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
-  });
-  browser.on('disconnected', () => {
-    browser = null;
-    contextListenerAttached = false;
-    consoleLogs.clear();
-  });
+  if (browserConnectPromise) {
+    await browserConnectPromise;
+    return;
+  }
+
+  browserConnectPromise = (async () => {
+    await ensureRelay();
+    const cdpUrl = withClientLabel(getCdpUrl());
+    const nextBrowser = await connectOverCdpWithBusyRetry({
+      connect: (url) => chromium.connectOverCDP(url),
+      cdpUrl,
+      baseUrl: getRelayHttpUrl(),
+      timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
+    });
+    browser = nextBrowser;
+    browser.on('disconnected', () => {
+      browser = null;
+      contextListenerAttached = false;
+      consoleLogs.clear();
+    });
+
+    try {
+      const ctx = browser.contexts()[0];
+      if (ctx && !contextListenerAttached) {
+        ctx.on('page', (page) => setupConsoleCapture(page));
+        contextListenerAttached = true;
+        for (const page of ctx.pages()) {
+          setupConsoleCapture(page);
+        }
+      }
+    } catch { /* context not ready yet — capture will attach lazily */ }
+  })();
 
   try {
-    const ctx = browser.contexts()[0];
-    if (ctx && !contextListenerAttached) {
-      ctx.on('page', (page) => setupConsoleCapture(page));
-      contextListenerAttached = true;
-      for (const page of ctx.pages()) {
-        setupConsoleCapture(page);
+    await browserConnectPromise;
+  } finally {
+    browserConnectPromise = null;
+  }
+}
+
+function startBackgroundConnectionLoop() {
+  if (backgroundConnectLoopStarted) return;
+  backgroundConnectLoopStarted = true;
+
+  (async () => {
+    while (true) {
+      if (browser?.isConnected()) {
+        lastBackgroundConnectError = null;
+        await sleep(BACKGROUND_CONNECT_RETRY_INTERVAL_MS);
+        continue;
       }
+
+      try {
+        await ensureBrowser();
+        if (lastBackgroundConnectError !== null) {
+          process.stderr.write('[bf-mcp] Relay slot available; connected\n');
+          lastBackgroundConnectError = null;
+        } else {
+          process.stderr.write('[bf-mcp] Connected to relay\n');
+        }
+      } catch (err) {
+        const message = err?.message || String(err);
+        if (message !== lastBackgroundConnectError) {
+          process.stderr.write(`[bf-mcp] Waiting for relay/browser: ${message}\n`);
+          process.stderr.write('[bf-mcp] MCP is running; tools will connect when slot is available\n');
+          lastBackgroundConnectError = message;
+        }
+      }
+
+      await sleep(BACKGROUND_CONNECT_RETRY_INTERVAL_MS);
     }
-  } catch { /* context not ready yet — capture will attach lazily */ }
+  })().catch((err) => {
+    process.stderr.write(`[bf-mcp] Background connect loop error: ${err?.message || String(err)}\n`);
+  });
 }
 
 function getContext() {
@@ -544,17 +602,10 @@ async function main() {
   // Fire update check in background — result stored in pendingUpdate for execute handler
   checkForUpdate().then(info => { pendingUpdate = info; }).catch(() => {});
 
-  try {
-    await ensureBrowser();
-    process.stderr.write('[bf-mcp] Connected to relay\n');
-  } catch (err) {
-    process.stderr.write(`[bf-mcp] Warning: ${err.message}\n`);
-    process.stderr.write('[bf-mcp] Tools will attempt to connect on first use\n');
-  }
-
   const transport = new StdioServerTransport();
   await server.connect(transport);
   process.stderr.write('[bf-mcp] MCP server running\n');
+  startBackgroundConnectionLoop();
 }
 
 main().catch((err) => {
