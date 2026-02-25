@@ -67,8 +67,9 @@ function writeCdpUrlFile(cdpUrl) {
 }
 
 function getClientMode() {
-  const mode = (process.env.BF_CLIENT_MODE || CLIENT_MODE_SINGLE).trim();
-  return mode === CLIENT_MODE_MULTI ? CLIENT_MODE_MULTI : CLIENT_MODE_SINGLE;
+  // Default to multi-client for zero-config MCP onboarding.
+  const mode = (process.env.BF_CLIENT_MODE || CLIENT_MODE_MULTI).trim();
+  return mode === CLIENT_MODE_SINGLE ? CLIENT_MODE_SINGLE : CLIENT_MODE_MULTI;
 }
 
 // ─── RelayServer ─────────────────────────────────────────────────────────────
