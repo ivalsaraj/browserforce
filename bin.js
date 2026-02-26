@@ -10,6 +10,8 @@ const { values, positionals } = parseArgs({
   options: {
     eval: { type: 'string', short: 'e' },
     timeout: { type: 'string', default: '30000' },
+    'dry-run': { type: 'boolean', default: false },
+    'no-autostart': { type: 'boolean', default: false },
     json: { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
   },
@@ -432,6 +434,134 @@ async function cmdInstallExtension() {
   await doInstallExtension(false);
 }
 
+async function cmdSetup() {
+  const target = positionals[1];
+  if (!target) {
+    console.error('Usage: browserforce setup openclaw [--dry-run] [--json] [--no-autostart]');
+    process.exit(1);
+  }
+
+  if (target !== 'openclaw') {
+    console.error(`Unknown setup target: ${target}`);
+    process.exit(1);
+  }
+
+  const { homedir } = await import('node:os');
+  const { join, dirname } = await import('node:path');
+  const fs = await import('node:fs/promises');
+  const {
+    mergeOpenClawConfig,
+    formatJsonStable,
+    buildAutostartSpec,
+    applyAutostart,
+  } = await import('./mcp/src/openclaw-setup.js');
+
+  const dryRun = values['dry-run'] === true;
+  const noAutostart = values['no-autostart'] === true;
+  const homeDir = homedir();
+  const openclawConfigPath = join(homeDir, '.openclaw', 'openclaw.json');
+  const openclawDir = dirname(openclawConfigPath);
+
+  let existingConfig = {};
+  let configExisted = false;
+  try {
+    const raw = await fs.readFile(openclawConfigPath, 'utf8');
+    configExisted = true;
+    existingConfig = raw.trim() ? JSON.parse(raw) : {};
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      throw new Error(`Failed to read OpenClaw config at ${openclawConfigPath}: ${err.message}`);
+    }
+  }
+
+  const mergedConfig = mergeOpenClawConfig(existingConfig);
+  const mergedJson = formatJsonStable(mergedConfig);
+  if (!dryRun) {
+    await fs.mkdir(openclawDir, { recursive: true });
+    await fs.writeFile(openclawConfigPath, mergedJson, 'utf8');
+  }
+
+  let autostart = null;
+  if (!noAutostart) {
+    let autostartExecFn;
+    if (values.json) {
+      const { spawnSync } = await import('node:child_process');
+      autostartExecFn = (command) => {
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        if (result.error) {
+          throw result.error;
+        }
+
+        if (typeof result.status === 'number' && result.status !== 0) {
+          const commandOutput = [result.stderr, result.stdout]
+            .filter((chunk) => typeof chunk === 'string' && chunk.trim().length > 0)
+            .join('\n')
+            .trim();
+          throw new Error(
+            commandOutput
+              ? `Command failed with exit code ${result.status}: ${command}\n${commandOutput}`
+              : `Command failed with exit code ${result.status}: ${command}`,
+          );
+        }
+
+        if (result.status === null) {
+          throw new Error(`Command terminated unexpectedly: ${command}`);
+        }
+      };
+    }
+
+    const autostartSpec = buildAutostartSpec({
+      platform: process.platform,
+      homeDir,
+      nodePath: process.execPath,
+      binScriptPath: fileURLToPath(import.meta.url),
+    });
+    const autostartReport = await applyAutostart(autostartSpec, {
+      dryRun,
+      ...(autostartExecFn ? { execFn: autostartExecFn } : {}),
+    });
+    autostart = {
+      platform: autostartSpec.platform,
+      summary: autostartSpec.summary,
+      wroteFiles: autostartReport.wroteFiles,
+      ranCommands: autostartReport.ranCommands,
+      skippedCommands: autostartReport.skippedCommands,
+    };
+  }
+
+  const result = {
+    target: 'openclaw',
+    dryRun,
+    openclawConfigPath,
+    mcpAdapterConfigured: mergedConfig?.plugins?.entries?.['mcp-adapter']?.enabled === true,
+    configExisted,
+    configWritten: !dryRun,
+    autostart,
+  };
+
+  if (values.json) {
+    process.stdout.write(formatJsonStable(result));
+    return;
+  }
+
+  console.log('OpenClaw setup complete');
+  console.log(`  target: ${result.target}`);
+  console.log(`  openclawConfigPath: ${result.openclawConfigPath}`);
+  console.log(`  mcpAdapterConfigured: ${result.mcpAdapterConfigured}`);
+  console.log(`  config: ${dryRun ? 'dry-run (not written)' : 'written'}`);
+  if (noAutostart) {
+    console.log('  autostart: skipped (--no-autostart)');
+  } else {
+    console.log(`  autostart.platform: ${autostart.platform}`);
+    console.log(`  autostart: ${dryRun ? 'dry-run (not applied)' : 'applied'}`);
+  }
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -447,12 +577,15 @@ function cmdHelp() {
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
+    browserforce setup openclaw     Configure OpenClaw + optional autostart
     browserforce update             Update to the latest version
     browserforce install-extension  Copy extension to ~/.browserforce/extension/
     browserforce -e "<code>"        Execute Playwright JavaScript (one-shot)
 
   Options:
     --timeout <ms>    Execution timeout (default: 30000)
+    --dry-run         Preview setup changes without writing files
+    --no-autostart    Skip autostart setup for setup openclaw
     --json            JSON output
     -h, --help        Show this help
 
@@ -461,6 +594,7 @@ function cmdHelp() {
     browserforce tabs
     browserforce plugin list
     browserforce plugin install highlight
+    browserforce setup openclaw --dry-run --json
     browserforce update
     browserforce -e "return await snapshot()"
     browserforce -e "await page.goto('https://github.com'); return await snapshot()"
@@ -478,7 +612,7 @@ const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
-  'install-extension': cmdInstallExtension, help: cmdHelp,
+  'install-extension': cmdInstallExtension, setup: cmdSetup, help: cmdHelp,
 };
 
 const handler = commands[command];
