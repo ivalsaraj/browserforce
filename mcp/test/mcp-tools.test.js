@@ -56,6 +56,18 @@ describe('Tool Definitions', () => {
     assert.equal(result, '');
   });
 
+  it('index imports only exports available from exec-engine', async () => {
+    const { execSync } = await import('node:child_process');
+    const result = execSync(
+      'node --input-type=module -e "import { getCdpUrl, getRelayHttpUrl, getRelayHttpUrlFromCdpUrl, assertExtensionConnected, ensureRelay, connectOverCdpWithBusyRetry, CodeExecutionTimeoutError, buildExecContext, runCode, formatResult } from \'./src/exec-engine.js\'; console.log(typeof getRelayHttpUrlFromCdpUrl, typeof assertExtensionConnected);"',
+      {
+        cwd: join(import.meta.url.replace('file://', ''), '../../'),
+        encoding: 'utf8',
+      }
+    ).trim();
+    assert.equal(result, 'function function');
+  });
+
   it('registers exactly 2 tools: execute, reset', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
