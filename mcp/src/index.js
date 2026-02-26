@@ -7,7 +7,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { chromium } from 'playwright-core';
 import {
-  getCdpUrl, getRelayHttpUrl, ensureRelay, connectOverCdpWithBusyRetry,
+  getCdpUrl, getRelayHttpUrl, getRelayHttpUrlFromCdpUrl, assertExtensionConnected,
+  ensureRelay, connectOverCdpWithBusyRetry,
   CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
 import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
@@ -98,11 +99,13 @@ async function ensureBrowser() {
 
   browserConnectPromise = (async () => {
     await ensureRelay();
-    const cdpUrl = withClientLabel(getCdpUrl());
+    const cdpUrl = withClientLabel(await getCdpUrl());
+    const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
+    await assertExtensionConnected({ baseUrl });
     const nextBrowser = await connectOverCdpWithBusyRetry({
       connect: (url) => chromium.connectOverCDP(url),
       cdpUrl,
-      baseUrl: getRelayHttpUrl(),
+      baseUrl,
       timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
     });
     browser = nextBrowser;
