@@ -73,7 +73,12 @@ function httpFetch(method, url, body, authToken) {
 }
 
 async function connectBrowser() {
-  const { getCdpUrl, ensureRelay } = await import('./mcp/src/exec-engine.js');
+  const {
+    getCdpUrl,
+    ensureRelay,
+    assertExtensionConnected,
+    getRelayHttpUrlFromCdpUrl,
+  } = await import('./mcp/src/exec-engine.js');
   await ensureRelay();
   // playwright-core lives in mcp/node_modules (pnpm workspace sub-package).
   // Use createRequire from the mcp package context to locate it, then dynamic-import.
@@ -82,7 +87,9 @@ async function connectBrowser() {
   const pwPath = mReq.resolve('playwright-core');
   const { default: pw } = await import(pwPath);
   const { chromium } = pw;
-  const cdpUrl = getCdpUrl();
+  const cdpUrl = await getCdpUrl();
+  const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
+  await assertExtensionConnected({ baseUrl });
   return chromium.connectOverCDP(cdpUrl);
 }
 

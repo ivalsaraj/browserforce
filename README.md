@@ -798,23 +798,79 @@ Everything runs on your machine. The auth token is stored at `~/.browserforce/au
 
 ## Configuration
 
-**Custom relay port:**
+### Port conflicts and switching ports
+
+Default port is `19222`.
+
+If that port is already in use, you can see:
+- relay start failure (`EADDRINUSE` / port in use)
+- extension stays disconnected (gray)
+- MCP errors like `Extension not connected`
+
+Switch all components to the same new port (example: `19333`):
+
+1. Start relay on the new port:
 
 ```bash
 RELAY_PORT=19333 browserforce serve
 ```
 
-**Extension relay URL:** Click the extension icon → change the URL → Save. Default: `ws://127.0.0.1:19222/extension`
+2. In extension popup, set relay URL to:
 
-**Override CDP URL for MCP:**
+```text
+ws://127.0.0.1:19333/extension
+```
 
+3. Start MCP on the same port:
+
+**Cursor** (`~/.cursor/mcp.json`)
 ```json
 {
-  "env": {
-    "BF_CDP_URL": "ws://127.0.0.1:19333/cdp?token=your-token"
+  "mcpServers": {
+    "browserforce": {
+      "command": "env",
+      "args": ["RELAY_PORT=19333", "npx", "-y", "browserforce@latest", "mcp"]
+    }
   }
 }
 ```
+
+**Claude Code** (`~/.claude/mcp.json`)
+```json
+{
+  "mcpServers": {
+    "browserforce": {
+      "command": "env",
+      "args": ["RELAY_PORT=19333", "npx", "-y", "browserforce@latest", "mcp"]
+    }
+  }
+}
+```
+
+**OpenClaw** (`~/.openclaw/openclaw.json`)
+```json
+{
+  "plugins": {
+    "entries": {
+      "mcp-adapter": {
+        "enabled": true,
+        "config": {
+          "servers": [
+            {
+              "name": "browserforce",
+              "transport": "stdio",
+              "command": "env",
+              "args": ["RELAY_PORT=19333", "npx", "-y", "browserforce@latest", "mcp"]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+Fallback only (if you cannot pass `RELAY_PORT` in MCP config): use `BF_CDP_URL` with the exact relay port/token.
 
 **Client arbitration mode (`BF_CLIENT_MODE`):**
 
