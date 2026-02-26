@@ -13,6 +13,8 @@ const RESTRICTION_LINES = {
 
 const statusEl = document.getElementById('bf-status');
 const statusTextEl = document.getElementById('bf-status-text');
+const mcpClientsEl = document.getElementById('bf-mcp-clients');
+const popupEl = document.querySelector('.bf-popup');
 const relayUrlInput = document.getElementById('bf-relay-url');
 const saveUrlBtn = document.getElementById('bf-save-url');
 const tabCountEl = document.getElementById('bf-tab-count');
@@ -60,6 +62,7 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
   instructionsEl.value = s.userInstructions || '';
+  setAutoModeBorder(s.mode || 'auto');
 });
 
 // --- Save Handlers ---
@@ -75,6 +78,7 @@ saveUrlBtn.addEventListener('click', () => {
 
 modeSelect.addEventListener('change', () => {
   chrome.storage.local.set({ mode: modeSelect.value });
+  setAutoModeBorder(modeSelect.value);
 });
 
 executionModeSelect.addEventListener('change', () => {
@@ -178,6 +182,8 @@ function refreshStatus() {
     setStatus(response.connectionState, response.connectionState);
     setTabs(response.tabs || []);
     setAutoTimer(response.nextAutoActionSecs);
+    setMcpClientCount(response.mcpClientCount);
+    setAutoModeBorder(response.mode || modeSelect.value || 'auto');
   });
 }
 
@@ -226,6 +232,15 @@ function setAutoTimer(secs) {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   autoTimerEl.textContent = `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function setMcpClientCount(count) {
+  const safeCount = Number.isFinite(count) ? count : 0;
+  mcpClientsEl.textContent = `MCP ${safeCount}`;
+}
+
+function setAutoModeBorder(mode) {
+  popupEl.classList.toggle('auto-mode', mode === 'auto');
 }
 
 function escapeHtml(str) {
