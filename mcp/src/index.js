@@ -7,7 +7,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { chromium } from 'playwright-core';
 import {
-  getCdpUrl, getRelayHttpUrl, ensureRelay, connectOverCdpWithBusyRetry,
+  getCdpUrl, getRelayHttpUrl, getRelayHttpUrlFromCdpUrl, assertExtensionConnected,
+  ensureRelay, connectOverCdpWithBusyRetry,
   CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
 import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
@@ -98,11 +99,13 @@ async function ensureBrowser() {
 
   browserConnectPromise = (async () => {
     await ensureRelay();
-    const cdpUrl = withClientLabel(getCdpUrl());
+    const cdpUrl = withClientLabel(await getCdpUrl());
+    const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
+    await assertExtensionConnected({ baseUrl });
     const nextBrowser = await connectOverCdpWithBusyRetry({
       connect: (url) => chromium.connectOverCDP(url),
       cdpUrl,
-      baseUrl: getRelayHttpUrl(),
+      baseUrl,
       timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
     });
     browser = nextBrowser;
@@ -272,155 +275,67 @@ Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEnco
 
 IMPORTANT: Do NOT navigate the user's existing tabs. Always create or reuse a dedicated tab.
 
-On your first call, initialize state.page:
-  // Reuse an about:blank tab if one exists, otherwise create a new one
+On your first call:
   state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
   await state.page.goto('https://example.com');
   await waitForPageLoad();
   return await snapshot();
 
-After setup, use state.page for ALL subsequent operations — not the default page variable.
-If state.page was closed or navigated away, recreate it:
+After setup, use state.page for all subsequent operations.
+If state.page was closed:
   if (!state.page || state.page.isClosed()) {
-    state.page = await context.newPage();
+    state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
   }
 
-═══ WORKFLOW — OBSERVE → ACT → OBSERVE ═══
+═══ CORE LOOP — OBSERVE → ACT → OBSERVE ═══
 
-After every action, verify its result before proceeding:
+After every action, verify the result before proceeding.
+Each execute call should usually do one meaningful action and return verification.
+Exception: read-only bulk extraction can do multi-step execution when actions are independent.
 
-1. OBSERVE: snapshot() to understand current page state
-2. ACT: Perform ONE action (click, type, navigate, etc.)
-3. OBSERVE: snapshot() again to verify the action worked
+Recommended cycle:
+  1) OBSERVE: console.log('URL:', state.page.url()); return await snapshot();
+  2) ACT: one action (click, type, navigate, submit)
+  3) OBSERVE: snapshot() again; verify the expected change happened
 
-Never chain multiple actions blindly. If you click a button, verify it worked before clicking the next.
-Each execute call should do ONE meaningful action and return verification.
-Exception: Multi-step is allowed for read-only bulk extraction when actions are independent and no user-tab mutation occurs.
+If nothing changed, wait for load and observe again before retrying.
 
-When navigating:
-  await state.page.goto(url);
-  await waitForPageLoad();
-  return await snapshot();
+═══ INTERACTION RULES ═══
 
-When clicking:
-  await state.page.locator('role=button[name="Submit"]').click();
-  await waitForPageLoad();
-  return await snapshot();
+Selector priority:
+  1) Use fresh [ref=...] locators from snapshot output
+  2) Use role/name locators from snapshot
+  3) Use stable test IDs (data-testid)
+  4) Avoid brittle nth()/deep CSS selectors unless no stable option exists
 
-When filling forms:
-  await state.page.locator('role=textbox[name="Email"]').fill('user@example.com');
-  return await snapshot();
-
-═══ SNAPSHOT FIRST ═══
-
-ALWAYS prefer snapshot() over screenshot():
-- snapshot() returns a text accessibility tree — fast, cheap, searchable
-- screenshot() returns a PNG image — expensive, requires vision processing
-
-Use snapshot() for:
-  ✓ Reading page content and text
-  ✓ Finding interactive elements (buttons, links, inputs)
-  ✓ Verifying actions succeeded
-  ✓ Checking if a page loaded correctly
-
-Use screenshot() ONLY for:
-  ✓ Visual layout verification (grids, alignment, spacing)
-  ✓ Seeing images, charts, or visual content
-  ✓ Debugging when snapshot doesn't show the issue
-
-Targeted snapshots: snapshot({ search: /pattern/i }) filters the tree.
-Scoped snapshots: snapshot({ selector: '#main' }) limits to a subtree.
-
-═══ PAGE MANAGEMENT ═══
-
-Listing tabs:       const pages = context.pages();
-Creating a tab:     const p = await context.newPage();
-Navigating:         await state.page.goto(url);
-Current URL:        state.page.url()
-Page title:         await state.page.title()
-
-context.pages() returns ALL open tabs. Index 0 is usually the user's original tab.
-Store your working page in state.page to avoid losing track of it.
-
-For multi-tab workflows:
-  const pages = context.pages();
-  // Find a specific tab by URL
-  const gmail = pages.find(p => p.url().includes('mail.google'));
-
-═══ INTERACTING WITH ELEMENTS ═══
-
-Use Playwright locators with accessibility roles (from snapshot output):
-  await state.page.locator('role=button[name="Sign in"]').click();
-  await state.page.locator('role=textbox[name="Search"]').fill('query');
-  await state.page.locator('role=link[name="Settings"]').click();
-
-If snapshot shows [ref=e3], resolve it with refToLocator({ ref }) before acting:
+If snapshot shows [ref=e3]:
   const locator = refToLocator({ ref: 'e3' });
   if (locator) await state.page.locator(locator).click();
 
-For text content:
-  const text = await state.page.locator('role=heading').textContent();
+Before interacting, dismiss blockers:
+  await snapshot({ search: /cookie|consent|accept|reject|allow|age|verify|login|sign.in/i });
 
-Selector priority:
-  1. Use [ref=...] locators from snapshot output immediately after observing
-  2. Use role/name locators from snapshot
-  3. Use stable test IDs (data-testid) if present
-  4. Avoid brittle nth()/deep CSS selectors unless no stable option exists
-
-Before interacting, handle page blockers (cookie/consent banners, age gates, login popups):
-  const blockers = await snapshot({ search: /cookie|consent|accept|reject|allow|age|verify|login|sign.in/i });
-  // Dismiss blockers first, then continue with the main task
-
-Avoid stale locator usage:
-  // BAD: using a stale locator from an old snapshot after DOM changes
-  // GOOD: refresh observation first, then act with new refs/locators
-  await snapshot();
-
-Typing text with newlines:
-  // Use fill() for multiline blocks to avoid accidental Enter key submissions
+For multiline text, prefer fill() with \\n:
   await state.page.locator('role=textbox[name="Message"]').fill('Line 1\\nLine 2');
 
-═══ TACTICAL ANTI-PATTERNS ═══
+═══ SNAPSHOT VS SCREENSHOT ═══
 
-Popup control:
-  ✗ Don’t click through a popup without confirming what changed
-  ✓ Dismiss popup, then run snapshot() immediately to confirm main UI is usable
+Prefer snapshot() for text/content/verification.
+Use screenshotWithAccessibilityLabels() only when visual layout or spatial relationships matter.
 
-Consent blockers:
-  ✗ Don’t continue form/page actions while consent banners block focus
-  ✓ Handle cookie/consent overlays first, then retry the intended action
+Use cleanHTML/pageMarkdown for extraction:
+  - snapshot() for interactive structure and refs
+  - cleanHTML() for structured DOM extraction/parsing
+  - pageMarkdown() for article-like content
 
-Stale locators:
-  ✗ Don’t reuse [ref=...] values after DOM/nav updates
-  ✓ Refresh snapshot() and use the newest refs/role locators
+═══ PARALLEL TAB EXTRACTION ═══
 
-Newline typing:
-  ✗ Don’t use keyboard Enter loops for multiline textareas unless explicitly needed
-  ✓ Prefer locator.fill('line1\\nline2') for deterministic multiline input
+Read browserforceSettings.executionMode before choosing strategy.
+For independent read-only extraction tasks, start with parallel tabs (cap concurrency, usually 3-8).
+On 429/challenges/timeouts: retry with lower concurrency, then sequential if needed.
+If visibility mode requires showing work (for example, rotating/foreground demos), bringing your own working tab to front is allowed.
 
-Raw CDP sessions:
-  ✗ Don’t call page.context().newCDPSession(page) directly
-  ✓ Use getCDPSession({ page }) for relay-safe CDP session creation
-
-═══ EXTRACTION DECISION TREE ═══
-
-snapshot vs cleanHTML vs pageMarkdown:
-  1) Use snapshot() when you need current interactive structure, labels, and refs.
-  2) Use cleanHTML(selector?) when you need structured DOM content for parsing/extraction.
-  3) Use pageMarkdown() for article/blog/news pages where nav/ads should be removed.
-  4) Use screenshotWithAccessibilityLabels() only when layout/visual evidence is required.
-
-═══ BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING ═══
-
-Parallel-first policy for independent extraction:
-  Read browserforceSettings.executionMode before choosing swarm strategy. Settings are session defaults.
-  1) For count/list/extraction across independent pages, dates, or items, start with parallel tabs first.
-  2) Use Promise.all with a concurrency cap (typically 3-8; start at 5 unless site limits are known).
-  3) Keep swarm runs read-only and isolated to agent-created tabs (no checkout/purchase/send/delete/profile changes).
-  4) If you hit 429, anti-bot challenges, or repeated timeouts, automatically retry with reduced concurrency.
-  5) If reduced concurrency still fails, retry sequentially.
-
-Always return telemetry for swarm runs:
+Return telemetry for swarm runs:
   {
     peakConcurrentTasks,
     wallClockMs,
@@ -429,122 +344,43 @@ Always return telemetry for swarm runs:
     retries
   }
 
-═══ DEBUGGING WORKFLOW ═══
+═══ DEBUGGING QUICK LOOP ═══
 
-Combine snapshot + logs:
-  1) snapshot({ search: /target text|button|error/i }) to verify element presence and naming
-  2) getLogs({ count: 30 }) for runtime/network/console errors
-  3) page.evaluate(() => { ...visibility checks... }) to validate hidden/disabled/overlay states
+1) snapshot({ search: /button|dialog|error|target/i })
+2) getLogs({ count: 30 })
+3) state.page.evaluate(...) for visibility/disabled/overlay checks
 
-Example visibility check:
-  return await state.page.evaluate(() => {
-    const el = document.querySelector('[data-testid="submit"]');
-    if (!el) return { found: false };
-    const s = getComputedStyle(el);
-    const r = el.getBoundingClientRect();
-    return { found: true, visible: s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0 };
-  });
+For JS-heavy or authenticated sites, stay in browser automation.
+Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 
-═══ ADVANCED PATTERNS ═══
+═══ HARD RULES ═══
 
-Authenticated fetch:
-  // Reuse browser session cookies/headers from the current page context
-  return await state.page.evaluate(async () => {
-    const res = await fetch('/api/me', { credentials: 'include' });
-    return { status: res.status, body: await res.text() };
-  });
-
-Network interception:
-  await state.page.route('**/api/**', async (route) => {
-    const request = route.request();
-    // Inspect/modify request here if needed before continuing
-    await route.continue();
-  });
-
-Downloads:
-  // Use expect_download pattern and save path after click/navigation trigger
-  const [download] = await Promise.all([
-    state.page.waitForEvent('download'),
-    state.page.locator('role=button[name="Export CSV"]').click(),
-  ]);
-  return { suggestedFilename: download.suggestedFilename() };
-
-═══ COMMON PATTERNS ═══
-
-Navigate and read:
-  await state.page.goto('https://example.com');
-  await waitForPageLoad();
-  return await snapshot();
-
-Click and verify:
-  await state.page.locator('role=button[name="Next"]').click();
-  await waitForPageLoad();
-  return await snapshot();
-
-Fill form and submit:
-  await state.page.locator('role=textbox[name="Username"]').fill('user');
-  await state.page.locator('role=textbox[name="Password"]').fill('pass');
-  await state.page.locator('role=button[name="Login"]').click();
-  await waitForPageLoad();
-  return await snapshot();
-
-Extract data:
-  return await state.page.evaluate(() => {
-    return document.querySelector('.price').textContent;
-  });
-
-Wait for specific element:
-  await state.page.locator('role=heading[name="Dashboard"]').waitFor();
-  return await snapshot();
-
-Debug with console logs:
-  return getLogs({ count: 20 });
-
-When you need the full tree instead of diff output:
-  return await snapshot({ showDiffSinceLastCall: false });
-
-═══ ANTI-PATTERNS ═══
-
-✗ Don't navigate the user's existing tabs — create your own via context.newPage()
-✗ Don't screenshot() to read text — use snapshot()
-✗ Don't chain actions without verifying — observe after each action
-✗ Don't use page.waitForTimeout() — use waitForPageLoad() or waitFor()
-✗ Don't forget to return a value — every call should return verification
-✗ Don't write complex multi-step scripts by default — split into separate execute calls
-✓ Exception: Multi-step is allowed for read-only bulk extraction when actions are independent and no user-tab mutation occurs
-✗ Don't use page variable directly — use state.page after first call setup
+✗ Don't navigate the user's existing tabs
+✗ Don't screenshot to read text; use snapshot
+✗ Don't chain actions blindly without verification
+✗ Don't use page.waitForTimeout() when a deterministic wait is available
+✗ Don't use stale refs after DOM/navigation updates
+✗ Don't call page.context().newCDPSession(page); use getCDPSession({ page })
+✗ Don't call browser.close() or context.close()
+✗ Don't call page.bringToFront() by default; only use it when user asks or when visibility mode needs visible tab progression
+✗ Don't use the default page variable for ongoing work after setup; use state.page
 
 ═══ ERROR RECOVERY ═══
 
-If page closed:      state.page = await context.newPage();
-If navigation fails: Check state.page.url() to see where you actually are
-If element missing:   Use snapshot({ search: /element/ }) to find it
-If connection lost:   Call the reset tool, then re-initialize state.page
-If timeout:          Increase timeout param, or break into smaller steps
+If page closed:      recreate state.page with context.newPage() (or reuse about:blank)
+If navigation fails: check current URL, then snapshot() to re-ground state
+If element missing:  use snapshot({ search: /.../ }) with tighter patterns
+If connection lost:  call reset, then reinitialize state.page
+If timeout:          increase timeout or break work into smaller execute calls
+If Chrome/extension unavailable: ask user to open Chrome, keep at least one normal web tab open, and ensure BrowserForce extension is connected
 
-═══ API REFERENCE ═══
+═══ API QUICK REFERENCE ═══
 
-snapshot(options?)
-  options.selector  CSS selector to scope the snapshot (e.g., '#main', '.sidebar')
-  options.search    Regex string to filter tree nodes (e.g., 'button|link')
-  options.showDiffSinceLastCall  When true (default), returns a smart diff from previous snapshot when unchanged scope+search is not used
-  Returns: Text accessibility tree with interactive element refs
-
-waitForPageLoad(options?)
-  options.timeout   Max wait in ms (default: 30000)
-  Returns: { success, readyState, pendingRequests, waitTimeMs, timedOut }
-  Filters analytics/ad requests that never finish. Polls document.readyState.
-
-getLogs(options?)
-  options.count     Number of recent entries (default: all)
-  Returns: Array of "[type] message" strings from browser console
-
-clearLogs()
-  Clears captured console logs for current page.
-
-state
-  Persistent object — survives across execute calls. Cleared on reset.
-  Use state.page, state.data, state.anything to preserve working state.`;
+snapshot(options?) -> text accessibility tree with interactive refs
+waitForPageLoad(options?) -> { success, readyState, pendingRequests, waitTimeMs, timedOut }
+getLogs(options?) -> browser console log entries
+clearLogs() -> clears captured logs for current page
+state -> persistent across execute calls; cleared on reset`;
 
 function registerExecuteTool(skillAppendix = '') {
   server.tool(
@@ -578,7 +414,7 @@ function registerExecuteTool(skillAppendix = '') {
         return { content };
       } catch (err) {
         const isTimeout = err instanceof CodeExecutionTimeoutError;
-        const hint = isTimeout ? '' : '\n\n[If connection lost, call reset tool to reconnect]';
+        const hint = isTimeout ? '' : '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
         return {
           content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
           isError: true,
@@ -590,7 +426,7 @@ function registerExecuteTool(skillAppendix = '') {
 
 server.tool(
   'reset',
-  'Reconnects to the relay, reinitializes the browser context, and clears persistent state. Use when: connection lost, pages closed unexpectedly, or state is corrupt.',
+  'Reconnects CDP and reinitializes browser/page bindings. Use when MCP stops responding, connection errors occur, pages/context were closed, or state is inconsistent. Reset clears persistent state; reinitialize state.page after calling it.',
   {},
   async () => {
     if (browser) {
