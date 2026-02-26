@@ -21,28 +21,106 @@ export const BF_DIR = join(homedir(), '.browserforce');
 export const CDP_URL_FILE = join(BF_DIR, 'cdp-url');
 const RELAY_SCRIPT = fileURLToPath(new URL('../../relay/src/index.js', import.meta.url));
 
-export function getCdpUrl() {
-  if (process.env.BF_CDP_URL) return process.env.BF_CDP_URL;
+function getExplicitCdpUrlOverride() {
+  const value = process.env.BF_CDP_URL;
+  if (!value) return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function parseRelayHttpUrlFromCdpUrl(cdpUrl) {
+  try {
+    const parsed = new URL(cdpUrl);
+    if (!parsed.hostname || !parsed.port) return null;
+    return `http://${parsed.hostname}:${parsed.port}`;
+  } catch {
+    return null;
+  }
+}
+
+function readCdpUrlFromFile() {
   try {
     const url = readFileSync(CDP_URL_FILE, 'utf8').trim();
-    if (url) return url;
+    return url || null;
   } catch { /* fall through */ }
+  return null;
+}
+
+export async function getCdpUrl({ baseUrl = getRelayHttpUrl(), timeoutMs = 2000 } = {}) {
+  const explicit = getExplicitCdpUrlOverride();
+  if (explicit) return explicit;
+
+  const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
+  try {
+    const response = await fetch(`${resolvedBaseUrl}/json/version`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (typeof data?.webSocketDebuggerUrl === 'string' && data.webSocketDebuggerUrl.trim()) {
+        return data.webSocketDebuggerUrl.trim();
+      }
+    }
+  } catch { /* fall through */ }
+
+  const legacyFileUrl = readCdpUrlFromFile();
+  if (legacyFileUrl) return legacyFileUrl;
+
   throw new Error(
     'Cannot find CDP URL. Either:\n' +
     '  1. Start the relay first: browserforce serve\n' +
-    '  2. Set BF_CDP_URL environment variable'
+    `  2. Ensure relay is reachable at ${resolvedBaseUrl}\n` +
+    '  3. Set BF_CDP_URL environment variable'
   );
 }
 
 /** Derive the relay HTTP base URL from the CDP WebSocket URL. */
 export function getRelayHttpUrl() {
-  const cdpUrl = getCdpUrl();
-  try {
-    const parsed = new URL(cdpUrl);
-    return `http://${parsed.hostname}:${parsed.port}`;
-  } catch {
-    return `http://127.0.0.1:${DEFAULT_PORT}`;
+  const explicit = getExplicitCdpUrlOverride();
+  if (explicit) {
+    return parseRelayHttpUrlFromCdpUrl(explicit) || `http://127.0.0.1:${getRelayPort()}`;
   }
+  return `http://127.0.0.1:${getRelayPort()}`;
+}
+
+export function getRelayHttpUrlFromCdpUrl(cdpUrl) {
+  return parseRelayHttpUrlFromCdpUrl(cdpUrl) || getRelayHttpUrl();
+}
+
+export async function assertExtensionConnected({ baseUrl = getRelayHttpUrl(), timeoutMs = 2000 } = {}) {
+  const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
+  let response;
+  try {
+    response = await fetch(`${resolvedBaseUrl}/`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    throw new Error(
+      `Cannot reach BrowserForce relay at ${resolvedBaseUrl}. ` +
+      'Start it with `browserforce serve`.'
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Cannot reach BrowserForce relay at ${resolvedBaseUrl} (HTTP ${response.status}).`
+    );
+  }
+
+  let status;
+  try {
+    status = await response.json();
+  } catch {
+    throw new Error(`Relay at ${resolvedBaseUrl} returned invalid status JSON.`);
+  }
+
+  if (status?.extension !== true) {
+    throw new Error(
+      `BrowserForce extension is not connected to relay at ${resolvedBaseUrl}.`
+    );
+  }
+
+  return status;
 }
 
 export function isCdpBusyError(err) {
@@ -111,14 +189,10 @@ export async function connectOverCdpWithBusyRetry({
 // ─── Auto-start relay ───────────────────────────────────────────────────────
 
 function getRelayPort() {
-  if (process.env.RELAY_PORT) return parseInt(process.env.RELAY_PORT, 10);
-  try {
-    const url = readFileSync(CDP_URL_FILE, 'utf8').trim();
-    if (url) {
-      const port = new URL(url).port;
-      if (port) return parseInt(port, 10);
-    }
-  } catch { /* fall through */ }
+  if (process.env.RELAY_PORT) {
+    const parsed = parseInt(process.env.RELAY_PORT, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
   return DEFAULT_PORT;
 }
 
@@ -136,6 +210,8 @@ async function isRelayRunning(port) {
  * background process and wait for it to become reachable.
  */
 export async function ensureRelay() {
+  if (getExplicitCdpUrlOverride()) return;
+
   const port = getRelayPort();
   if (await isRelayRunning(port)) return;
 
