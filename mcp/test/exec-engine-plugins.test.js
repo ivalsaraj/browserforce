@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildExecContext, runCode, formatResult } from '../src/exec-engine.js';
+import {
+  buildExecContext,
+  runCode,
+  formatResult,
+  getRelayHttpUrl,
+  getCdpUrl,
+  assertExtensionConnected,
+} from '../src/exec-engine.js';
 
 const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => 'Test' };
 const mockCtx = { pages: () => [mockPage] };
@@ -225,4 +232,90 @@ test('pageMarkdown search resets regex state for g/y regex flags', async () => {
   const result = await ctx.pageMarkdown({ search, showDiffSinceLastCall: false });
   assert.ok(result.includes('target on only line'));
   assert.ok(!result.includes('No matches found'));
+});
+
+test('getRelayHttpUrl defaults to localhost:19222', () => {
+  const originalPort = process.env.RELAY_PORT;
+  const originalCdp = process.env.BF_CDP_URL;
+  try {
+    delete process.env.RELAY_PORT;
+    delete process.env.BF_CDP_URL;
+    assert.equal(getRelayHttpUrl(), 'http://127.0.0.1:19222');
+  } finally {
+    if (originalPort === undefined) delete process.env.RELAY_PORT;
+    else process.env.RELAY_PORT = originalPort;
+    if (originalCdp === undefined) delete process.env.BF_CDP_URL;
+    else process.env.BF_CDP_URL = originalCdp;
+  }
+});
+
+test('getRelayHttpUrl respects BF_CDP_URL override host/port', () => {
+  const originalCdp = process.env.BF_CDP_URL;
+  try {
+    process.env.BF_CDP_URL = 'ws://127.0.0.1:19457/cdp?token=test-token';
+    assert.equal(getRelayHttpUrl(), 'http://127.0.0.1:19457');
+  } finally {
+    if (originalCdp === undefined) delete process.env.BF_CDP_URL;
+    else process.env.BF_CDP_URL = originalCdp;
+  }
+});
+
+test('getCdpUrl resolves from /json/version when BF_CDP_URL is not set', async () => {
+  const originalCdp = process.env.BF_CDP_URL;
+  const originalPort = process.env.RELAY_PORT;
+  const originalFetch = globalThis.fetch;
+
+  try {
+    delete process.env.BF_CDP_URL;
+    process.env.RELAY_PORT = '19222';
+    globalThis.fetch = async (url) => {
+      assert.equal(url, 'http://127.0.0.1:19222/json/version');
+      return {
+        ok: true,
+        json: async () => ({
+          webSocketDebuggerUrl: 'ws://127.0.0.1:19222/cdp?token=from-json-version',
+        }),
+      };
+    };
+
+    const cdpUrl = await getCdpUrl();
+    assert.equal(cdpUrl, 'ws://127.0.0.1:19222/cdp?token=from-json-version');
+  } finally {
+    if (originalCdp === undefined) delete process.env.BF_CDP_URL;
+    else process.env.BF_CDP_URL = originalCdp;
+    if (originalPort === undefined) delete process.env.RELAY_PORT;
+    else process.env.RELAY_PORT = originalPort;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('assertExtensionConnected throws a clear error when extension is disconnected', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ status: 'ok', extension: false }),
+    });
+    await assert.rejects(
+      () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' }),
+      /extension is not connected/i
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('assertExtensionConnected succeeds when extension is connected', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ status: 'ok', extension: true }),
+    });
+    await assert.doesNotReject(
+      () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' })
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
