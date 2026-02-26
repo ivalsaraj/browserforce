@@ -200,13 +200,42 @@ browserforce serve
 
 Most OpenClaw users chat with their agent from Telegram or WhatsApp. BrowserForce lets your agent browse the web as you — no login flows, no captchas — even from a messaging app.
 
-**Quick setup** (copy-paste into your terminal):
+#### OpenClaw One-Time Setup
 
 ```bash
-npm install -g browserforce && browserforce install-extension && npx -y skills add ivalsaraj/browserforce
+npm install -g browserforce
+browserforce install-extension
+browserforce setup openclaw
 ```
 
-Then start the relay (keep this running):
+Optional: install the BrowserForce skill for your OpenClaw agent:
+
+```bash
+npx -y skills add ivalsaraj/browserforce
+```
+
+#### Autostart Modes
+
+- `Default wrapper mode`: `setup openclaw` writes an OpenClaw MCP server entry that starts `browserforce serve` on-demand before `browserforce mcp`.
+- `Always-on daemon mode`: `setup openclaw` also installs OS autostart by default (launchd on macOS, systemd user service on Linux, scheduled task on Windows) so relay is already running after login.
+- `No daemon registration mode`: run `browserforce setup openclaw --no-autostart` to skip OS login service/daemon registration only; MCP wrapper autostart-on-demand still runs `browserforce serve` before `browserforce mcp`.
+
+Setup flags:
+- `--dry-run`: preview OpenClaw/autostart changes without writing files.
+- `--json`: print machine-readable setup output.
+- `--no-autostart`: skip OS login service/daemon registration only; wrapper autostart-on-demand stays enabled.
+
+Opt-in install automation environment variables:
+
+```bash
+BROWSERFORCE_SETUP_OPENCLAW=1
+BROWSERFORCE_SETUP_OPENCLAW_FORCE=1
+BROWSERFORCE_SETUP_OPENCLAW_APPLY=1
+```
+
+When enabled, package install runs `setup openclaw --dry-run --json`; adding `BROWSERFORCE_SETUP_OPENCLAW_APPLY=1` also runs `setup openclaw --json`. In CI, `BROWSERFORCE_SETUP_OPENCLAW_FORCE=1` is required for the setup hook to run.
+
+Then start the relay (only needed if you want to run it manually):
 
 ```bash
 browserforce serve
@@ -236,8 +265,8 @@ Add to `~/.openclaw/openclaw.json`:
             {
               "name": "browserforce",
               "transport": "stdio",
-              "command": "npx",
-              "args": ["-y", "browserforce@latest", "mcp"]
+              "command": "sh",
+              "args": ["-lc", "if ! lsof -tiTCP:19222 -sTCP:LISTEN >/dev/null 2>&1; then npx -y browserforce@latest serve >/dev/null 2>&1 & fi; exec npx -y browserforce@latest mcp"]
             }
           ]
         }
@@ -246,6 +275,8 @@ Add to `~/.openclaw/openclaw.json`:
   }
 }
 ```
+
+This wrapper-style entry auto-starts the relay on demand. Manual/non-wrapper alternative: use `npx -y browserforce@latest mcp` and keep `browserforce serve` running yourself.
 
 </details>
 
@@ -360,9 +391,12 @@ browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
 browserforce plugin list        # List installed plugins
 browserforce plugin install <n> # Install a plugin from the registry
 browserforce plugin remove <n>  # Remove an installed plugin
+browserforce setup openclaw [--dry-run] [--json] [--no-autostart] # Configure OpenClaw + optional autostart
 browserforce update             # Update to the latest version
 browserforce install-extension  # Copy extension to ~/.browserforce/extension/
 ```
+
+Setup flags: `--dry-run` (preview), `--no-autostart` (skip OS login daemon/service registration only), `--json` (machine-readable output).
 
 Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
 
