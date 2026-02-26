@@ -5,7 +5,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import http from 'node:http';
 import { createRequire } from 'node:module';
-import { mkdirSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -308,5 +308,96 @@ describe('CLI install-extension', () => {
     assert.ok(!result.includes('outdated'), `Unexpected warning: ${result}`);
 
     rmSync(freshDir, { recursive: true, force: true });
+  });
+});
+
+describe('CLI setup', () => {
+  it('help includes setup openclaw', async () => {
+    const { stdout } = await exec('node', ['bin.js', 'help']);
+    assert.ok(stdout.includes('setup openclaw'));
+  });
+
+  it('setup openclaw --json stays parse-safe when autostart commands print output', async () => {
+    if (process.platform === 'win32') return;
+
+    const homeDir = join(tmpdir(), `bf-openclaw-home-${Math.random().toString(36).slice(2)}`);
+    const binDir = join(tmpdir(), `bf-openclaw-bin-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+
+    const commandName = process.platform === 'darwin' ? 'launchctl' : 'systemctl';
+    const commandPath = join(binDir, commandName);
+    writeFileSync(commandPath, '#!/bin/sh\necho "mock stdout from autostart"\necho "mock stderr from autostart" 1>&2\nexit 0\n', 'utf8');
+    chmodSync(commandPath, 0o755);
+
+    const { stdout } = await exec('node', ['bin.js', 'setup', 'openclaw', '--json'], {
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        PATH: `${binDir}:${process.env.PATH || ''}`,
+      },
+    });
+
+    const result = JSON.parse(stdout);
+    assert.equal(result.target, 'openclaw');
+    assert.equal(result.dryRun, false);
+    assert.equal(typeof result.autostart.platform, 'string');
+
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  it('setup openclaw --dry-run --json outputs expected keys', async () => {
+    const homeDir = join(tmpdir(), `bf-openclaw-home-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(homeDir, { recursive: true });
+
+    const { stdout } = await exec('node', ['bin.js', 'setup', 'openclaw', '--dry-run', '--json'], {
+      env: { ...process.env, HOME: homeDir },
+    });
+
+    const result = JSON.parse(stdout);
+    assert.equal(typeof result.openclawConfigPath, 'string');
+    assert.equal(result.mcpAdapterConfigured, true);
+    assert.equal(typeof result.autostart.platform, 'string');
+    assert.equal(existsSync(join(homeDir, '.openclaw', 'openclaw.json')), false);
+
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('setup openclaw --dry-run --no-autostart --json skips autostart and returns base keys', async () => {
+    const homeDir = join(tmpdir(), `bf-openclaw-home-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(homeDir, { recursive: true });
+
+    const { stdout } = await exec('node', ['bin.js', 'setup', 'openclaw', '--dry-run', '--no-autostart', '--json'], {
+      env: { ...process.env, HOME: homeDir },
+    });
+
+    const result = JSON.parse(stdout);
+    assert.deepEqual(Object.keys(result).sort(), [
+      'autostart',
+      'configExisted',
+      'configWritten',
+      'dryRun',
+      'mcpAdapterConfigured',
+      'openclawConfigPath',
+      'target',
+    ].sort());
+    assert.equal(result.target, 'openclaw');
+    assert.equal(result.dryRun, true);
+    assert.equal(result.mcpAdapterConfigured, true);
+    assert.equal(result.autostart, null);
+    assert.equal(existsSync(join(homeDir, '.openclaw', 'openclaw.json')), false);
+
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('setup unknown target exits non-zero with error', async () => {
+    try {
+      await exec('node', ['bin.js', 'setup', 'nope']);
+      assert.fail('should have exited with error');
+    } catch (err) {
+      assert.ok(err.code !== 0);
+      assert.ok(err.stderr.includes('Unknown setup target'));
+    }
   });
 });
