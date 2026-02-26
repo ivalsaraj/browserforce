@@ -4,12 +4,14 @@
 const RELAY_URL_DEFAULT = 'ws://127.0.0.1:19222/extension';
 const RECONNECT_DELAY_MS = 3000;
 const CDP_VERSION = '1.3';
+const RELAY_HTTP_DEFAULT = 'http://127.0.0.1:19222';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let ws = null;
 let connectionState = 'disconnected'; // disconnected | connecting | connected
 let maintainLoopActive = false;
+let currentRelayUrl = RELAY_URL_DEFAULT;
 
 /** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object }>} */
 const attachedTabs = new Map();
@@ -35,6 +37,7 @@ let restrictionExplained = false;
 (async function init() {
   const stored = await chrome.storage.local.get(['relayUrl']);
   const relayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
+  currentRelayUrl = relayUrl;
 
   // Register debugger listeners once (persists across reconnections)
   chrome.debugger.onEvent.addListener(onDebuggerEvent);
@@ -610,6 +613,10 @@ async function checkInactiveTabs() {
 }
 
 chrome.storage.onChanged.addListener(async (changes) => {
+  if (changes.relayUrl) {
+    currentRelayUrl = changes.relayUrl.newValue || RELAY_URL_DEFAULT;
+  }
+
   if (changes.autoDetachMinutes || changes.autoCloseMinutes) {
     const settings = await chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes']);
     const anyEnabled = (settings.autoDetachMinutes || 0) > 0 || (settings.autoCloseMinutes || 0) > 0;
@@ -725,6 +732,29 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function relayWsToHttpBase(wsUrl) {
+  try {
+    const parsed = new URL(wsUrl || RELAY_URL_DEFAULT);
+    const protocol = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+    return `${protocol}//${parsed.host}`;
+  } catch {
+    return RELAY_HTTP_DEFAULT;
+  }
+}
+
+async function getMcpClientCount() {
+  if (connectionState !== 'connected') return 0;
+  const base = relayWsToHttpBase(currentRelayUrl);
+  try {
+    const response = await fetch(`${base}/client-slot`, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) return 0;
+    const data = await response.json();
+    return Number.isFinite(data?.clients) ? data.clients : 0;
+  } catch {
+    return 0;
+  }
+}
+
 // ─── Popup Message Handler ───────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -741,7 +771,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     // Compute seconds until next auto-action (detach or close)
     let nextAutoActionSecs = null;
-    chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) => {
+    chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes', 'mode'], async (settings) => {
       const detachMs = (settings.autoDetachMinutes || 0) * 60_000;
       const closeMs = (settings.autoCloseMinutes || 0) * 60_000;
       if ((detachMs || closeMs) && tabLastActivity.size > 0) {
@@ -757,7 +787,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           nextAutoActionSecs = Math.max(0, Math.ceil(earliest / 1000));
         }
       }
-      sendResponse({ connectionState, tabs, nextAutoActionSecs });
+      const mcpClientCount = await getMcpClientCount();
+      sendResponse({
+        connectionState,
+        tabs,
+        nextAutoActionSecs,
+        mode: settings.mode || 'auto',
+        mcpClientCount,
+      });
     });
     return true; // async sendResponse
   }
