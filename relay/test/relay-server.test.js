@@ -708,6 +708,7 @@ describe('WebSocket Security', () => {
         busy: false,
         activeClientId: null,
         connectedAt: null,
+        clients: 0,
       });
 
       activeClient = await connectWs(`ws://127.0.0.1:${singleRelay.port}/cdp?token=${singleRelay.authToken}`);
@@ -718,6 +719,7 @@ describe('WebSocket Security', () => {
       assert.equal(during.body.busy, true);
       assert.equal(typeof during.body.activeClientId, 'string');
       assert.equal(typeof during.body.connectedAt, 'number');
+      assert.equal(during.body.clients, 1);
 
       const activeClosed = new Promise((resolve) => activeClient.once('close', resolve));
       activeClient.close();
@@ -734,6 +736,7 @@ describe('WebSocket Security', () => {
         busy: false,
         activeClientId: null,
         connectedAt: null,
+        clients: 0,
       });
     } finally {
       if (activeClient && activeClient.readyState === WebSocket.OPEN) activeClient.close();

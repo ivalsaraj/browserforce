@@ -301,6 +301,7 @@ class RelayServer {
         busy,
         activeClientId: busy ? this.activeClient.id : null,
         connectedAt: busy ? this.activeClient.connectedAt : null,
+        clients: this.clients.size,
       }));
       return;
     }
