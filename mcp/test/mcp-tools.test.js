@@ -113,6 +113,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('page'), 'should mention page');
     assert.ok(promptBlock.includes('context'), 'should mention context');
     assert.ok(promptBlock.includes('state'), 'should mention state');
+    assert.ok(promptBlock.includes('browserforceRestrictions'), 'should mention browserforceRestrictions for extension policy');
     // Key behavioral guidance
     assert.ok(promptBlock.includes('state.page'), 'should mention state.page for page management');
     assert.ok(promptBlock.includes('snapshot'), 'should mention snapshot-first approach');
@@ -188,6 +189,29 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('retries'), 'should require retries telemetry');
   });
 
+  it('execute prompt guards against guessed URLs and unsafe single-page parallelism', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+
+    assert.ok(
+      promptBlock.includes('URL DISCOVERY (NO GUESSING)'),
+      'should include explicit no-guessing URL discovery guidance'
+    );
+    assert.ok(
+      promptBlock.includes('Do NOT guess deep links when the site already exposes navigation links'),
+      'should require deriving URLs from visible on-page links first'
+    );
+    assert.ok(
+      promptBlock.includes('Never run Promise.all actions against the same Page object'),
+      'should forbid parallel interactions against one page object'
+    );
+  });
+
   it('execute tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
@@ -261,6 +285,22 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('execute context includes browserforceRestrictions', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('browserforceRestrictions'),
+      'exec context should expose browserforceRestrictions in the sandbox scope'
+    );
+    assert.ok(
+      source.includes('lockUrl') && source.includes('noNewTabs') && source.includes('readOnly'),
+      'browserforceRestrictions should include lockUrl, noNewTabs, and readOnly flags'
+    );
+  });
+
   it('MCP preferences fetch is cached once per session', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
@@ -278,6 +318,23 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('MCP restrictions fetch is cached once per session', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('cachedBrowserforceRestrictions'), 'should track cached browserforce restrictions');
+    assert.ok(
+      source.includes('if (cachedBrowserforceRestrictions)'),
+      'should return cached restrictions without refetching'
+    );
+    assert.ok(
+      source.includes('/restrictions'),
+      'should fetch restrictions from relay /restrictions endpoint'
+    );
+  });
+
   it('reset clears cached preferences', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
@@ -290,6 +347,10 @@ describe('Tool Definitions', () => {
     assert.ok(
       resetBlock.includes('cachedAgentPreferences = null'),
       'reset should clear cached agent preferences'
+    );
+    assert.ok(
+      resetBlock.includes('cachedBrowserforceRestrictions = null'),
+      'reset should clear cached browserforce restrictions'
     );
   });
 });
