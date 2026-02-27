@@ -188,7 +188,15 @@ const DEFAULT_AGENT_PREFERENCES = Object.freeze({
   executionMode: 'parallel',
   parallelVisibilityMode: 'foreground-tab',
 });
+const DEFAULT_BROWSERFORCE_RESTRICTIONS = Object.freeze({
+  mode: 'auto',
+  lockUrl: false,
+  noNewTabs: false,
+  readOnly: false,
+  instructions: '',
+});
 let cachedAgentPreferences = null;
+let cachedBrowserforceRestrictions = null;
 
 function normalizeAgentPreferences(raw) {
   const executionMode = raw?.executionMode === 'sequential' ? 'sequential' : 'parallel';
@@ -215,6 +223,37 @@ async function getAgentPreferencesForSession() {
   } catch {
     cachedAgentPreferences = { ...DEFAULT_AGENT_PREFERENCES };
     return cachedAgentPreferences;
+  }
+}
+
+function normalizeRestrictions(raw) {
+  return {
+    mode: raw?.mode === 'manual' ? 'manual' : 'auto',
+    lockUrl: !!raw?.lockUrl,
+    noNewTabs: !!raw?.noNewTabs,
+    readOnly: !!raw?.readOnly,
+    instructions: typeof raw?.instructions === 'string' ? raw.instructions : '',
+  };
+}
+
+async function getBrowserforceRestrictionsForSession() {
+  if (cachedBrowserforceRestrictions) {
+    return cachedBrowserforceRestrictions;
+  }
+
+  try {
+    const response = await fetch(`${getRelayHttpUrl()}/restrictions`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const raw = await response.json();
+    cachedBrowserforceRestrictions = normalizeRestrictions(raw);
+    return cachedBrowserforceRestrictions;
+  } catch {
+    cachedBrowserforceRestrictions = { ...DEFAULT_BROWSERFORCE_RESTRICTIONS };
+    return cachedBrowserforceRestrictions;
   }
 }
 
@@ -249,6 +288,8 @@ Variables:
   state       Persistent object across calls (cleared on reset). Store your working page here.
   browserforceSettings Session defaults loaded once per MCP session (refresh on reset).
                       Keys: executionMode, parallelVisibilityMode.
+  browserforceRestrictions Session restrictions from extension/relay.
+                      Keys: mode, lockUrl, noNewTabs, readOnly, instructions.
 
 Helpers:
   snapshot({ selector?, search?, showDiffSinceLastCall? })   Accessibility tree as text. 10-100x cheaper than screenshots.
@@ -287,11 +328,36 @@ If state.page was closed:
     state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
   }
 
+═══ URL DISCOVERY (NO GUESSING) ═══
+
+Do NOT guess deep links when the site already exposes navigation links.
+When discovering a section/page:
+  1) Snapshot first and inspect visible refs.
+  2) Prefer clicking discovered links/buttons or reading hrefs from those elements.
+  3) Only construct a URL manually if there is no discoverable navigation path.
+  4) If a guessed URL fails (404/wrong content), back up and derive it from on-page links.
+
+Example href discovery:
+  const hrefs = await state.page.evaluate(() =>
+    Array.from(document.querySelectorAll('a')).map(a => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
+  );
+
+═══ SETTINGS & STRATEGY PRECHECK ═══
+
+Read browserforceSettings + browserforceRestrictions before planning execution.
+- executionMode=sequential: do one task at a time; do not run tab swarms.
+- executionMode=parallel: parallelize only independent read-only tasks.
+- parallelVisibilityMode=foreground-tab: new tabs are visible in the current window; avoid disruptive tab choreography.
+- mode=manual or noNewTabs=true: do not create tabs, only operate on user-attached tabs.
+- lockUrl=true: do not navigate away from current URL (reload is allowed).
+- readOnly=true: no click/type/submit actions; observe with snapshot/screenshot/evaluate only.
+- instructions: treat as mandatory policy text for this session.
+
 ═══ CORE LOOP — OBSERVE → ACT → OBSERVE ═══
 
 After every action, verify the result before proceeding.
 Each execute call should usually do one meaningful action and return verification.
-Exception: read-only bulk extraction can do multi-step execution when actions are independent.
+Multi-step is allowed for read-only bulk extraction when actions are independent.
 
 Recommended cycle:
   1) OBSERVE: console.log('URL:', state.page.url()); return await snapshot();
@@ -315,23 +381,38 @@ If snapshot shows [ref=e3]:
 Before interacting, dismiss blockers:
   await snapshot({ search: /cookie|consent|accept|reject|allow|age|verify|login|sign.in/i });
 
+Handle login popups by preferring controllable tabs over blocked popup windows.
+
 For multiline text, prefer fill() with \\n:
   await state.page.locator('role=textbox[name="Message"]').fill('Line 1\\nLine 2');
+
+═══ SNAPSHOT DIFF CONTROL ═══
+
+Use snapshot({ showDiffSinceLastCall: true }) to get concise diffs when repeatedly observing the same page.
+Use snapshot({ showDiffSinceLastCall: false }) when you need full output.
 
 ═══ SNAPSHOT VS SCREENSHOT ═══
 
 Prefer snapshot() for text/content/verification.
 Use screenshotWithAccessibilityLabels() only when visual layout or spatial relationships matter.
 
-Use cleanHTML/pageMarkdown for extraction:
-  - snapshot() for interactive structure and refs
-  - cleanHTML() for structured DOM extraction/parsing
-  - pageMarkdown() for article-like content
+snapshot vs cleanHTML vs pageMarkdown:
+  - snapshot(): interactive structure, refs, quick verification
+  - cleanHTML(): structured DOM extraction/parsing
+  - pageMarkdown(): article-like content extraction
 
-═══ PARALLEL TAB EXTRACTION ═══
+Authenticated fetch:
+  Use state.page.evaluate(() => fetch(...)) when authenticated browser session context matters.
+
+Downloads:
+  Prefer browser-driven download flows for large outputs instead of printing huge payloads.
+
+═══ BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING ═══
 
 Read browserforceSettings.executionMode before choosing strategy.
-For independent read-only extraction tasks, start with parallel tabs (cap concurrency, usually 3-8).
+For independent read-only extraction tasks, use Promise.all with a concurrency cap (usually 3-8, start at 5).
+Never run Promise.all actions against the same Page object.
+Parallel task rule: one tab/page per task, then aggregate results.
 On 429/challenges/timeouts: retry with lower concurrency, then sequential if needed.
 If visibility mode requires showing work (for example, rotating/foreground demos), bringing your own working tab to front is allowed.
 
@@ -350,6 +431,7 @@ Return telemetry for swarm runs:
 2) getLogs({ count: 30 })
 3) state.page.evaluate(...) for visibility/disabled/overlay checks
 
+Combine snapshot + logs to debug JS-heavy failures.
 For JS-heavy or authenticated sites, stay in browser automation.
 Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 
@@ -359,7 +441,7 @@ Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 ✗ Don't screenshot to read text; use snapshot
 ✗ Don't chain actions blindly without verification
 ✗ Don't use page.waitForTimeout() when a deterministic wait is available
-✗ Don't use stale refs after DOM/navigation updates
+✗ Don't use stale refs after DOM/navigation updates (stale locator refs cause false actions)
 ✗ Don't call page.context().newCDPSession(page); use getCDPSession({ page })
 ✗ Don't call browser.close() or context.close()
 ✗ Don't call page.bringToFront() by default; only use it when user asks or when visibility mode needs visible tab progression
@@ -376,7 +458,7 @@ If Chrome/extension unavailable: ask user to open Chrome, keep at least one norm
 
 ═══ API QUICK REFERENCE ═══
 
-snapshot(options?) -> text accessibility tree with interactive refs
+snapshot(options?) -> text accessibility tree with interactive refs; options.showDiffSinceLastCall toggles diff/full output
 waitForPageLoad(options?) -> { success, readyState, pendingRequests, waitTimeMs, timedOut }
 getLogs(options?) -> browser console log entries
 clearLogs() -> clears captured logs for current page
@@ -393,7 +475,10 @@ function registerExecuteTool(skillAppendix = '') {
     async ({ code, timeout = 30000 }) => {
       await ensureBrowser();
       ensureAllPagesCapture();
-      const agentPreferences = await getAgentPreferencesForSession();
+      const [agentPreferences, browserforceRestrictions] = await Promise.all([
+        getAgentPreferencesForSession(),
+        getBrowserforceRestrictionsForSession(),
+      ]);
       const ctx = getContext();
       const pages = ctx.pages();
       const page = pages[0] || null;
@@ -401,7 +486,7 @@ function registerExecuteTool(skillAppendix = '') {
       if (page) setupConsoleCapture(page);
       const execCtx = buildExecContext(page, ctx, userState, {
         consoleLogs, setupConsoleCapture,
-      }, pluginHelpers, agentPreferences);
+      }, pluginHelpers, agentPreferences, browserforceRestrictions);
       try {
         const result = await runCode(code, execCtx, timeout);
         const formatted = formatResult(result);
@@ -435,6 +520,7 @@ server.tool(
     browser = null;
     userState = {};
     cachedAgentPreferences = null;
+    cachedBrowserforceRestrictions = null;
     contextListenerAttached = false;
     consoleLogs.clear();
     try {

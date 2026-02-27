@@ -553,6 +553,7 @@ export function buildExecContext(
   consoleHelpers = {},
   pluginHelpers = {},
   agentPreferences = {},
+  runtimeRestrictions = {},
 ) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
@@ -660,6 +661,13 @@ export function buildExecContext(
     executionMode: agentPreferences?.executionMode === 'sequential' ? 'sequential' : 'parallel',
     parallelVisibilityMode: 'foreground-tab',
   };
+  const browserforceRestrictions = {
+    mode: runtimeRestrictions?.mode === 'manual' ? 'manual' : 'auto',
+    lockUrl: !!runtimeRestrictions?.lockUrl,
+    noNewTabs: !!runtimeRestrictions?.noNewTabs,
+    readOnly: !!runtimeRestrictions?.readOnly,
+    instructions: typeof runtimeRestrictions?.instructions === 'string' ? runtimeRestrictions.instructions : '',
+  };
 
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
   const wrappedPluginHelpers = {};
@@ -674,6 +682,7 @@ export function buildExecContext(
   return {
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     browserforceSettings,
+    browserforceRestrictions,
     page: defaultPage, context: ctx, state: userState,
     snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
