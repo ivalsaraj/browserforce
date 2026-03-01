@@ -353,6 +353,11 @@ Read browserforceSettings + browserforceRestrictions before planning execution.
 - readOnly=true: no click/type/submit actions; observe with snapshot/screenshot/evaluate only.
 - instructions: treat as mandatory policy text for this session.
 
+Empty tabs/targets handling:
+- If tabs/targets are empty, treat it as normal startup state and create/reuse a dedicated tab with context.newPage().
+- Do not ask the user to click Attach/Share by default.
+- Ask for manual Attach/Share only when mode=manual or noNewTabs=true, or when the user explicitly asks to use their current tab.
+
 ═══ CORE LOOP — OBSERVE → ACT → OBSERVE ═══
 
 After every action, verify the result before proceeding.

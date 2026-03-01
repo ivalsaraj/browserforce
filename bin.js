@@ -468,6 +468,7 @@ async function cmdSetup() {
   const homeDir = homedir();
   const openclawConfigPath = join(homeDir, '.openclaw', 'openclaw.json');
   const openclawDir = dirname(openclawConfigPath);
+  const pluginsDir = process.env.BF_PLUGINS_DIR || join(homeDir, '.browserforce', 'plugins');
 
   let existingConfig = {};
   let configExisted = false;
@@ -541,6 +542,23 @@ async function cmdSetup() {
     };
   }
 
+  // OpenClaw-specific guidance should only affect OpenClaw users.
+  // Install the openclaw plugin after setup (best effort).
+  let openclawPlugin = null;
+  if (!dryRun) {
+    try {
+      const { installPlugin } = await import('./mcp/src/plugin-installer.js');
+      await installPlugin('openclaw', pluginsDir);
+      openclawPlugin = { name: 'openclaw', installed: true };
+    } catch (err) {
+      openclawPlugin = {
+        name: 'openclaw',
+        installed: false,
+        error: err?.message || String(err),
+      };
+    }
+  }
+
   const result = {
     target: 'openclaw',
     dryRun,
@@ -549,6 +567,7 @@ async function cmdSetup() {
     configExisted,
     configWritten: !dryRun,
     autostart,
+    ...(openclawPlugin ? { openclawPlugin } : {}),
   };
 
   if (values.json) {
@@ -566,6 +585,13 @@ async function cmdSetup() {
   } else {
     console.log(`  autostart.platform: ${autostart.platform}`);
     console.log(`  autostart: ${dryRun ? 'dry-run (not applied)' : 'applied'}`);
+  }
+  if (openclawPlugin) {
+    if (openclawPlugin.installed) {
+      console.log('  openclawPlugin: installed');
+    } else {
+      console.log(`  openclawPlugin: install failed (${openclawPlugin.error})`);
+    }
   }
 }
 
