@@ -103,6 +103,8 @@ browserforce install-extension
 browserforce setup openclaw
 ```
 
+`setup openclaw` now auto-installs the official `openclaw` BrowserForce plugin into `~/.browserforce/plugins/openclaw/` so OpenClaw gets BrowserForce-specific usage policy without affecting other agents.
+
 Optional: install the BrowserForce skill for your OpenClaw agent:
 
 ```bash
@@ -141,6 +143,19 @@ browserforce serve
 > Go to [https://x.com](https://x.com) and give me top tweets
 
 If your agent browses to the page and responds with the title, you're all set.
+
+#### OpenClaw + BrowserForce Flow
+
+```mermaid
+flowchart LR
+  U["User (Telegram / WhatsApp / OpenClaw UI)"] --> OA["OpenClaw Agent"]
+  OA --> MCP["BrowserForce MCP (`browserforce mcp`)"]
+  MCP --> RELAY["Relay (`127.0.0.1:19222`)"]
+  RELAY --> EXT["Chrome Extension (MV3)"]
+  EXT --> CHROME["User's Real Chrome Session"]
+  SETUP["`browserforce setup openclaw`"] --> PLUGIN["Auto-install `openclaw` plugin\n(SKILL appended to execute prompt)"]
+  PLUGIN --> MCP
+```
 
 **MCP setup (advanced):**
 
@@ -382,6 +397,7 @@ That's it. Restart MCP (or Claude Desktop) and `highlight()` is available in eve
 | Plugin      | What it adds                                                                                   | Install                                 |
 | ----------- | ---------------------------------------------------------------------------------------------- | --------------------------------------- |
 | `highlight` | `highlight(selector, color?)` — outlines matching elements; `clearHighlights()` — removes them | `browserforce plugin install highlight` |
+| `openclaw`  | OpenClaw-specific BrowserForce tab policy (skill text only, no helper functions)              | Auto-installed by `browserforce setup openclaw` |
 
 
 ### Use an installed plugin
@@ -718,23 +734,15 @@ Get started with simple prompts. The AI generates code and does the work.
 
 ## How It Works
 
-```
-  Agent (OpenClaw, Claude, etc.)
-         │
-         ├─ MCP server (stdio)
-         ├─ CLI (browserforce -e)
-         │
-         │ CDP over WebSocket
-         ▼
-  Relay Server (localhost:19222)
-         │
-         │ WebSocket
-         ▼
-  Chrome Extension (MV3)
-         │
-         │ chrome.debugger API
-         ▼
-  Your Real Chrome Browser
+```mermaid
+flowchart TD
+  AGENT["Agent (OpenClaw, Claude, Codex, etc.)"] --> MCP["MCP Server (`browserforce mcp`)"]
+  AGENT --> CLI["CLI (`browserforce -e`)"]
+  MCP --> RELAY["Relay Server (`127.0.0.1:19222`)"]
+  CLI --> RELAY
+  RELAY --> EXT["Chrome Extension (MV3 Service Worker)"]
+  EXT --> CDP["`chrome.debugger` bridge"]
+  CDP --> BROWSER["User's Real Chrome Browser"]
 ```
 
 The **relay server** runs on your machine (localhost only). It translates between the agent's CDP commands and the extension's debugger bridge.

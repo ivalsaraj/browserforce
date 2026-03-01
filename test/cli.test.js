@@ -391,6 +391,71 @@ describe('CLI setup', () => {
     rmSync(homeDir, { recursive: true, force: true });
   });
 
+  it('setup openclaw --json installs openclaw plugin for OpenClaw users', async () => {
+    const homeDir = join(tmpdir(), `bf-openclaw-home-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(homeDir, { recursive: true });
+
+    const fakeRegistry = {
+      plugins: [{
+        name: 'openclaw',
+        url: 'https://example.com/plugins/openclaw/index.js',
+        skill_url: 'https://example.com/plugins/openclaw/SKILL.md',
+        sha256: null,
+      }],
+    };
+
+    const { stdout } = await exec('node', ['bin.js', 'setup', 'openclaw', '--json', '--no-autostart'], {
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        BF_TEST_REGISTRY: JSON.stringify(fakeRegistry),
+        BF_TEST_PLUGIN_JS: 'export default { name: "openclaw", helpers: {} };',
+        BF_TEST_PLUGIN_SKILL: '# OpenClaw BrowserForce policy',
+      },
+    });
+
+    const result = JSON.parse(stdout);
+    assert.equal(result.target, 'openclaw');
+    assert.equal(result.dryRun, false);
+    assert.deepEqual(result.openclawPlugin, { name: 'openclaw', installed: true });
+    assert.equal(existsSync(join(homeDir, '.browserforce', 'plugins', 'openclaw', 'index.js')), true);
+    assert.equal(existsSync(join(homeDir, '.browserforce', 'plugins', 'openclaw', 'SKILL.md')), true);
+
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('setup openclaw --dry-run does not install openclaw plugin', async () => {
+    const homeDir = join(tmpdir(), `bf-openclaw-home-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(homeDir, { recursive: true });
+
+    const fakeRegistry = {
+      plugins: [{
+        name: 'openclaw',
+        url: 'https://example.com/plugins/openclaw/index.js',
+        skill_url: 'https://example.com/plugins/openclaw/SKILL.md',
+        sha256: null,
+      }],
+    };
+
+    const { stdout } = await exec('node', ['bin.js', 'setup', 'openclaw', '--dry-run', '--json', '--no-autostart'], {
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        BF_TEST_REGISTRY: JSON.stringify(fakeRegistry),
+        BF_TEST_PLUGIN_JS: 'export default { name: "openclaw", helpers: {} };',
+        BF_TEST_PLUGIN_SKILL: '# OpenClaw BrowserForce policy',
+      },
+    });
+
+    const result = JSON.parse(stdout);
+    assert.equal(result.target, 'openclaw');
+    assert.equal(result.dryRun, true);
+    assert.equal(result.openclawPlugin, undefined);
+    assert.equal(existsSync(join(homeDir, '.browserforce', 'plugins', 'openclaw', 'index.js')), false);
+
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
   it('setup unknown target exits non-zero with error', async () => {
     try {
       await exec('node', ['bin.js', 'setup', 'nope']);
