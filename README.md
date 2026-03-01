@@ -105,10 +105,16 @@ browserforce setup openclaw
 
 `setup openclaw` now auto-installs the official `openclaw` BrowserForce plugin into `~/.browserforce/plugins/openclaw/` so OpenClaw gets BrowserForce-specific usage policy without affecting other agents.
 
-Optional: install the BrowserForce skill for your OpenClaw agent:
+Optional: install the BrowserForce skill for your OpenClaw agent (scoped to OpenClaw only):
 
 ```bash
-npx -y skills add ivalsaraj/browserforce
+npx -y skills add ivalsaraj/browserforce --agent openclaw --skill browserforce --yes
+```
+
+Preview only (no install):
+
+```bash
+npx -y skills add ivalsaraj/browserforce --list
 ```
 
 #### Autostart Modes
@@ -276,18 +282,24 @@ Add the same `mcpServers` entry:
 
 </details>
 
-Need deterministic single-owner handoff for sensitive workflows?
-Set `BF_CLIENT_MODE=single-active` in the MCP server command.
-
-Why use `single-active`:
-- Prevents two MCP clients from driving the browser at the same time.
-- Makes contention explicit (`409` + `/client-slot`), which is easier to debug.
-- Better for write-heavy flows where accidental concurrent actions are risky.
-
 <details>
-<summary><b>Set BF_CLIENT_MODE=single-active (all MCP clients)</b></summary>
+<summary><b>Client Mode: multi-client (default) vs single-active</b></summary>
 
-These examples use the POSIX `env` wrapper. If your MCP client supports an `env` object/map, set `BF_CLIENT_MODE=single-active` there instead.
+BrowserForce has two relay client arbitration modes:
+
+- `multi-client` (default): allows multiple MCP/CDP clients at the same time.
+Use this for normal browsing, read-heavy research, and parallel workflows across tools.
+- `single-active`: allows only one active MCP/CDP client slot at a time.
+Use this for sensitive or write-heavy workflows where you need deterministic single-owner control.
+
+When `single-active` is enabled, additional clients get `409 Conflict` while the slot is busy, and can wait/retry using `/client-slot`.
+
+Set mode in the MCP server command:
+
+- Explicit default mode: `env BF_CLIENT_MODE=multi-client npx -y browserforce@latest mcp`
+- Single-owner mode: `env BF_CLIENT_MODE=single-active npx -y browserforce@latest mcp`
+
+Examples below use the POSIX `env` wrapper. If your MCP client supports an `env` map, set `BF_CLIENT_MODE` there instead.
 
 **OpenClaw (MCP adapter):**
 
@@ -397,6 +409,7 @@ That's it. Restart MCP (or Claude Desktop) and `highlight()` is available in eve
 | Plugin      | What it adds                                                                                   | Install                                 |
 | ----------- | ---------------------------------------------------------------------------------------------- | --------------------------------------- |
 | `highlight` | `highlight(selector, color?)` — outlines matching elements; `clearHighlights()` — removes them | `browserforce plugin install highlight` |
+| `google-sheets` | `gsReadContiguousRows()`; `gsFormatBulletsInRange()`; `gsSplitBulletsInRange()`; `gsRebalanceBoldInRange()`; `gsLogIssue()` | `browserforce plugin install google-sheets` |
 | `openclaw`  | OpenClaw-specific BrowserForce tab policy (skill text only, no helper functions)              | Auto-installed by `browserforce setup openclaw` |
 
 
