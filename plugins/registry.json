@@ -10,6 +10,14 @@
       "sha256": "d302bd9a0f6e96bd0c7a8666b560e01ab88f9f9e4c4694f14d97019f4cc04424"
     },
     {
+      "name": "google-sheets",
+      "description": "Google Sheets helpers for reliable row scanning, cell reads, and issue logging",
+      "version": "1.0.0",
+      "url": "https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/official/google-sheets/index.js",
+      "skill_url": "https://raw.githubusercontent.com/ivalsaraj/browserforce/main/plugins/official/google-sheets/SKILL.md",
+      "sha256": "93853d5991b576e2989ae4f0dc011f9adf4d7c4dadcf44870f66f52e4a38d3c5"
+    },
+    {
       "name": "openclaw",
       "description": "OpenClaw-specific BrowserForce usage policy",
       "version": "1.0.0",
