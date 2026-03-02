@@ -86,6 +86,23 @@ test('stop removes chatd-url metadata file when enabled', async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('daemon honors BF_CHATD_URL_PATH when no explicit path option is provided', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'bf-chatd-env-url-'));
+  const envUrlPath = join(tempDir, 'chatd-env-url.json');
+  const previous = process.env.BF_CHATD_URL_PATH;
+  process.env.BF_CHATD_URL_PATH = envUrlPath;
+
+  const daemon = await startChatd({ port: 0, writeChatdUrl: true });
+  try {
+    assert.equal(existsSync(envUrlPath), true);
+  } finally {
+    await daemon.stop();
+    if (previous == null) delete process.env.BF_CHATD_URL_PATH;
+    else process.env.BF_CHATD_URL_PATH = previous;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('POST /v1/runs uses injected run executor and persists assistant output', async () => {
   const seenRuns = [];
   const daemon = await startChatd({
