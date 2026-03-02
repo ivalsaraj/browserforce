@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +12,7 @@ import {
   appendMessage,
   createSession,
   getSession,
+  isValidModelId,
   isValidSessionId,
   listSessions,
   readMessages,
@@ -20,6 +21,65 @@ import {
 
 const BF_DIR = join(homedir(), '.browserforce');
 const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
+const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
+
+function parseTopLevelTomlString(raw, key) {
+  const lines = String(raw || '').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('[')) break;
+
+    const doubleQuoted = line.match(new RegExp(`^${key}\\s*=\\s*\"([^\"]+)\"(?:\\s*#.*)?$`));
+    if (doubleQuoted) return doubleQuoted[1].trim();
+
+    const singleQuoted = line.match(new RegExp(`^${key}\\s*=\\s*'([^']+)'(?:\\s*#.*)?$`));
+    if (singleQuoted) return singleQuoted[1].trim();
+  }
+  return null;
+}
+
+async function resolveConfiguredModel() {
+  const envModel = String(process.env.BF_CHATD_DEFAULT_MODEL || '').trim();
+  if (envModel && isValidModelId(envModel)) return envModel;
+
+  try {
+    const raw = await fs.readFile(CODEX_CONFIG_PATH, 'utf8');
+    const model = parseTopLevelTomlString(raw, 'model');
+    if (model && isValidModelId(model)) return model;
+  } catch {
+    // no local codex config is fine
+  }
+  return null;
+}
+
+function dedupeModelRows(rows) {
+  const seen = new Set();
+  const out = [{ value: null, label: 'Default' }];
+  for (const row of rows) {
+    if (!row || typeof row.value !== 'string') continue;
+    const value = row.value.trim();
+    if (!value || seen.has(value) || !isValidModelId(value)) continue;
+    seen.add(value);
+    out.push({ value, label: row.label || value });
+  }
+  return out;
+}
+
+async function listModelPresets({ storageRoot } = {}) {
+  const configuredModel = await resolveConfiguredModel();
+  const sessions = await listSessions({ limit: 200, storageRoot });
+  const sessionRows = sessions
+    .map((session) => String(session?.model || '').trim())
+    .filter(Boolean)
+    .map((value) => ({ value, label: value }));
+
+  const configuredRow = configuredModel
+    ? [{ value: configuredModel, label: `${configuredModel} (Configured)` }]
+    : [];
+
+  return dedupeModelRows([...configuredRow, ...sessionRows]);
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -88,7 +148,10 @@ function createDefaultRunExecutor({ codexCwd } = {}) {
 
 export async function startChatd(opts = {}) {
   const writeChatdUrl = opts.writeChatdUrl !== false;
-  const storageRoot = opts.storageRoot;
+  const ephemeralStorageRoot = (!opts.storageRoot && !writeChatdUrl)
+    ? await fs.mkdtemp(join(tmpdir(), 'bf-chatd-'))
+    : null;
+  const storageRoot = opts.storageRoot || ephemeralStorageRoot;
   const token = opts.token || process.env.BF_CHATD_TOKEN || randomBytes(32).toString('base64url');
   const chatdUrlPath = opts.chatdUrlPath || process.env.BF_CHATD_URL_PATH || CHATD_URL_PATH;
   const runExecutor = opts.runExecutor || createDefaultRunExecutor({ codexCwd: opts.codexCwd || process.cwd() });
@@ -171,6 +234,12 @@ export async function startChatd(opts = {}) {
       if (url.pathname === '/v1/sessions' && req.method === 'GET') {
         const sessions = await listSessions({ storageRoot });
         json(res, 200, { sessions });
+        return;
+      }
+
+      if (url.pathname === '/v1/models' && req.method === 'GET') {
+        const models = await listModelPresets({ storageRoot });
+        json(res, 200, { models });
         return;
       }
 
@@ -455,6 +524,9 @@ export async function startChatd(opts = {}) {
 
     await new Promise((resolve) => server.close(resolve));
     await clearChatdUrlFile({ writeChatdUrl, urlPath: chatdUrlPath });
+    if (ephemeralStorageRoot) {
+      await fs.rm(ephemeralStorageRoot, { recursive: true, force: true });
+    }
   };
 
   return {
