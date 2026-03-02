@@ -65,10 +65,14 @@ async function readIndex(storageRoot) {
 
 async function writeIndex(storageRoot, sessions) {
   const path = indexPath(storageRoot);
-  const tmpPath = `${path}.tmp`;
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await fs.mkdir(dirname(path), { recursive: true });
-  await fs.writeFile(tmpPath, `${JSON.stringify({ sessions }, null, 2)}\n`, 'utf8');
-  await fs.rename(tmpPath, path);
+  try {
+    await fs.writeFile(tmpPath, `${JSON.stringify({ sessions }, null, 2)}\n`, 'utf8');
+    await fs.rename(tmpPath, path);
+  } finally {
+    try { await fs.unlink(tmpPath); } catch {}
+  }
 }
 
 async function withIndexWriteLock(storageRoot, operation) {
