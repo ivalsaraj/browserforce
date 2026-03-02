@@ -6,17 +6,10 @@ import {
   shouldApplySessionSelection,
 } from './agent-panel-runtime.js';
 
-const MODEL_PRESETS = [
-  { value: null, label: 'Default' },
-  { value: 'gpt-5', label: 'GPT-5' },
-  { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
-  { value: 'o3', label: 'o3' },
-  { value: 'o4-mini', label: 'o4-mini' },
-];
-
 const state = {
   value: initialState,
   auth: null,
+  modelPresets: [{ value: null, label: 'Default' }],
   currentRunBySession: {},
   eventController: null,
   eventLoopToken: 0,
@@ -91,7 +84,7 @@ function renderModelList() {
   const activeSession = getActiveSession();
   const activeModel = activeSession?.model || null;
 
-  const rows = MODEL_PRESETS.map((preset) => {
+  const rows = state.modelPresets.map((preset) => {
     const active = (preset.value || null) === activeModel ? 'active' : '';
     return `<li><button type="button" data-model="${escapeHtml(preset.value || '')}" class="${active}">${escapeHtml(preset.label)}</button></li>`;
   });
@@ -131,11 +124,18 @@ function renderSessions() {
     return;
   }
 
+  const titleCounts = new Map();
+  for (const session of sessions) {
+    const title = (session.title || '').trim() || session.sessionId;
+    titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
+  }
+
   switchSessionListEl.innerHTML = sessions
     .map((session) => {
       const active = session.sessionId === state.value.activeSessionId ? 'active' : '';
       const title = session.title || session.sessionId;
-      return `<li><button type="button" data-session-id="${session.sessionId}" class="${active}">${escapeHtml(title)}</button></li>`;
+      const suffix = (titleCounts.get(title) || 0) > 1 ? ` · ${session.sessionId.slice(0, 8)}` : '';
+      return `<li><button type="button" data-session-id="${session.sessionId}" class="${active}">${escapeHtml(`${title}${suffix}`)}</button></li>`;
     })
     .join('');
 
@@ -211,7 +211,10 @@ async function getRelayHttpUrl() {
 
 async function loadAuth() {
   const relayHttpUrl = await getRelayHttpUrl();
-  const res = await fetch(`${relayHttpUrl}/chatd-url`);
+  const extensionId = chrome?.runtime?.id;
+  const res = await fetch(`${relayHttpUrl}/chatd-url`, {
+    headers: extensionId ? { 'x-browserforce-extension-id': extensionId } : {},
+  });
   if (!res.ok) throw new Error('daemon_unavailable');
   const body = await res.json();
   state.auth = {
@@ -256,6 +259,31 @@ async function loadSessions(preferredSessionId = null) {
     sessions,
     activeSessionId: activeFromPreference || sessions[0]?.sessionId || null,
   });
+}
+
+function normalizeModelRows(input) {
+  const source = Array.isArray(input) ? input : [];
+  const seen = new Set(['__default__']);
+  const rows = [{ value: null, label: 'Default' }];
+  for (const row of source) {
+    if (!row || typeof row !== 'object') continue;
+    const value = row.value == null ? null : String(row.value).trim();
+    const key = value || '__default__';
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      value,
+      label: row.label && String(row.label).trim() ? String(row.label).trim() : (value || 'Default'),
+    });
+  }
+  return rows;
+}
+
+async function loadModelPresets() {
+  const res = await api('/v1/models', { method: 'GET', headers: {} });
+  await ensureOk(res, 'Failed to load models');
+  const body = await readJsonOrEmpty(res);
+  state.modelPresets = normalizeModelRows(body.models);
 }
 
 async function loadMessages(sessionId) {
@@ -308,6 +336,7 @@ async function updateActiveSessionModel(model) {
     throw new Error(body.error || 'Unable to update model');
   }
 
+  await loadModelPresets().catch(() => {});
   await loadSessions(sessionId);
   setPopover('none');
   setStatus('ready', 'Ready');
@@ -447,6 +476,11 @@ popoverBackdropEl.addEventListener('click', () => {
   try {
     setStatus('info', 'Connecting...');
     await loadAuth();
+    try {
+      await loadModelPresets();
+    } catch {
+      state.modelPresets = [{ value: null, label: 'Default' }];
+    }
     await loadSessions();
     if (!state.value.activeSessionId) {
       await createSession();

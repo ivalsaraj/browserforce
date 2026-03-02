@@ -30,6 +30,25 @@ test('GET /health returns daemon metadata', async () => {
   }
 });
 
+test('GET /v1/models returns default and configured model', async () => {
+  const previous = process.env.BF_CHATD_DEFAULT_MODEL;
+  process.env.BF_CHATD_DEFAULT_MODEL = 'gpt-5.3-codex';
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/models`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.models[0], { value: null, label: 'Default' });
+    assert.equal(body.models.some((row) => row.value === 'gpt-5.3-codex'), true);
+  } finally {
+    await daemon.stop();
+    if (previous == null) delete process.env.BF_CHATD_DEFAULT_MODEL;
+    else process.env.BF_CHATD_DEFAULT_MODEL = previous;
+  }
+});
+
 test('POST /v1/runs requires explicit sessionId', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
