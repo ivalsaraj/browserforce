@@ -90,7 +90,7 @@ export async function startChatd(opts = {}) {
   const writeChatdUrl = opts.writeChatdUrl !== false;
   const storageRoot = opts.storageRoot;
   const token = opts.token || process.env.BF_CHATD_TOKEN || randomBytes(32).toString('base64url');
-  const chatdUrlPath = opts.chatdUrlPath || CHATD_URL_PATH;
+  const chatdUrlPath = opts.chatdUrlPath || process.env.BF_CHATD_URL_PATH || CHATD_URL_PATH;
   const runExecutor = opts.runExecutor || createDefaultRunExecutor({ codexCwd: opts.codexCwd || process.cwd() });
 
   let desiredPort = Number.isFinite(opts.port) ? Number(opts.port) : Number(process.env.BF_CHATD_PORT || 0);
