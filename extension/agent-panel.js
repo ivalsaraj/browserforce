@@ -46,6 +46,7 @@ const modelListEl = document.getElementById('bf-model-list');
 const switchSessionListEl = document.getElementById('bf-switch-session-list');
 const transcriptEl = document.getElementById('bf-transcript');
 const chatFormEl = document.getElementById('bf-chat-form');
+const composerBoxEl = chatFormEl.querySelector('.composer-box');
 const chatInputEl = document.getElementById('bf-chat-input');
 const stopRunBtn = document.getElementById('bf-stop-run');
 const sendBtn = chatFormEl.querySelector('button[type="submit"]');
@@ -81,6 +82,12 @@ function autoResizeInput() {
   chatInputEl.style.height = `${Math.min(chatInputEl.scrollHeight, 160)}px`;
 }
 
+function syncComposerLayoutState() {
+  const lineHeight = Number.parseFloat(window.getComputedStyle(chatInputEl).lineHeight) || 21;
+  const isMultiline = chatInputEl.scrollHeight > (lineHeight * 1.6);
+  composerBoxEl.classList.toggle('is-multiline', isMultiline);
+}
+
 function syncComposerState() {
   const enabled = !chatInputEl.disabled;
   const hasText = chatInputEl.value.trim().length > 0;
@@ -88,7 +95,9 @@ function syncComposerState() {
 
   stopRunBtn.disabled = !enabled || !runInProgress;
   stopRunBtn.classList.toggle('active', enabled && runInProgress);
+  stopRunBtn.hidden = !runInProgress;
   sendBtn.disabled = !enabled || runInProgress || !hasText;
+  sendBtn.hidden = runInProgress;
 }
 
 function syncStatusIndicator() {
@@ -133,6 +142,7 @@ function setStatus(kind, text) {
 function setComposerEnabled(enabled) {
   chatInputEl.disabled = !enabled;
   autoResizeInput();
+  syncComposerLayoutState();
   syncComposerState();
 }
 
@@ -1062,9 +1072,12 @@ chatFormEl.addEventListener('submit', async (event) => {
     await sendMessage(text);
     chatInputEl.value = '';
     autoResizeInput();
+    syncComposerLayoutState();
     syncComposerState();
   } catch (error) {
     chatInputEl.value = text;
+    autoResizeInput();
+    syncComposerLayoutState();
     syncComposerState();
     setStatus('error', error?.message || 'Failed to send message');
   }
@@ -1096,6 +1109,7 @@ if (attachCurrentTabBtn) {
 
 chatInputEl.addEventListener('input', () => {
   autoResizeInput();
+  syncComposerLayoutState();
   syncComposerState();
 });
 
