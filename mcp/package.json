@@ -1,6 +1,6 @@
 {
   "name": "browserforce-mcp",
-  "version": "1.0.0",
+  "version": "1.0.18",
   "private": true,
   "type": "module",
   "description": "MCP server exposing Chrome browser control via BrowserForce",
