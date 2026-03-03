@@ -255,3 +255,52 @@ test('runExecutor synchronous failure does not leak abortable run', async () => 
     rmSync(storageRoot, { recursive: true, force: true });
   }
 });
+
+test('POST /v1/runs includes active tab context in runExecutor prompt', async () => {
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, message, onExit }) => {
+      seenRuns.push({ runId, sessionId, message });
+      setTimeout(() => onExit({ code: 0 }), 5);
+      return { abort() {} };
+    },
+  });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'context' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        message: 'summarize this page',
+        browserContext: {
+          tabId: 42,
+          title: 'Pricing',
+          url: 'https://example.com/pricing',
+        },
+      }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const prompt = seenRuns.at(-1)?.message || '';
+    assert.match(prompt, /Active tab title: Pricing/);
+    assert.match(prompt, /Active tab URL: https:\/\/example\.com\/pricing/);
+    assert.match(prompt, /If the request is ambiguous/i);
+    assert.match(prompt, /User request:\s*summarize this page/i);
+  } finally {
+    await daemon.stop();
+  }
+});
