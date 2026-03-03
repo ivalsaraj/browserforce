@@ -593,39 +593,39 @@ body {
 
 .composer-wrap {
   flex-shrink: 0;
-  background: #f3f5f8;
-  border-top: 1px solid #d8dee6;
-  padding: 8px 12px;
+  background: var(--pampas);
+  border-top: 1px solid var(--line);
+  padding: 6px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
 }
 
 .composer-box {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  border: 1px solid #8ea8c2;
-  border-radius: 28px;
-  background: linear-gradient(90deg, #6e93b7 0%, #759ec1 100%);
-  padding: 6px 10px;
-  min-height: 46px;
-  box-shadow: 0 2px 8px rgba(25, 46, 68, 0.16);
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--linen);
+  padding: 4px 8px;
+  min-height: 38px;
+  box-shadow: none;
   transition: border-color 0.16s, box-shadow 0.16s, min-height 0.16s, padding 0.16s;
 }
 
 .composer-box:focus-within {
-  border-color: #6f8eac;
-  box-shadow: 0 0 0 2px rgba(111, 142, 172, 0.28);
+  border-color: var(--crail);
+  box-shadow: 0 0 0 2px rgba(193, 95, 60, 0.15);
 }
 
 .composer-box.is-multiline {
   align-items: stretch;
   grid-template-rows: minmax(0, 1fr) auto;
-  min-height: 68px;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  min-height: 54px;
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 
 .composer-box.is-multiline .composer-textarea {
@@ -646,18 +646,18 @@ body {
   background: transparent;
   border: 0;
   outline: none;
-  font-size: 15px;
+  font-size: 14px;
   font-family: inherit;
-  color: #f1f7ff;
-  line-height: 1.38;
-  min-height: 20px;
-  max-height: 84px;
+  color: var(--text);
+  line-height: 1.35;
+  min-height: 18px;
+  max-height: 56px;
   overflow-y: auto;
   padding: 0;
 }
 
 .composer-textarea::placeholder {
-  color: rgba(228, 240, 252, 0.74);
+  color: var(--text-subtle);
 }
 
 .composer-textarea::-webkit-scrollbar {
@@ -665,7 +665,7 @@ body {
 }
 
 .composer-textarea::-webkit-scrollbar-thumb {
-  background: rgba(241, 247, 255, 0.4);
+  background: var(--line);
   border-radius: 999px;
 }
 
@@ -679,7 +679,7 @@ body {
 .context-usage-note {
   font-size: 10px;
   line-height: 1.35;
-  color: #6f7f92;
+  color: var(--text-subtle);
   padding: 0 4px;
   white-space: nowrap;
   overflow: hidden;
@@ -688,8 +688,8 @@ body {
 
 .btn-stop,
 .btn-send {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   border-radius: 999px;
   border: 0;
   display: flex;
@@ -699,9 +699,9 @@ body {
 }
 
 .btn-stop {
-  background: rgba(255, 90, 90, 0.18);
+  background: rgba(178, 83, 52, 0.14);
   cursor: pointer;
-  color: #FF5A5A;
+  color: var(--error);
   opacity: 1;
 }
 
@@ -710,7 +710,7 @@ body {
 }
 
 .btn-stop.active:hover {
-  background: rgba(255, 90, 90, 0.28);
+  background: rgba(178, 83, 52, 0.2);
 }
 
 .btn-stop:disabled {
@@ -719,38 +719,38 @@ body {
 }
 
 .btn-stop svg {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
 }
 
 .btn-send {
-  background: #2B78F6;
+  background: var(--crail);
   color: #fff;
   cursor: pointer;
-  box-shadow: 0 3px 8px rgba(43, 120, 246, 0.35);
+  box-shadow: none;
 }
 
 .btn-send:hover:not(:disabled) {
-  background: #2269D9;
+  background: var(--crail-dark);
   transform: translateY(-1px);
 }
 
 .btn-send:active:not(:disabled) {
-  background: #1A5CC7;
+  background: var(--crail-press);
   transform: translateY(0);
 }
 
 .btn-send:disabled {
-  background: rgba(214, 226, 239, 0.82);
-  color: #8da2b9;
+  background: #d9d4cb;
+  color: #9d9487;
   opacity: 1;
   cursor: not-allowed;
   box-shadow: none;
 }
 
 .btn-send svg {
-  width: 15px;
-  height: 15px;
+  width: 12px;
+  height: 12px;
 }
 
 .popover-backdrop {
