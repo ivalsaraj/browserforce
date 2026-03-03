@@ -371,3 +371,306 @@ test('POST /v1/runs includes active tab context in runExecutor prompt', async ()
     await daemon.stop();
   }
 });
+
+test('POST /v1/runs reuses codex provider session id on second turn', async () => {
+  const observed = [];
+  const providerSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';
+
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, resumeSessionId, onEvent, onExit }) => {
+      observed.push({ runId, sessionId, resumeSessionId: resumeSessionId || null });
+      setTimeout(() => {
+        onEvent({
+          event: 'run.provider_session',
+          runId,
+          sessionId,
+          payload: { provider: 'codex', sessionId: providerSessionId },
+        });
+      }, 5);
+      setTimeout(() => {
+        onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'ok' } });
+      }, 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Continuity' }),
+    }).then((res) => res.json());
+
+    const runOneRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'first' }),
+    });
+    assert.equal(runOneRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const runTwoRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'second' }),
+    });
+    assert.equal(runTwoRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(observed.length >= 2, true);
+    assert.equal(observed[0].resumeSessionId, null);
+    assert.equal(observed[1].resumeSessionId, providerSessionId);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('stale resume failures retry once as fresh run when failure signature matches', async () => {
+  const observed = [];
+  const staleProviderSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';
+  const recoveredProviderSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d999';
+
+  let callCount = 0;
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, resumeSessionId, onEvent, onExit }) => {
+      callCount += 1;
+      observed.push({ callCount, runId, sessionId, resumeSessionId: resumeSessionId || null });
+
+      if (callCount === 1) {
+        setTimeout(() => {
+          onEvent({
+            event: 'run.provider_session',
+            runId,
+            sessionId,
+            payload: { provider: 'codex', sessionId: staleProviderSessionId },
+          });
+        }, 5);
+        setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'seeded' } }), 10);
+        setTimeout(() => onExit({ code: 0 }), 15);
+        return { abort() {} };
+      }
+
+      if (callCount === 2) {
+        setTimeout(() => onEvent({ event: 'run.error', runId, sessionId, payload: { error: 'Resume session not found' } }), 5);
+        setTimeout(() => onExit({ code: 1, stderr: 'session not found' }), 10);
+        return { abort() {} };
+      }
+
+      setTimeout(() => {
+        onEvent({
+          event: 'run.provider_session',
+          runId,
+          sessionId,
+          payload: { provider: 'codex', sessionId: recoveredProviderSessionId },
+        });
+      }, 5);
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'recovered' } }), 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Retry' }),
+    }).then((res) => res.json());
+
+    const seedRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'seed' }),
+    });
+    assert.equal(seedRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+
+    const retryRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'retry' }),
+    });
+    assert.equal(retryRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(observed.length, 3);
+    assert.equal(observed[1].resumeSessionId, staleProviderSessionId);
+    assert.equal(observed[2].resumeSessionId, null);
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.providerState?.codex?.sessionId, recoveredProviderSessionId);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('non-resume failures do not clear codex provider session mapping', async () => {
+  const observed = [];
+  const providerSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';
+  let callCount = 0;
+
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, resumeSessionId, onEvent, onExit }) => {
+      callCount += 1;
+      observed.push({ callCount, runId, sessionId, resumeSessionId: resumeSessionId || null });
+
+      if (callCount === 1) {
+        setTimeout(() => {
+          onEvent({
+            event: 'run.provider_session',
+            runId,
+            sessionId,
+            payload: { provider: 'codex', sessionId: providerSessionId },
+          });
+        }, 5);
+        setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'seeded' } }), 10);
+        setTimeout(() => onExit({ code: 0 }), 15);
+        return { abort() {} };
+      }
+
+      setTimeout(() => onEvent({ event: 'run.error', runId, sessionId, payload: { error: 'tool crashed' } }), 5);
+      setTimeout(() => onExit({ code: 1, stderr: 'tool crashed' }), 10);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Preserve mapping' }),
+    }).then((res) => res.json());
+
+    await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'seed' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 70));
+
+    const failed = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'fail' }),
+    });
+    assert.equal(failed.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(observed.length, 2);
+    assert.equal(observed[1].resumeSessionId, providerSessionId);
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.providerState?.codex?.sessionId, providerSessionId);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('GET /v1/sessions/:id exposes providerState metadata for side-panel hydration', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent, onExit }) => {
+      setTimeout(() => {
+        onEvent({
+          event: 'run.provider_session',
+          runId,
+          sessionId,
+          payload: { provider: 'codex', sessionId: '019caa6f-8c63-7c81-a542-3dbcf922d065' },
+        });
+      }, 5);
+      setTimeout(() => {
+        onEvent({
+          event: 'run.usage',
+          runId,
+          sessionId,
+          payload: {
+            modelContextWindow: 258400,
+            totalTokens: 1120,
+            inputTokens: 1000,
+            cachedInputTokens: 700,
+            outputTokens: 120,
+          },
+        });
+      }, 10);
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'done' } }), 15);
+      setTimeout(() => onExit({ code: 0 }), 20);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Metadata' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'collect usage' }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.sessionId, created.sessionId);
+    assert.equal(sessionBody.providerState?.codex?.sessionId, '019caa6f-8c63-7c81-a542-3dbcf922d065');
+    assert.equal(sessionBody.providerState?.codex?.latestUsage?.modelContextWindow, 258400);
+  } finally {
+    await daemon.stop();
+  }
+});

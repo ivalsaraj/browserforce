@@ -248,6 +248,45 @@ function normalizeBrowserContext(raw) {
   return { tabId, title, url };
 }
 
+function normalizeUsageNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.round(parsed);
+}
+
+function normalizeUsagePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const modelContextWindow = normalizeUsageNumber(payload.modelContextWindow);
+  const totalTokens = normalizeUsageNumber(payload.totalTokens);
+  const inputTokens = normalizeUsageNumber(payload.inputTokens);
+  const cachedInputTokens = normalizeUsageNumber(payload.cachedInputTokens);
+  const outputTokens = normalizeUsageNumber(payload.outputTokens);
+  const reasoningOutputTokens = normalizeUsageNumber(payload.reasoningOutputTokens);
+
+  const normalized = {
+    modelContextWindow,
+    totalTokens,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+  };
+
+  for (const [key, value] of Object.entries(normalized)) {
+    if (value == null) delete normalized[key];
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function isResumeSessionInvalidFailure({ code, error, stderr } = {}) {
+  if (!Number.isInteger(code) || code === 0) return false;
+  const text = `${String(error || '')}\n${String(stderr || '')}`.toLowerCase();
+  return (
+    /resume|session|thread/.test(text)
+    && /not found|unknown|invalid|no such|does not exist/.test(text)
+  );
+}
+
 function firstString(values) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -454,11 +493,12 @@ async function clearChatdUrlFile({ writeChatdUrl = true, urlPath = CHATD_URL_PAT
 }
 
 function createDefaultRunExecutor({ codexCwd } = {}) {
-  return ({ runId, sessionId, message, model, onEvent, onExit, onError }) => startCodexRun({
+  return ({ runId, sessionId, message, model, resumeSessionId, onEvent, onExit, onError }) => startCodexRun({
     runId,
     sessionId,
     prompt: message,
     model,
+    resumeSessionId,
     cwd: codexCwd,
     onEvent,
     onExit,
@@ -596,6 +636,21 @@ export async function startChatd(opts = {}) {
       }
 
       const sessionMatch = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
+      if (sessionMatch && req.method === 'GET') {
+        const decodedSessionId = safeDecodeComponent(sessionMatch[1]);
+        if (!decodedSessionId || !isValidSessionId(decodedSessionId)) {
+          json(res, 400, { error: 'Invalid sessionId' });
+          return;
+        }
+        const session = await getSession({ sessionId: decodedSessionId, storageRoot });
+        if (!session) {
+          json(res, 404, { error: 'Session not found' });
+          return;
+        }
+        json(res, 200, session);
+        return;
+      }
+
       if (sessionMatch && req.method === 'PATCH') {
         const decodedSessionId = safeDecodeComponent(sessionMatch[1]);
         if (!decodedSessionId || !isValidSessionId(decodedSessionId)) {
@@ -718,6 +773,11 @@ export async function startChatd(opts = {}) {
           steps: [],
           finalSent: false,
           queue: Promise.resolve(),
+          lastError: null,
+          resumeRetryAttempted: false,
+          resumeSessionId: isValidSessionId(session?.providerState?.codex?.sessionId || '')
+            ? session.providerState.codex.sessionId
+            : null,
         };
 
         const enqueue = (fn) => {
@@ -728,11 +788,12 @@ export async function startChatd(opts = {}) {
           await appendMessage({ sessionId, role: 'user', text: message, storageRoot });
           runs.set(runId, run);
 
-          const handle = runExecutor({
+          const startAttempt = (resumeSessionId) => runExecutor({
             runId,
             sessionId,
             message: promptMessage,
             model: session.model || null,
+            resumeSessionId,
             onEvent: (evt) => {
               enqueue(async () => {
                 const active = runs.get(runId);
@@ -753,9 +814,43 @@ export async function startChatd(opts = {}) {
                   return;
                 }
 
+                if (evt.event === 'run.provider_session') {
+                  const provider = String(evt.payload?.provider || '').trim().toLowerCase();
+                  const providerSessionId = String(evt.payload?.sessionId || '').trim();
+                  if (provider === 'codex' && isValidSessionId(providerSessionId)) {
+                    await updateSession({
+                      sessionId,
+                      patch: {
+                        providerState: { codex: { sessionId: providerSessionId } },
+                      },
+                      storageRoot,
+                    });
+                  }
+                  broadcast(buildEvent({ event: 'run.provider_session', runId, sessionId, payload: evt.payload }));
+                  return;
+                }
+
+                if (evt.event === 'run.usage') {
+                  const usage = normalizeUsagePayload(evt.payload);
+                  if (usage) {
+                    await updateSession({
+                      sessionId,
+                      patch: {
+                        providerState: { codex: { latestUsage: usage } },
+                      },
+                      storageRoot,
+                    });
+                    broadcast(buildEvent({ event: 'run.usage', runId, sessionId, payload: usage }));
+                  }
+                  return;
+                }
+
                 if (evt.event === 'run.error') {
                   trackRunStep(active, evt);
-                  failRun(active, evt.payload?.error || 'Run failed');
+                  active.lastError = evt.payload?.error || 'Run failed';
+                  if (!active.resumeSessionId || active.resumeRetryAttempted) {
+                    failRun(active, active.lastError);
+                  }
                   return;
                 }
 
@@ -767,12 +862,29 @@ export async function startChatd(opts = {}) {
                 broadcast(buildEvent({ event: evt.event, runId, sessionId, payload: evt.payload }));
               });
             },
-            onExit: ({ code, signal }) => {
+            onExit: ({ code, signal, stderr }) => {
               enqueue(async () => {
                 const active = runs.get(runId);
                 if (!active || active.status !== 'running') return;
 
                 if (signal === 'SIGTERM' || active.status === 'aborted') return;
+
+                if (
+                  active.resumeSessionId
+                  && !active.resumeRetryAttempted
+                  && isResumeSessionInvalidFailure({ code, error: active.lastError, stderr })
+                ) {
+                  active.resumeRetryAttempted = true;
+                  active.resumeSessionId = null;
+                  active.lastError = null;
+                  try {
+                    const retryHandle = startAttempt(null);
+                    active.abort = retryHandle?.abort || null;
+                  } catch (error) {
+                    failRun(active, error?.message || 'Failed to retry codex run');
+                  }
+                  return;
+                }
 
                 if (active.assistantBuffer) {
                   await finalizeRun(active, active.assistantBuffer);
@@ -784,7 +896,7 @@ export async function startChatd(opts = {}) {
                   return;
                 }
 
-                failRun(active, `codex exited with code ${code ?? 'unknown'}`);
+                failRun(active, active.lastError || `codex exited with code ${code ?? 'unknown'}`);
               });
             },
             onError: (error) => {
@@ -795,6 +907,7 @@ export async function startChatd(opts = {}) {
             },
           });
 
+          const handle = startAttempt(run.resumeSessionId);
           run.abort = handle?.abort || null;
           broadcast(buildEvent({
             event: 'run.started',
