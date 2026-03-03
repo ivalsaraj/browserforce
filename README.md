@@ -393,7 +393,14 @@ BrowserForce now includes a side-panel chat UI in the Chrome extension for resum
 - Open popup -> `Open BrowserForce Agent` to open the side panel.
 - Use the session list to switch between chats; transcripts hydrate per selected `sessionId`.
 - Session identity is explicit and persisted; there is no fixed/hardcoded chat session ID.
+- BrowserForce session metadata persists Codex continuity state at `providerState.codex.sessionId`.
+  - New runs use `codex exec resume <sessionId> --json` when this mapping exists.
+  - If resume fails with an explicit invalid-session signature, chatd retries once as a fresh run.
 - Streaming uses `fetch` + `ReadableStream` for SSE, not `EventSource`, so the panel can send `Authorization: Bearer ...` headers.
+- Side-panel status includes a context usage chip:
+  - Live updates from `run.usage` SSE events when available.
+  - Hydrates from `GET /v1/sessions/:sessionId` via `providerState.codex.latestUsage`.
+  - Falls back to `Context: unavailable` when telemetry is absent.
 
 Daemon lifecycle:
 
