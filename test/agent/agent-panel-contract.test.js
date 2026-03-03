@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const html = fs.readFileSync('extension/agent-panel.html', 'utf8');
+const css = fs.readFileSync('extension/agent-panel.css', 'utf8');
 
 test('agent panel has inline model and session selectors with popovers', () => {
   assert.match(html, /id="bf-model-trigger"/);
@@ -21,4 +22,13 @@ test('agent panel has inline model and session selectors with popovers', () => {
 test('agent panel no longer renders title or persistent session sidebar', () => {
   assert.doesNotMatch(html, /<h1/);
   assert.doesNotMatch(html, /<aside class="sessions">/);
+});
+
+test('agent panel does not render a BrowserForce heading bar', () => {
+  assert.doesNotMatch(html, /class="brand-name"/);
+});
+
+test('agent panel keeps horizontal overflow contained in transcript cards', () => {
+  assert.match(css, /\.transcript[\s\S]*overflow-x:\s*hidden/);
+  assert.match(css, /\.bubble-assistant code[\s\S]*overflow-wrap:\s*anywhere/);
 });

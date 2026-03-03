@@ -48,45 +48,11 @@ body {
   border-bottom: 1px solid var(--header-border);
 }
 
-.title-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px 10px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: var(--crail);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 12px;
-  flex-shrink: 0;
-}
-
-.brand-name {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: #fff;
-  letter-spacing: -0.02em;
-}
-
 .controls {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 14px 12px;
+  padding: 12px 14px;
 }
 
 .pill-btn {
@@ -219,6 +185,7 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -302,6 +269,7 @@ body {
 
 .msg-content-wrap {
   max-width: 96%;
+  min-width: 0;
 }
 
 .bubble-user {
@@ -315,6 +283,8 @@ body {
   max-width: 82%;
   box-shadow: 0 2px 8px rgba(193, 95, 60, 0.25);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .bubble-assistant {
@@ -324,6 +294,8 @@ body {
   border-top-left-radius: 4px;
   padding: 12px 16px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .bubble-assistant p {
@@ -331,6 +303,8 @@ body {
   line-height: 1.6;
   color: var(--text);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .bubble-assistant code {
@@ -341,6 +315,9 @@ body {
   padding: 2px 6px;
   border-radius: 5px;
   border: 1px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .run-steps-summary {
@@ -753,6 +730,108 @@ body {
 
 .popover-item.custom-item {
   color: rgba(255, 255, 255, 0.45);
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 1px 0;
+}
+
+.session-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.session-item.active::after {
+  content: none;
+}
+
+.session-main {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.52);
+}
+
+.session-edit-btn {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.session-edit-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.session-edit-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.session-edit-form {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px;
+}
+
+.session-edit-form input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  padding: 0 10px;
+  font-size: 12px;
+  outline: none;
+}
+
+.session-edit-form input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.session-edit-save,
+.session-edit-cancel {
+  height: 30px;
+  border-radius: 8px;
+  border: 0;
+  padding: 0 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.session-edit-save {
+  background: var(--crail);
+  color: #fff;
+}
+
+.session-edit-cancel {
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.86);
 }
 
 .empty-item {
