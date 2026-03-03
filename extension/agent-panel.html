@@ -9,15 +9,39 @@
 <body>
   <main class="agent-shell">
     <header class="agent-header">
-      <div class="header-row">
-        <button id="bf-model-trigger" type="button" class="selector-pill" aria-expanded="false">Model</button>
-        <button id="bf-session-trigger" type="button" class="selector-pill" aria-expanded="false">Session</button>
-        <button id="bf-new-session" type="button" class="icon-btn" aria-label="New Session" title="New Session">+</button>
+      <div class="title-bar">
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">B</div>
+          <span class="brand-name">BrowserForce</span>
+        </div>
       </div>
-      <p id="bf-agent-status" class="status">
-        <span id="bf-agent-status-icon" class="status-icon" aria-hidden="true">●</span>
-        <span id="bf-agent-status-text">Starting...</span>
-      </p>
+
+      <div class="controls">
+        <button id="bf-model-trigger" type="button" class="pill-btn" aria-expanded="false" aria-haspopup="listbox">
+          <span id="bf-model-label">Model: Default</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+
+        <button id="bf-session-trigger" type="button" class="pill-btn" aria-expanded="false" aria-haspopup="listbox">
+          <span id="bf-session-label">Session</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+
+        <button id="bf-new-session" type="button" class="round-btn" aria-label="New Session" title="New Session">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"></path>
+          </svg>
+        </button>
+
+        <div id="bf-agent-status" class="status-circle" title="Starting...">
+          <span id="bf-agent-status-icon" class="status-dot" aria-hidden="true"></span>
+          <span id="bf-agent-status-text" class="sr-only">Starting...</span>
+        </div>
+      </div>
       <div id="bf-tab-attach-banner" class="tab-attach hidden" role="status" aria-live="polite">
         <span id="bf-tab-attach-text">Current tab is not connected</span>
         <button id="bf-attach-current-tab" type="button" class="tab-attach-btn">Attach current tab</button>
@@ -26,22 +50,35 @@
 
     <section class="chat">
       <div id="bf-transcript" class="transcript"></div>
-      <form id="bf-chat-form" class="composer">
-        <textarea id="bf-chat-input" placeholder="Send a message to BrowserForce Agent"></textarea>
+      <form id="bf-chat-form" class="composer-wrap">
+        <div class="composer-box">
+          <textarea id="bf-chat-input" class="composer-textarea" rows="1" placeholder="Message BrowserForce Agent"></textarea>
         <div class="composer-actions">
-          <button id="bf-stop-run" type="button" class="secondary">Stop</button>
-          <button type="submit">Send</button>
+            <button id="bf-stop-run" type="button" class="btn-stop" aria-label="Stop" title="Stop" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="12" cy="12" r="10"></circle>
+                <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" stroke="none"></rect>
+              </svg>
+            </button>
+            <button id="bf-send-btn" type="submit" class="btn-send" aria-label="Send" title="Send" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6"></path>
+              </svg>
+            </button>
+          </div>
         </div>
       </form>
     </section>
 
-    <div id="bf-popover-backdrop" class="menu-backdrop hidden"></div>
+    <div id="bf-popover-backdrop" class="popover-backdrop hidden"></div>
 
-    <section id="bf-model-panel" class="popover-panel hidden">
+    <section id="bf-model-panel" class="popover-panel hidden" role="listbox" aria-label="Available models">
+      <p class="popover-label">Available Models</p>
       <ul id="bf-model-list" class="popover-list"></ul>
     </section>
 
-    <section id="bf-session-panel" class="popover-panel hidden">
+    <section id="bf-session-panel" class="popover-panel hidden" role="listbox" aria-label="Sessions">
+      <p class="popover-label">Sessions</p>
       <ul id="bf-switch-session-list" class="popover-list"></ul>
     </section>
   </main>
