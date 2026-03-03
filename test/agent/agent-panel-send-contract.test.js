@@ -91,9 +91,10 @@ test('bottom note can show async attach status and still hides when no note is a
   assert.match(js, /contextUsageEl\.classList\.toggle\('hidden', !note\)/);
 });
 
-test('initial tab attach is deferred until after first paint', () => {
+test('initial tab attach waits 2 seconds before attaching', () => {
   const fnMatch = js.match(/function startInitialTabAttach\(\)[\s\S]*?\n}\n\nasync function getActiveTabContext/);
   assert.ok(fnMatch, 'startInitialTabAttach function block should be present');
   const fnBlock = fnMatch[0];
-  assert.match(fnBlock, /window\.requestAnimationFrame\(\(\)\s*=>\s*\{/);
+  assert.match(fnBlock, /window\.setTimeout\(\(\)\s*=>\s*\{/);
+  assert.match(fnBlock, /},\s*2000\)/);
 });
