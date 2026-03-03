@@ -10,6 +10,10 @@ const RUN_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const MODEL_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
 const indexWriteQueues = new Map();
 
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function resolveStorageRoot(storageRoot) {
   return storageRoot || DEFAULT_STORAGE_ROOT;
 }
@@ -124,6 +128,83 @@ function normalizeModel(model) {
   return trimmed;
 }
 
+function normalizeUsageNumber(value, fieldName) {
+  if (value == null) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`providerState.codex.latestUsage.${fieldName} must be a non-negative number`);
+  }
+  return Math.round(parsed);
+}
+
+function normalizeLatestUsage(latestUsage) {
+  if (latestUsage == null) return null;
+  if (!isObject(latestUsage)) {
+    throw new Error('providerState.codex.latestUsage must be an object');
+  }
+
+  const fields = [
+    'modelContextWindow',
+    'totalTokens',
+    'inputTokens',
+    'cachedInputTokens',
+    'outputTokens',
+    'reasoningOutputTokens',
+  ];
+
+  const normalized = {};
+  for (const field of fields) {
+    if (!Object.prototype.hasOwnProperty.call(latestUsage, field)) continue;
+    const value = normalizeUsageNumber(latestUsage[field], field);
+    if (value != null) normalized[field] = value;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function normalizeCodexProviderState(patchCodex, currentCodex) {
+  if (patchCodex == null) return null;
+  if (!isObject(patchCodex)) {
+    throw new Error('providerState.codex must be an object');
+  }
+
+  const normalized = isObject(currentCodex) ? { ...currentCodex } : {};
+
+  if (Object.prototype.hasOwnProperty.call(patchCodex, 'sessionId')) {
+    if (patchCodex.sessionId == null || String(patchCodex.sessionId).trim() === '') {
+      delete normalized.sessionId;
+    } else {
+      const sessionId = String(patchCodex.sessionId).trim();
+      if (!isValidSessionId(sessionId)) {
+        throw new Error('providerState.codex.sessionId must be a safe session id');
+      }
+      normalized.sessionId = sessionId;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patchCodex, 'latestUsage')) {
+    const latestUsage = normalizeLatestUsage(patchCodex.latestUsage);
+    if (latestUsage == null) delete normalized.latestUsage;
+    else normalized.latestUsage = latestUsage;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function normalizeProviderState(providerStatePatch, currentProviderState) {
+  if (!isObject(providerStatePatch)) {
+    throw new Error('providerState must be an object');
+  }
+  const normalized = isObject(currentProviderState) ? { ...currentProviderState } : {};
+
+  if (Object.prototype.hasOwnProperty.call(providerStatePatch, 'codex')) {
+    const codex = normalizeCodexProviderState(providerStatePatch.codex, normalized.codex);
+    if (codex == null) delete normalized.codex;
+    else normalized.codex = codex;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
 function sortSessionsNewestFirst(a, b) {
   const aTs = Date.parse(a.updatedAt || a.createdAt || 0);
   const bTs = Date.parse(b.updatedAt || b.createdAt || 0);
@@ -193,6 +274,11 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'model')) {
       next.model = normalizeModel(patch.model);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'providerState')) {
+      const providerState = normalizeProviderState(patch.providerState, current.providerState);
+      if (providerState == null) delete next.providerState;
+      else next.providerState = providerState;
     }
     next.updatedAt = now;
     sessions[idx] = next;
