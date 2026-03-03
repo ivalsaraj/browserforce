@@ -1,13 +1,8 @@
 # BrowserForce — Agent Guidelines
 
-## Playwriter Reference
+## Local Private Overrides
 
-**Before writing any new code, always check how [playwriter](../playwriter) solves the same problem.** Playwriter is the reference implementation for a browser extension + CDP relay + MCP server stack. It lives at `~/Documents/projects/playwriter`.
-
-Rules:
-- **Don't reinvent what playwriter already solved.** Read the relevant playwriter source file first.
-- **Only add code for new requirements or problems playwriter hasn't already solved.**
-- Reference files: `playwriter/src/cdp-relay.ts`, `playwriter/src/executor.ts`, `playwriter/src/mcp.ts`, `playwriter/src/relay-client.ts`
+@AGENTS.local.md
 
 ## Project Overview
 
