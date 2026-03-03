@@ -37,3 +37,12 @@ test('agent panel keeps horizontal overflow contained in transcript cards', () =
   assert.match(css, /\.transcript[\s\S]*overflow-x:\s*hidden/);
   assert.match(css, /\.bubble-assistant code[\s\S]*overflow-wrap:\s*anywhere/);
 });
+
+test('agent panel composer matches compact/expanded shell structure', () => {
+  assert.doesNotMatch(html, /id="bf-attach-btn"/);
+  assert.doesNotMatch(html, /icon-mic/);
+  assert.match(html, /id="bf-stop-run"[\s\S]*icon-stop/);
+  assert.match(html, /id="bf-send-btn"/);
+  assert.match(css, /\.composer-box\.is-multiline/);
+  assert.match(css, /\.btn-send[\s\S]*border-radius:\s*999px/);
+});
