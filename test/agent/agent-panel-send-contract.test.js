@@ -116,3 +116,10 @@ test('send and stop buttons are mutually exclusive based on run state', () => {
   assert.match(js, /stopRunBtn\.hidden\s*=\s*!runInProgress/);
   assert.match(js, /sendBtn\.hidden\s*=\s*runInProgress/);
 });
+
+test('stale run pointer is reconciled from loaded messages so stop does not stay visible forever', () => {
+  assert.match(js, /function reconcileSessionRunState\(sessionId\)/);
+  assert.match(js, /if \(!run \|\| run\.done\)/);
+  assert.match(js, /state\.currentRunBySession = clearSessionRunId\(state\.currentRunBySession, sessionId, runId\)/);
+  assert.match(js, /async function loadMessages\(sessionId\)[\s\S]*reconcileSessionRunState\(sessionId\)/);
+});
