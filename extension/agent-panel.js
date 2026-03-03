@@ -14,6 +14,8 @@ const state = {
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
   currentRunBySession: {},
+  initialTabAttachInFlight: false,
+  initialTabAttachStarted: false,
   editingSessionId: null,
   sessionTitleDrafts: {},
   eventController: null,
@@ -108,14 +110,17 @@ function renderContextUsageChip() {
   const sessionId = state.value.activeSessionId;
   const usage = sessionId ? state.value.latestUsageBySession?.[sessionId] : null;
   const formatted = formatContextUsage(usage || {});
-  contextUsageEl.classList.toggle('hidden', !formatted);
-  if (!formatted) {
+  const note = state.initialTabAttachInFlight
+    ? 'Attaching active tab...'
+    : (formatted ? `Context: ${formatted}` : '');
+  contextUsageEl.classList.toggle('hidden', !note);
+  if (!note) {
     contextUsageEl.textContent = '';
     contextUsageEl.removeAttribute('title');
     return;
   }
-  contextUsageEl.textContent = `Context: ${formatted}`;
-  contextUsageEl.title = contextUsageEl.textContent;
+  contextUsageEl.textContent = note;
+  contextUsageEl.title = note;
 }
 
 function setStatus(kind, text) {
@@ -658,6 +663,21 @@ function bindTabAttachWatchers() {
   }
 }
 
+function startInitialTabAttach() {
+  if (state.initialTabAttachStarted) return;
+  state.initialTabAttachStarted = true;
+  state.initialTabAttachInFlight = true;
+  renderContextUsageChip();
+  ensureCurrentTabAttached()
+    .catch(() => {
+      // best-effort only
+    })
+    .finally(() => {
+      state.initialTabAttachInFlight = false;
+      renderContextUsageChip();
+    });
+}
+
 async function getActiveTabContext() {
   if (!chrome?.tabs?.query) return null;
   try {
@@ -1053,8 +1073,9 @@ popoverBackdropEl.addEventListener('click', () => {
   try {
     setComposerEnabled(false);
     setStatus('info', 'Connecting...');
+    render();
+    startInitialTabAttach();
     await loadAuth();
-    await ensureCurrentTabAttached();
     bindTabAttachWatchers();
     try {
       await loadModelPresets();
