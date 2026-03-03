@@ -253,6 +253,68 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function runtimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    if (!chrome?.runtime?.sendMessage) {
+      resolve(null);
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || 'runtime message failed'));
+          return;
+        }
+        resolve(response || null);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function isIgnoredAttachError(errorMessage) {
+  const text = String(errorMessage || '').toLowerCase();
+  return (
+    text.includes('already attached')
+    || text.includes('cannot attach internal')
+    || text.includes('no active tab')
+  );
+}
+
+async function ensureCurrentTabAttached() {
+  try {
+    const response = await runtimeMessage({ type: 'attachCurrentTab' });
+    if (response?.error && !isIgnoredAttachError(response.error)) {
+      console.warn('[bf-agent] attachCurrentTab failed:', response.error);
+    }
+  } catch {
+    // best-effort only
+  }
+}
+
+async function getActiveTabContext() {
+  if (!chrome?.tabs?.query) return null;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || typeof tab.id !== 'number') return null;
+    const title = String(tab.title || '').trim().slice(0, 180);
+    const url = String(tab.url || '').trim();
+    if (
+      !url
+      || url.startsWith('chrome://')
+      || url.startsWith('chrome-extension://')
+      || url.startsWith('edge://')
+      || url.startsWith('devtools://')
+    ) {
+      return { tabId: tab.id, title, url: null };
+    }
+    return { tabId: tab.id, title, url: url.slice(0, 500) };
+  } catch {
+    return null;
+  }
+}
+
 async function getRelayHttpUrl() {
   const stored = await chrome.storage.local.get(['relayUrl']);
   const relayUrl = stored.relayUrl || 'ws://127.0.0.1:19222/extension';
@@ -465,9 +527,12 @@ async function sendMessage(text) {
   const existing = getActiveMessages();
   dispatch({ type: 'messages.loaded', sessionId, messages: [...existing, { role: 'user', text }] });
 
+  await ensureCurrentTabAttached();
+  const browserContext = await getActiveTabContext();
+
   const res = await api('/v1/runs', {
     method: 'POST',
-    body: JSON.stringify({ sessionId, message: text }),
+    body: JSON.stringify({ sessionId, message: text, browserContext }),
   });
   if (!res.ok) {
     dispatch({ type: 'messages.loaded', sessionId, messages: existing });
@@ -528,6 +593,7 @@ popoverBackdropEl.addEventListener('click', () => {
   try {
     setStatus('info', 'Connecting...');
     await loadAuth();
+    await ensureCurrentTabAttached();
     try {
       await loadModelPresets();
     } catch {

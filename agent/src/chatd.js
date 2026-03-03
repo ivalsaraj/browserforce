@@ -232,6 +232,38 @@ function safeDecodeComponent(value) {
   }
 }
 
+function sanitizeContextText(value, maxLen = 320) {
+  if (value == null) return '';
+  const normalized = String(value).replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  return normalized.length > maxLen ? `${normalized.slice(0, maxLen - 3)}...` : normalized;
+}
+
+function normalizeBrowserContext(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const tabId = Number.isInteger(raw.tabId) ? raw.tabId : null;
+  const title = sanitizeContextText(raw.title, 180);
+  const url = sanitizeContextText(raw.url, 500);
+  if (tabId == null && !title && !url) return null;
+  return { tabId, title, url };
+}
+
+function buildRunPrompt({ message, browserContext }) {
+  if (!browserContext) return message;
+
+  const lines = [
+    'BrowserForce active tab context:',
+  ];
+  if (browserContext.tabId != null) lines.push(`- Active tab id: ${browserContext.tabId}`);
+  if (browserContext.title) lines.push(`- Active tab title: ${browserContext.title}`);
+  if (browserContext.url) lines.push(`- Active tab URL: ${browserContext.url}`);
+  lines.push('Assume the user is referring to this active tab unless they explicitly say otherwise.');
+  lines.push('If the request is ambiguous or you are not sure, ask the user a clarifying question before acting.');
+  lines.push('');
+  lines.push(`User request: ${message}`);
+  return lines.join('\n');
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -511,6 +543,8 @@ export async function startChatd(opts = {}) {
           json(res, 404, { error: 'Session not found' });
           return;
         }
+        const browserContext = normalizeBrowserContext(body?.browserContext);
+        const promptMessage = buildRunPrompt({ message, browserContext });
 
         const runId = randomBytes(12).toString('base64url');
         const run = {
@@ -534,7 +568,7 @@ export async function startChatd(opts = {}) {
           const handle = runExecutor({
             runId,
             sessionId,
-            message,
+            message: promptMessage,
             model: session.model || null,
             onEvent: (evt) => {
               enqueue(async () => {
@@ -597,7 +631,12 @@ export async function startChatd(opts = {}) {
           });
 
           run.abort = handle?.abort || null;
-          broadcast(buildEvent({ event: 'run.started', runId, sessionId, payload: { message, model: session.model || null } }));
+          broadcast(buildEvent({
+            event: 'run.started',
+            runId,
+            sessionId,
+            payload: { message, model: session.model || null, browserContext },
+          }));
           json(res, 202, { ok: true, runId, sessionId });
         } catch (error) {
           runs.delete(runId);
