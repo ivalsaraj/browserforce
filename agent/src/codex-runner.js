@@ -20,6 +20,34 @@ function safeParse(line) {
   }
 }
 
+function toCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.round(parsed);
+}
+
+function toUsagePayload(source = {}) {
+  const inputTokens = toCount(source.input_tokens ?? source.inputTokens);
+  const cachedInputTokens = toCount(source.cached_input_tokens ?? source.cachedInputTokens);
+  const outputTokens = toCount(source.output_tokens ?? source.outputTokens);
+  const reasoningOutputTokens = toCount(source.reasoning_output_tokens ?? source.reasoningOutputTokens);
+  const explicitTotalTokens = toCount(source.total_tokens ?? source.totalTokens);
+  const modelContextWindow = toCount(source.model_context_window ?? source.modelContextWindow);
+
+  const totalTokens = explicitTotalTokens != null
+    ? explicitTotalTokens
+    : ((inputTokens != null || outputTokens != null) ? (inputTokens || 0) + (outputTokens || 0) : null);
+
+  return {
+    modelContextWindow,
+    totalTokens,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+  };
+}
+
 export function normalizeCodexLine({ runId, sessionId, line }) {
   const parsed = safeParse(line);
   if (!parsed || typeof parsed !== 'object') {
@@ -27,6 +55,43 @@ export function normalizeCodexLine({ runId, sessionId, line }) {
   }
 
   const type = String(parsed.type || '').toLowerCase();
+
+  if (type === 'thread.started') {
+    const providerSessionId = String(parsed.thread_id || '').trim();
+    if (providerSessionId) {
+      return envelope({
+        event: 'run.provider_session',
+        runId,
+        sessionId,
+        payload: { provider: 'codex', sessionId: providerSessionId },
+      });
+    }
+  }
+
+  if (type === 'turn.completed' && parsed.usage && typeof parsed.usage === 'object') {
+    return envelope({
+      event: 'run.usage',
+      runId,
+      sessionId,
+      payload: toUsagePayload(parsed.usage),
+    });
+  }
+
+  if (type === 'token_count' && parsed.info && typeof parsed.info === 'object') {
+    const usage = parsed.info.total_token_usage && typeof parsed.info.total_token_usage === 'object'
+      ? parsed.info.total_token_usage
+      : {};
+    return envelope({
+      event: 'run.usage',
+      runId,
+      sessionId,
+      payload: toUsagePayload({
+        ...usage,
+        model_context_window: parsed.info.model_context_window,
+        reasoning_output_tokens: parsed.info.reasoning_output_tokens,
+      }),
+    });
+  }
 
   if (type === 'delta' || type === 'text_delta') {
     return envelope({ event: 'chat.delta', runId, sessionId, payload: { delta: String(parsed.text || '') } });
@@ -92,9 +157,12 @@ export function normalizeCodexLine({ runId, sessionId, line }) {
   return envelope({ event: 'run.event', runId, sessionId, payload: parsed });
 }
 
-export function buildCodexExecArgs({ prompt, model, args } = {}) {
+export function buildCodexExecArgs({ prompt, model, args, resumeSessionId } = {}) {
   if (Array.isArray(args) && args.length > 0) return args;
-  const resolved = ['exec', '--json'];
+  const resumeId = typeof resumeSessionId === 'string' ? resumeSessionId.trim() : '';
+  const resolved = resumeId
+    ? ['exec', 'resume', resumeId, '--json']
+    : ['exec', '--json'];
   if (typeof model === 'string' && model.trim()) {
     resolved.push('--model', model.trim());
   }
@@ -113,15 +181,18 @@ export function startCodexRun({
   command,
   args,
   model,
+  resumeSessionId,
 } = {}) {
   const cmd = command || process.env.BF_CHATD_CODEX_COMMAND || 'codex';
-  const argv = buildCodexExecArgs({ prompt, model, args });
+  const argv = buildCodexExecArgs({ prompt, model, args, resumeSessionId });
 
   const child = spawn(cmd, argv, {
     cwd,
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+  const stderrChunks = [];
 
   const stdoutLines = readline.createInterface({ input: child.stdout });
   stdoutLines.on('line', (line) => {
@@ -136,6 +207,8 @@ export function startCodexRun({
   const stderrLines = readline.createInterface({ input: child.stderr });
   stderrLines.on('line', (line) => {
     if (!line) return;
+    stderrChunks.push(String(line));
+    if (stderrChunks.length > 200) stderrChunks.shift();
     onEvent?.(envelope({
       event: 'tool.delta',
       runId,
@@ -149,7 +222,7 @@ export function startCodexRun({
   });
 
   child.on('close', (code, signal) => {
-    onExit?.({ code, signal });
+    onExit?.({ code, signal, stderr: stderrChunks.join('\n') });
   });
 
   return {
