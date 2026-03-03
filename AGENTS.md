@@ -174,6 +174,16 @@ For side-panel chat UX, **never hardcode or assume a fixed `sessionId`**.
 - Streaming channels (`/events`) must be scoped by explicit selected `sessionId`.
 - Do not infer continuity from "current Codex turn/session" alone; BrowserForce Agent keeps its own session store.
 
+### Codex Provider Session Continuity + Usage Telemetry
+
+For side-panel chat continuity, BrowserForce session metadata stores Codex provider state:
+
+- Persist Codex thread identity at `providerState.codex.sessionId`.
+- On each new run, pass that mapping as `resumeSessionId` so runner can invoke `codex exec resume <id> --json`.
+- Persist latest context/token telemetry at `providerState.codex.latestUsage`.
+- Emit and consume `run.usage` and `run.provider_session` events.
+- Side-panel hydrates usage from `GET /v1/sessions/:sessionId` and shows `Context: unavailable` when telemetry is missing.
+
 ## Security Rules
 
 - Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.
