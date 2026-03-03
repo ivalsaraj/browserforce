@@ -36,8 +36,7 @@ let restrictionExplained = false;
 
 (async function init() {
   const stored = await chrome.storage.local.get(['relayUrl']);
-  const relayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
-  currentRelayUrl = relayUrl;
+  currentRelayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
 
   // Register debugger listeners once (persists across reconnections)
   chrome.debugger.onEvent.addListener(onDebuggerEvent);
@@ -51,22 +50,22 @@ let restrictionExplained = false;
   chrome.alarms.create('bf-reconnect', { periodInMinutes: 0.5 });
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'bf-reconnect' && !ws) {
-      startMaintainLoop(relayUrl);
+      startMaintainLoop();
     }
   });
 
-  startMaintainLoop(relayUrl);
+  startMaintainLoop();
 })();
 
 // ─── Connection Management ───────────────────────────────────────────────────
 
-function startMaintainLoop(relayUrl) {
+function startMaintainLoop() {
   if (maintainLoopActive) return;
   maintainLoopActive = true;
-  maintainConnection(relayUrl);
+  maintainConnection();
 }
 
-async function maintainConnection(relayUrl) {
+async function maintainConnection() {
   while (true) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (connectionState !== 'connecting') {
@@ -75,7 +74,7 @@ async function maintainConnection(relayUrl) {
       }
 
       try {
-        await connect(relayUrl);
+        await connect(currentRelayUrl);
       } catch {
         connectionState = 'disconnected';
         updateBadge();
@@ -139,6 +138,41 @@ function connect(relayUrl) {
       }
     });
   });
+}
+
+function requestRelayReconnect() {
+  if (connectionState !== 'connecting') {
+    connectionState = 'connecting';
+    updateBadge();
+  }
+
+  if (ws) {
+    try {
+      ws.close();
+    } catch {
+      // ignore close races
+    }
+  } else if (!maintainLoopActive) {
+    startMaintainLoop();
+  }
+}
+
+async function waitForConnectionState(timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (connectionState === 'connected') return connectionState;
+    await sleep(200);
+  }
+  return connectionState;
+}
+
+function isValidRelayUrl(relayUrl) {
+  try {
+    const parsed = new URL(relayUrl);
+    return parsed.protocol === 'ws:' || parsed.protocol === 'wss:';
+  } catch {
+    return false;
+  }
 }
 
 // ─── Relay Message Handling ──────────────────────────────────────────────────
@@ -614,7 +648,11 @@ async function checkInactiveTabs() {
 
 chrome.storage.onChanged.addListener(async (changes) => {
   if (changes.relayUrl) {
-    currentRelayUrl = changes.relayUrl.newValue || RELAY_URL_DEFAULT;
+    const nextRelayUrl = changes.relayUrl.newValue || RELAY_URL_DEFAULT;
+    if (nextRelayUrl !== currentRelayUrl) {
+      currentRelayUrl = nextRelayUrl;
+      requestRelayReconnect();
+    }
   }
 
   if (changes.autoDetachMinutes || changes.autoCloseMinutes) {
@@ -795,6 +833,45 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         mode: settings.mode || 'auto',
         mcpClientCount,
       });
+    });
+    return true; // async sendResponse
+  }
+
+  if (msg.type === 'updateRelayUrl') {
+    const relayUrl = typeof msg.relayUrl === 'string' ? msg.relayUrl.trim() : '';
+    if (!relayUrl) {
+      sendResponse({ error: 'Relay URL is required' });
+      return false;
+    }
+    if (!isValidRelayUrl(relayUrl)) {
+      sendResponse({ error: 'Relay URL must start with ws:// or wss://' });
+      return false;
+    }
+
+    const previousRelayUrl = currentRelayUrl;
+    currentRelayUrl = relayUrl;
+    requestRelayReconnect();
+    waitForConnectionState(5000).then((settledState) => {
+      if (settledState !== 'connected') {
+        currentRelayUrl = previousRelayUrl;
+        requestRelayReconnect();
+        waitForConnectionState(5000).then((fallbackState) => {
+          sendResponse({ error: 'Connection failed', connectionState: fallbackState });
+        });
+        return;
+      }
+
+      chrome.storage.local.set({ relayUrl }, () => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ error: chrome.runtime.lastError.message || 'Failed to save relay URL' });
+          return;
+        }
+        sendResponse({ ok: true, connectionState: settledState });
+      });
+    }).catch(() => {
+      currentRelayUrl = previousRelayUrl;
+      requestRelayReconnect();
+      sendResponse({ error: 'Connection failed', connectionState: connectionState });
     });
     return true; // async sendResponse
   }

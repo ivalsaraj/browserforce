@@ -595,6 +595,114 @@ async function cmdSetup() {
   }
 }
 
+async function fetchChatdHealth(port, attempts = 20, delayMs = 100) {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const health = await httpGet(`http://127.0.0.1:${port}/health`);
+      if (health && health.ok) return health;
+    } catch {
+      // Keep polling until timeout.
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return null;
+}
+
+async function cmdAgent() {
+  const sub = positionals[1];
+  const { pickChatdPort } = await import('./agent/src/port-resolver.js');
+  const { writeLock, readLock, clearLock, isLockAlive } = await import('./agent/src/lockfile.js');
+  const { randomBytes } = await import('node:crypto');
+  const { spawn } = await import('node:child_process');
+  const { promises: fsp } = await import('node:fs');
+  const { homedir } = await import('node:os');
+  const { join } = await import('node:path');
+
+  const lockPath = process.env.BF_CHATD_LOCK_PATH || join(homedir(), '.browserforce', 'chatd-lock.json');
+  const chatdUrlPath = process.env.BF_CHATD_URL_PATH || join(homedir(), '.browserforce', 'chatd-url.json');
+
+  if (sub === 'start') {
+    const current = await readLock({ lockPath });
+    if (current && await isLockAlive({ lock: current })) {
+      output({ started: false, running: true, pid: current.pid, port: current.port }, values.json);
+      return;
+    }
+
+    const envPort = Number(process.env.BF_CHATD_PORT || 0);
+    const port = await pickChatdPort({ envPort });
+    const token = randomBytes(32).toString('base64url');
+
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(new URL('./agent/src/chatd.js', import.meta.url))],
+      {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, BF_CHATD_PORT: String(port), BF_CHATD_TOKEN: token },
+      },
+    );
+    child.unref();
+
+    await writeLock({ pid: child.pid, port, token, lockPath });
+    const health = await fetchChatdHealth(port, 30, 100);
+    output({ started: true, pid: child.pid, port, ready: !!health }, values.json);
+    return;
+  }
+
+  if (sub === 'status') {
+    const lock = await readLock({ lockPath });
+    if (!lock) {
+      output({ running: false }, values.json);
+      return;
+    }
+
+    const alive = await isLockAlive({ lock });
+    if (!alive) {
+      await clearLock({ lockPath });
+      output({ running: false, stale: true }, values.json);
+      return;
+    }
+
+    const health = await fetchChatdHealth(lock.port, 10, 100);
+    output({
+      running: !!health,
+      pid: lock.pid,
+      port: lock.port,
+      health,
+    }, values.json);
+    return;
+  }
+
+  if (sub === 'stop') {
+    const clearChatdUrlFile = async () => {
+      try { await fsp.unlink(chatdUrlPath); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    };
+    const lock = await readLock({ lockPath });
+    if (!lock) {
+      await clearLock({ lockPath });
+      await clearChatdUrlFile();
+      output({ stopped: true, running: false }, values.json);
+      return;
+    }
+
+    const alive = await isLockAlive({ lock });
+    if (alive) {
+      try {
+        process.kill(lock.pid, 'SIGTERM');
+      } catch {
+        // ignore kill race
+      }
+    }
+    await clearLock({ lockPath });
+    await clearChatdUrlFile();
+    output({ stopped: true, pid: lock.pid, port: lock.port }, values.json);
+    return;
+  }
+
+  console.error('Usage: browserforce agent start|status|stop');
+  process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -610,6 +718,7 @@ function cmdHelp() {
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
+    browserforce agent <subcmd>     Start/status/stop local BrowserForce Agent daemon
     browserforce setup openclaw     Configure OpenClaw + optional autostart
     browserforce update             Update to the latest version
     browserforce install-extension  Copy extension to ~/.browserforce/extension/
@@ -645,7 +754,7 @@ const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
-  'install-extension': cmdInstallExtension, setup: cmdSetup, help: cmdHelp,
+  'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent, help: cmdHelp,
 };
 
 const handler = commands[command];

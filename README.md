@@ -374,6 +374,9 @@ browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
 browserforce plugin list        # List installed plugins
 browserforce plugin install <n> # Install a plugin from the registry
 browserforce plugin remove <n>  # Remove an installed plugin
+browserforce agent start        # Start local BrowserForce Agent daemon (chatd)
+browserforce agent status       # Show daemon PID/port + /health
+browserforce agent stop         # Stop daemon and clear lockfile
 browserforce setup openclaw [--dry-run] [--json] [--no-autostart] # Configure OpenClaw + optional autostart
 browserforce update             # Update to the latest version
 browserforce install-extension  # Copy extension to ~/.browserforce/extension/
@@ -382,6 +385,30 @@ browserforce install-extension  # Copy extension to ~/.browserforce/extension/
 Setup flags: `--dry-run` (preview), `--no-autostart` (skip OS login daemon/service registration only), `--json` (machine-readable output).
 
 Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
+
+### BrowserForce Agent Side Panel
+
+BrowserForce now includes a side-panel chat UI in the Chrome extension for resumable local sessions.
+
+- Open popup -> `Open BrowserForce Agent` to open the side panel.
+- Use the session list to switch between chats; transcripts hydrate per selected `sessionId`.
+- Session identity is explicit and persisted; there is no fixed/hardcoded chat session ID.
+- Streaming uses `fetch` + `ReadableStream` for SSE, not `EventSource`, so the panel can send `Authorization: Bearer ...` headers.
+
+Daemon lifecycle:
+
+```bash
+browserforce agent start
+browserforce agent status
+browserforce agent stop
+```
+
+Port/auth bootstrap:
+
+- `agent start` picks a loopback port. If `BF_CHATD_PORT` is set and free, it is used.
+- If that port is unavailable, BrowserForce falls back to the first free port in `19280-19320`.
+- The daemon writes `~/.browserforce/chatd-url.json` (`{ port, token }`, mode `0600`).
+- Side-panel JS reads relay URL from extension storage, calls relay `GET /chatd-url` (extension-origin gated), then connects directly to chatd with Bearer auth.
 
 
 ## Deep Dive Sections
