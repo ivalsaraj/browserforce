@@ -83,8 +83,13 @@ function autoResizeInput() {
 }
 
 function syncComposerLayoutState() {
-  const lineHeight = Number.parseFloat(window.getComputedStyle(chatInputEl).lineHeight) || 21;
-  const isMultiline = chatInputEl.scrollHeight > (lineHeight * 1.6);
+  const styles = window.getComputedStyle(chatInputEl);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 21;
+  const paddingTop = Number.parseFloat(styles.paddingTop) || 0;
+  const paddingBottom = Number.parseFloat(styles.paddingBottom) || 0;
+  const singleLineHeight = lineHeight + paddingTop + paddingBottom;
+  const hasContent = chatInputEl.value.trim().length > 0;
+  const isMultiline = hasContent && chatInputEl.scrollHeight > (singleLineHeight + 6);
   composerBoxEl.classList.toggle('is-multiline', isMultiline);
 }
 
