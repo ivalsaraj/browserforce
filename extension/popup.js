@@ -21,6 +21,7 @@ const tabCountEl = document.getElementById('bf-tab-count');
 const tabsListEl = document.getElementById('bf-tabs-list');
 const autoTimerEl = document.getElementById('bf-auto-timer');
 const attachBtn = document.getElementById('bf-attach-tab');
+const openAgentBtn = document.getElementById('bf-open-agent');
 const openLogsBtn = document.getElementById('bf-open-logs');
 const modeSelect = document.getElementById('bf-mode');
 const executionModeSelect = document.getElementById('bf-execution-mode');
@@ -67,12 +68,41 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
 
 // --- Save Handlers ---
 
+function setSaveUrlFeedback(label, disabled) {
+  saveUrlBtn.textContent = label;
+  saveUrlBtn.disabled = !!disabled;
+}
+
 saveUrlBtn.addEventListener('click', () => {
   const url = relayUrlInput.value.trim();
   if (!url) return;
-  chrome.storage.local.set({ relayUrl: url }, () => {
-    saveUrlBtn.textContent = 'Saved';
-    setTimeout(() => { saveUrlBtn.textContent = 'Save'; }, 1200);
+  setSaveUrlFeedback('Connecting...', true);
+  setStatus('connecting', 'connecting');
+
+  chrome.runtime.sendMessage({ type: 'updateRelayUrl', relayUrl: url }, (response) => {
+    if (chrome.runtime.lastError || !response) {
+      setSaveUrlFeedback('Connection failed', false);
+      setStatus('disconnected', 'connection failed');
+      setTimeout(() => setSaveUrlFeedback('Save', false), 1800);
+      return;
+    }
+
+    if (response.error) {
+      setSaveUrlFeedback('Connection failed', false);
+      setStatus('disconnected', response.error);
+      setTimeout(() => {
+        setSaveUrlFeedback('Save', false);
+        refreshStatus();
+      }, 1800);
+      return;
+    }
+
+    setSaveUrlFeedback('Connected', false);
+    setStatus(response.connectionState || 'connected', response.connectionState || 'connected');
+    setTimeout(() => {
+      setSaveUrlFeedback('Save', false);
+      refreshStatus();
+    }, 1200);
   });
 });
 
@@ -163,6 +193,16 @@ attachBtn.addEventListener('click', () => {
     }
     setTimeout(() => { attachBtn.textContent = '+ Attach Current Tab'; }, 1500);
   });
+});
+
+openAgentBtn.addEventListener('click', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await chrome.sidePanel.open({ windowId: tab?.windowId });
+  } catch {
+    openAgentBtn.textContent = 'Failed to open';
+    setTimeout(() => { openAgentBtn.textContent = 'Open BrowserForce Agent'; }, 1500);
+  }
 });
 
 openLogsBtn.addEventListener('click', () => {

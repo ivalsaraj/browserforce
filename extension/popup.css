@@ -257,6 +257,19 @@ button:active { background: #388e3c; }
 .attach-btn:hover { background: #eee; border-color: #aaa; }
 .attach-btn:active { background: #e0e0e0; }
 
+.agent-btn {
+  width: 100%;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  padding: 10px;
+  background: #2f7bf6;
+  color: #fff;
+  border-radius: 6px;
+}
+
+.agent-btn:hover { background: #1d66d9; }
+.agent-btn:active { background: #1757b8; }
+
 .logs-btn {
   width: 100%;
   margin-top: 8px;
