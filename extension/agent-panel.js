@@ -11,6 +11,7 @@ const state = {
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
   currentRunBySession: {},
+  expandedRunSteps: {},
   eventController: null,
   eventLoopToken: 0,
   sessionSelectionToken: 0,
@@ -147,6 +148,48 @@ function renderSessions() {
   });
 }
 
+function isRunStepsExpanded(runId) {
+  return !!state.expandedRunSteps?.[runId];
+}
+
+function toggleRunSteps(runId) {
+  if (!runId) return;
+  state.expandedRunSteps = {
+    ...(state.expandedRunSteps || {}),
+    [runId]: !isRunStepsExpanded(runId),
+  };
+  renderTranscript();
+}
+
+function renderRunSteps(runId, run) {
+  if (!runId || !run || !Array.isArray(run.steps) || run.steps.length === 0) return '';
+  const count = run.steps.length;
+  const expanded = isRunStepsExpanded(runId);
+  const summary = `<button type="button" class="run-steps-trigger" data-run-steps-toggle="${escapeHtml(runId)}">${count} step${count === 1 ? '' : 's'}</button>`;
+  if (!expanded) {
+    return `<div class="run-steps-summary">${summary}</div>`;
+  }
+
+  const items = run.steps
+    .map((step) => {
+      const kind = step?.kind || 'reasoning';
+      const status = step?.status || 'running';
+      const label = step?.label || 'Step';
+      return `<li class="run-step ${escapeHtml(kind)} ${escapeHtml(status)}"><span class="run-step-marker" aria-hidden="true"></span><span class="run-step-label">${escapeHtml(label)}</span></li>`;
+    })
+    .join('');
+
+  return `<div class="run-steps-summary expanded">${summary}<ol class="run-steps-list">${items}</ol></div>`;
+}
+
+function bindTranscriptHandlers() {
+  transcriptEl.querySelectorAll('button[data-run-steps-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      toggleRunSteps(button.getAttribute('data-run-steps-toggle'));
+    });
+  });
+}
+
 function renderTranscript() {
   const messages = getActiveMessages();
   const sessionId = state.value.activeSessionId;
@@ -155,14 +198,21 @@ function renderTranscript() {
 
   const chunks = messages.map((msg) => {
     const role = msg.role || 'assistant';
-    return `<article class="message ${role}">${escapeHtml(msg.text || '')}</article>`;
+    if (role === 'user') {
+      return `<article class="message-row user"><div class="message user">${escapeHtml(msg.text || '')}</div></article>`;
+    }
+
+    const messageRun = msg.runId ? state.value.runs[msg.runId] : null;
+    return `<article class="message-row assistant">${renderRunSteps(msg.runId, messageRun)}<div class="message assistant">${escapeHtml(msg.text || '')}</div></article>`;
   });
 
   if (run && !run.done) {
-    chunks.push(`<article class="message assistant">${escapeHtml(run.text || '')}</article>`);
+    const liveText = run.text ? `<div class="message assistant">${escapeHtml(run.text || '')}</div>` : '';
+    chunks.push(`<article class="message-row assistant">${renderRunSteps(sessionRunId, run)}${liveText}</article>`);
   }
 
-  transcriptEl.innerHTML = chunks.join('') || '<article class="message assistant">No messages yet.</article>';
+  transcriptEl.innerHTML = chunks.join('') || '<article class="message-row assistant"><div class="message assistant">No messages yet.</div></article>';
+  bindTranscriptHandlers();
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
