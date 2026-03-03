@@ -31,6 +31,20 @@ test('run.aborted marks run terminal', () => {
   assert.equal(next.runs.r1.aborted, true);
 });
 
+test('run.aborted preserves partial assistant output in transcript history', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, { event: 'chat.delta', runId: 'r1', sessionId: 's1', payload: { delta: 'Partial answer' } });
+  const s3 = applyEvent(s2, { event: 'run.aborted', runId: 'r1', sessionId: 's1', payload: {} });
+  const message = s3.messagesBySession.s1?.at(-1);
+
+  assert.equal(message?.role, 'assistant');
+  assert.equal(message?.runId, 'r1');
+  assert.equal(message?.text, 'Partial answer');
+  assert.equal(Array.isArray(message?.timeline), true);
+  assert.equal(message.timeline.some((item) => item.type === 'text'), true);
+  assert.equal(message.timeline.some((item) => item.type === 'step' && item.status === 'aborted'), true);
+});
+
 test('tool and reasoning events are tracked as steps', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, { event: 'tool.started', runId: 'r1', sessionId: 's1', payload: { tool: 'fetch' } });

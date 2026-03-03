@@ -410,20 +410,41 @@ export function applyEvent(state = initialState, evt = {}) {
   }
 
   if (evt.event === 'run.aborted') {
-    const run = state.runs[evt.runId] || { steps: [], timeline: [] };
+    const run = state.runs[evt.runId] || { text: '', steps: [], timeline: [] };
     const step = {
       kind: 'status',
       status: 'aborted',
       label: 'Stopped',
     };
+    const timeline = pushTimelineEntry(run, { type: 'step', ...step });
+    const hasContentBeforeStop = Boolean(
+      (typeof run.text === 'string' && run.text)
+      || (Array.isArray(run.timeline) && run.timeline.length > 0),
+    );
+    const currentMessages = state.messagesBySession[evt.sessionId] || [];
+    const hasStoredFinal = currentMessages.some(
+      (message) => message.runId === evt.runId && message.role === 'assistant',
+    );
+    const nextMessages = (!hasStoredFinal && hasContentBeforeStop)
+      ? [...currentMessages, {
+        role: 'assistant',
+        text: run.text || '',
+        runId: evt.runId,
+        timeline,
+      }]
+      : currentMessages;
     return {
       ...state,
+      messagesBySession: {
+        ...state.messagesBySession,
+        [evt.sessionId]: nextMessages,
+      },
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         done: true,
         aborted: true,
         steps: pushStep(run, step),
-        timeline: pushTimelineEntry(run, { type: 'step', ...step }),
+        timeline,
       }),
     };
   }
