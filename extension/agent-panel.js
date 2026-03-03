@@ -35,6 +35,11 @@ const chatFormEl = document.getElementById('bf-chat-form');
 const chatInputEl = document.getElementById('bf-chat-input');
 const stopRunBtn = document.getElementById('bf-stop-run');
 const sendBtn = chatFormEl.querySelector('button[type="submit"]');
+const tabAttachBannerEl = document.getElementById('bf-tab-attach-banner');
+const tabAttachTextEl = document.getElementById('bf-tab-attach-text');
+const attachCurrentTabBtn = document.getElementById('bf-attach-current-tab');
+let tabAttachRefreshTimer = null;
+let tabAttachRefreshToken = 0;
 
 function setStatus(kind, text) {
   statusTextEl.textContent = text;
@@ -46,6 +51,20 @@ function setComposerEnabled(enabled) {
   chatInputEl.disabled = !enabled;
   stopRunBtn.disabled = !enabled;
   sendBtn.disabled = !enabled;
+}
+
+function setTabAttachBannerState({
+  hidden = true,
+  text = 'Current tab is not connected',
+  canAttach = false,
+  busy = false,
+} = {}) {
+  if (!tabAttachBannerEl || !tabAttachTextEl || !attachCurrentTabBtn) return;
+  tabAttachBannerEl.classList.toggle('hidden', !!hidden);
+  if (hidden) return;
+  tabAttachTextEl.textContent = text;
+  attachCurrentTabBtn.disabled = busy || !canAttach;
+  attachCurrentTabBtn.textContent = busy ? 'Attaching...' : 'Attach current tab';
 }
 
 function dispatch(action) {
@@ -288,8 +307,99 @@ async function ensureCurrentTabAttached() {
     if (response?.error && !isIgnoredAttachError(response.error)) {
       console.warn('[bf-agent] attachCurrentTab failed:', response.error);
     }
+    return response || null;
   } catch {
     // best-effort only
+    return null;
+  }
+}
+
+function isTabAttachableUrl(url) {
+  const value = String(url || '').trim();
+  if (!value) return false;
+  return !(
+    value.startsWith('chrome://')
+    || value.startsWith('chrome-extension://')
+    || value.startsWith('edge://')
+    || value.startsWith('devtools://')
+  );
+}
+
+async function getCurrentTabAttachmentState() {
+  if (!chrome?.tabs?.query) return { hidden: true };
+  let tab = null;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch {
+    return { hidden: true };
+  }
+  if (!tab || typeof tab.id !== 'number') return { hidden: true };
+  if (!isTabAttachableUrl(tab.url)) {
+    return {
+      hidden: false,
+      text: 'This tab cannot be attached',
+      canAttach: false,
+    };
+  }
+
+  try {
+    const status = await runtimeMessage({ type: 'getStatus' });
+    if (status?.connectionState && status.connectionState !== 'connected') {
+      return {
+        hidden: false,
+        text: 'Relay disconnected',
+        canAttach: false,
+      };
+    }
+
+    const attachedTabs = Array.isArray(status?.tabs) ? status.tabs : [];
+    const attached = attachedTabs.some((item) => Number(item?.tabId) === tab.id);
+    if (attached) return { hidden: true };
+    return {
+      hidden: false,
+      text: 'Current tab is not connected',
+      canAttach: true,
+    };
+  } catch {
+    return {
+      hidden: false,
+      text: 'Unable to check tab connection',
+      canAttach: false,
+    };
+  }
+}
+
+async function refreshTabAttachBanner() {
+  const token = ++tabAttachRefreshToken;
+  const next = await getCurrentTabAttachmentState();
+  if (token !== tabAttachRefreshToken) return;
+  setTabAttachBannerState(next);
+}
+
+function scheduleTabAttachRefresh(delayMs = 0) {
+  if (tabAttachRefreshTimer) clearTimeout(tabAttachRefreshTimer);
+  tabAttachRefreshTimer = setTimeout(() => {
+    refreshTabAttachBanner().catch(() => {});
+  }, delayMs);
+}
+
+function bindTabAttachWatchers() {
+  if (chrome?.tabs?.onActivated?.addListener) {
+    chrome.tabs.onActivated.addListener(() => {
+      scheduleTabAttachRefresh(40);
+    });
+  }
+  if (chrome?.tabs?.onUpdated?.addListener) {
+    chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+      if (!tab?.active) return;
+      if (!('status' in changeInfo) && !('url' in changeInfo) && !('title' in changeInfo)) return;
+      scheduleTabAttachRefresh(80);
+    });
+  }
+  if (chrome?.windows?.onFocusChanged?.addListener) {
+    chrome.windows.onFocusChanged.addListener(() => {
+      scheduleTabAttachRefresh(80);
+    });
   }
 }
 
@@ -300,13 +410,7 @@ async function getActiveTabContext() {
     if (!tab || typeof tab.id !== 'number') return null;
     const title = String(tab.title || '').trim().slice(0, 180);
     const url = String(tab.url || '').trim();
-    if (
-      !url
-      || url.startsWith('chrome://')
-      || url.startsWith('chrome-extension://')
-      || url.startsWith('edge://')
-      || url.startsWith('devtools://')
-    ) {
+    if (!isTabAttachableUrl(url)) {
       return { tabId: tab.id, title, url: null };
     }
     return { tabId: tab.id, title, url: url.slice(0, 500) };
@@ -528,6 +632,7 @@ async function sendMessage(text) {
   dispatch({ type: 'messages.loaded', sessionId, messages: [...existing, { role: 'user', text }] });
 
   await ensureCurrentTabAttached();
+  scheduleTabAttachRefresh(0);
   const browserContext = await getActiveTabContext();
 
   const res = await api('/v1/runs', {
@@ -574,6 +679,22 @@ chatInputEl.addEventListener('keydown', (event) => {
   chatFormEl.requestSubmit();
 });
 
+if (attachCurrentTabBtn) {
+  attachCurrentTabBtn.addEventListener('click', async () => {
+    setTabAttachBannerState({
+      hidden: false,
+      text: tabAttachTextEl?.textContent || 'Current tab is not connected',
+      canAttach: false,
+      busy: true,
+    });
+    const response = await ensureCurrentTabAttached();
+    if (response?.error && !isIgnoredAttachError(response.error)) {
+      setStatus('error', response.error || 'Unable to attach current tab');
+    }
+    scheduleTabAttachRefresh(0);
+  });
+}
+
 newSessionBtn.addEventListener('click', () => {
   createSession()
     .then(() => setPopover('none'))
@@ -601,6 +722,7 @@ popoverBackdropEl.addEventListener('click', () => {
     setStatus('info', 'Connecting...');
     await loadAuth();
     await ensureCurrentTabAttached();
+    bindTabAttachWatchers();
     try {
       await loadModelPresets();
     } catch {
@@ -613,9 +735,11 @@ popoverBackdropEl.addEventListener('click', () => {
       await selectSession(state.value.activeSessionId);
     }
     setComposerEnabled(true);
+    scheduleTabAttachRefresh(0);
     setStatus('ready', 'Ready');
   } catch {
     setComposerEnabled(false);
+    setTabAttachBannerState({ hidden: true });
     setStatus('error', 'Daemon unavailable');
   }
 })();
