@@ -104,3 +104,15 @@ test('tool-call timeline entries render collapsed toggle rows with click-to-expa
   assert.match(js, /class="step-details"/);
   assert.match(js, /closest\('button\[data-step-key\]'\)/);
 });
+
+test('composer toggles single-line and multiline visual state from textarea height', () => {
+  assert.match(js, /const composerBoxEl = chatFormEl\.querySelector\('\.composer-box'\)/);
+  assert.match(js, /function syncComposerLayoutState\(\)/);
+  assert.match(js, /composerBoxEl\.classList\.toggle\('is-multiline', isMultiline\)/);
+  assert.match(js, /autoResizeInput\(\);[\s\S]*syncComposerLayoutState\(\);/);
+});
+
+test('send and stop buttons are mutually exclusive based on run state', () => {
+  assert.match(js, /stopRunBtn\.hidden\s*=\s*!runInProgress/);
+  assert.match(js, /sendBtn\.hidden\s*=\s*runInProgress/);
+});
