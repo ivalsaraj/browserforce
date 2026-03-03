@@ -23,3 +23,10 @@ test('sidepanel auto-attaches current tab and sends browserContext with runs', (
   assert.match(js, /const browserContext = await getActiveTabContext\(\);/);
   assert.match(js, /JSON\.stringify\(\{\s*sessionId,\s*message:\s*text,\s*browserContext\s*\}\)/);
 });
+
+test('enter key submits composer and shift+enter keeps newline', () => {
+  assert.match(js, /chatInputEl\.addEventListener\('keydown'/);
+  assert.match(js, /if\s*\(\s*event\.key\s*!==\s*'Enter'\s*\|\|\s*event\.shiftKey\s*\)\s*return;/);
+  assert.match(js, /event\.preventDefault\(\);/);
+  assert.match(js, /chatFormEl\.requestSubmit\(\);/);
+});

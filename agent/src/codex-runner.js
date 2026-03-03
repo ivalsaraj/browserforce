@@ -44,10 +44,10 @@ export function normalizeCodexLine({ runId, sessionId, line }) {
     const itemType = parsed.item?.type || '';
     if (itemType === 'agent_message') {
       return envelope({
-        event: 'chat.final',
+        event: 'chat.delta',
         runId,
         sessionId,
-        payload: { text: String(parsed.item?.text || '') },
+        payload: { delta: String(parsed.item?.text || '') },
       });
     }
     if (itemType === 'reasoning') {

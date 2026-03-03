@@ -567,6 +567,13 @@ chatFormEl.addEventListener('submit', async (event) => {
   }
 });
 
+chatInputEl.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey) return;
+  if (event.isComposing) return;
+  event.preventDefault();
+  chatFormEl.requestSubmit();
+});
+
 newSessionBtn.addEventListener('click', () => {
   createSession()
     .then(() => setPopover('none'))
