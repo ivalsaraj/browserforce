@@ -19,14 +19,57 @@ function trimStepLabel(label) {
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
 
+function normalizeStepDetails(details, label = '') {
+  const lines = [];
+  const pushLine = (value) => {
+    const line = String(value || '')
+      .split('\n')
+      .map((part) => part.trim())
+      .filter(Boolean);
+    for (const rawPart of line) {
+      const part = rawPart.replace(/^[-*]\s+/, '').trim();
+      if (!part) continue;
+      if (part === label) continue;
+      if (lines.includes(part)) continue;
+      lines.push(part.length > 220 ? `${part.slice(0, 217)}...` : part);
+      if (lines.length >= 8) return;
+    }
+  };
+  const visit = (value) => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (lines.length >= 8) return;
+        visit(item);
+      }
+      return;
+    }
+    if (typeof value === 'object') {
+      visit(value.text);
+      visit(value.message);
+      visit(value.output);
+      visit(value.command);
+      visit(value.path);
+      visit(value.query);
+      visit(value.pattern);
+      return;
+    }
+    pushLine(value);
+  };
+  visit(details);
+  return lines;
+}
+
 function normalizeStep(step) {
   if (!step || typeof step !== 'object') return null;
   const label = trimStepLabel(step.label);
   if (!label) return null;
+  const details = normalizeStepDetails(step.details, label);
   return {
     kind: step.kind || 'reasoning',
     status: step.status || 'running',
     label,
+    ...(details.length > 0 ? { details } : {}),
   };
 }
 
@@ -35,7 +78,13 @@ function pushStep(run, step) {
   const normalized = normalizeStep(step);
   if (!normalized || !normalized.label) return steps;
   const last = steps[steps.length - 1];
-  if (last && last.label === normalized.label && last.kind === normalized.kind && last.status === normalized.status) {
+  if (
+    last
+    && last.label === normalized.label
+    && last.kind === normalized.kind
+    && last.status === normalized.status
+    && JSON.stringify(last.details || []) === JSON.stringify(normalized.details || [])
+  ) {
     return steps;
   }
   steps.push(normalized);
@@ -67,6 +116,7 @@ function pushTimelineEntry(run, entry) {
       && last.label === candidate.label
       && last.kind === candidate.kind
       && last.status === candidate.status
+      && JSON.stringify(last.details || []) === JSON.stringify(candidate.details || [])
     ) {
       return timeline;
     }
@@ -164,6 +214,24 @@ function stepLabelForToolEvent(evt) {
   return '';
 }
 
+function stepDetailsForToolEvent(evt, label) {
+  const payload = evt?.payload || {};
+  return normalizeStepDetails([
+    payload.details,
+    payload.text,
+    payload.message,
+    payload.delta,
+    payload.command,
+    payload.path,
+    payload.query,
+    payload.pattern,
+    payload.args,
+    payload.paths,
+    payload.items,
+    payload.item,
+  ], label);
+}
+
 function humanizeToken(value) {
   const normalized = String(value || '')
     .trim()
@@ -207,6 +275,24 @@ function stepLabelForRunEvent(evt) {
     item.type ? humanizeToken(item.type) : '',
     payload.type ? humanizeToken(payload.type) : '',
   ]) || 'Working...';
+}
+
+function stepDetailsForRunEvent(evt, label) {
+  const payload = evt?.payload || {};
+  return normalizeStepDetails([
+    payload.details,
+    payload.text,
+    payload.message,
+    payload.delta,
+    payload.command,
+    payload.path,
+    payload.query,
+    payload.pattern,
+    payload.args,
+    payload.paths,
+    payload.items,
+    payload.item,
+  ], label);
 }
 
 function upsertRun(state, runId, patch) {
@@ -458,7 +544,8 @@ export function applyEvent(state = initialState, evt = {}) {
       ? 'reasoning'
       : 'tool';
     const label = stepLabelForToolEvent(evt);
-    const step = { kind, status, label };
+    const details = stepDetailsForToolEvent(evt, label);
+    const step = { kind, status, label, ...(details.length > 0 ? { details } : {}) };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
@@ -475,7 +562,8 @@ export function applyEvent(state = initialState, evt = {}) {
     const status = stepStatusForRunEvent(evt);
     const kind = stepKindForRunEvent(evt);
     const label = stepLabelForRunEvent(evt);
-    const step = { kind, status, label };
+    const details = stepDetailsForRunEvent(evt, label);
+    const step = { kind, status, label, ...(details.length > 0 ? { details } : {}) };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {

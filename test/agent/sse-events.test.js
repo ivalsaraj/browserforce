@@ -120,6 +120,30 @@ test('run.event is converted into a visible in-flight step', () => {
   assert.match(last.label, /Planning skill invocation/);
 });
 
+test('run.event captures detail lines for collapsible tool-call rendering', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'run.event',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      item: {
+        summary: 'Explored 2 files, 1 search',
+        text: 'Read chatd.js\nSearched for run.aborted\nRead sse-events.test.js',
+      },
+    },
+  });
+  const lastStep = s2.runs.r1.steps.at(-1);
+  const lastTimeline = s2.runs.r1.timeline.at(-1);
+  assert.equal(lastStep?.label, 'Explored 2 files, 1 search');
+  assert.deepEqual(lastStep?.details, [
+    'Read chatd.js',
+    'Searched for run.aborted',
+    'Read sse-events.test.js',
+  ]);
+  assert.deepEqual(lastTimeline?.details, lastStep?.details);
+});
+
 test('run.usage stores normalized usage for run and session', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, {

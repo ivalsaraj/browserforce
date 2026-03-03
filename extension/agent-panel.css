@@ -337,6 +337,61 @@ body {
   gap: 8px;
 }
 
+.step-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.step-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+}
+
+.step-item.collapsible .step-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.step-caret::before {
+  content: '›';
+  display: inline-block;
+  font-size: 14px;
+  color: var(--text-subtle);
+  transition: transform 0.15s ease;
+}
+
+.step-item.collapsible.expanded .step-caret::before {
+  transform: rotate(90deg);
+}
+
+.step-details {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.step-details li {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .step-label {
   font-size: 11.5px;
   color: var(--text-muted);

@@ -98,3 +98,9 @@ test('initial tab attach waits 2 seconds before attaching', () => {
   assert.match(fnBlock, /window\.setTimeout\(\(\)\s*=>\s*\{/);
   assert.match(fnBlock, /},\s*2000\)/);
 });
+
+test('tool-call timeline entries render collapsed toggle rows with click-to-expand details', () => {
+  assert.match(js, /data-step-key=/);
+  assert.match(js, /class="step-details"/);
+  assert.match(js, /closest\('button\[data-step-key\]'\)/);
+});
