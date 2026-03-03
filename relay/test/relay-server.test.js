@@ -201,6 +201,103 @@ describe('HTTP Endpoints', () => {
   });
 });
 
+describe('Chatd URL Endpoint', () => {
+  let relay;
+  let port;
+  const chatdUrlPath = path.join(BF_DIR, 'chatd-url.json');
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+    fs.rmSync(chatdUrlPath, { force: true });
+  });
+
+  after(() => {
+    relay.stop();
+    fs.rmSync(chatdUrlPath, { force: true });
+  });
+
+  it('GET /chatd-url returns 404 when chatd not running', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(status, 404);
+    assert.match(body.error, /chatd not running/);
+
+    ext.close();
+    await sleep(50);
+  });
+
+  it('GET /chatd-url returns 404 when metadata is stale', async () => {
+    fs.writeFileSync(chatdUrlPath, JSON.stringify({ port: 65534, token: 'stale' }));
+
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
+      Origin: 'chrome-extension://test',
+    });
+    assert.equal(status, 404);
+    assert.match(body.error, /chatd not running/);
+
+    ext.close();
+    await sleep(50);
+  });
+
+  it('GET /chatd-url accepts extension id header when Origin is absent', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
+      'x-browserforce-extension-id': 'abcdefghijklmnopabcdefghijklmnop',
+    });
+    assert.equal(status, 404);
+    assert.match(body.error, /chatd not running/);
+
+    ext.close();
+    await sleep(50);
+  });
+
+  it('GET /chatd-url rejects mismatched extension id header', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
+      'x-browserforce-extension-id': 'ponmlkjihgfedcbaponmlkjihgfedcba',
+    });
+    assert.equal(status, 403);
+    assert.match(body.error, /origin mismatch/);
+
+    ext.close();
+    await sleep(50);
+  });
+});
+
 // ─── Logs Viewer Endpoints ───────────────────────────────────────────────────
 
 describe('Logs Viewer Endpoints', () => {
