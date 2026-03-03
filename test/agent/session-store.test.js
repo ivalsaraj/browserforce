@@ -86,6 +86,34 @@ test('updateSession persists per-session model and title', async () => {
   assert.equal(row?.model, 'gpt-5');
 });
 
+test('updateSession persists codex provider session mapping', async () => {
+  const created = await createSession({ title: 'Continuity', storageRoot });
+  const updated = await updateSession({
+    sessionId: created.sessionId,
+    patch: {
+      providerState: {
+        codex: {
+          sessionId: '019caa6f-8c63-7c81-a542-3dbcf922d065',
+          latestUsage: {
+            modelContextWindow: 258400,
+            totalTokens: 128125,
+            cachedInputTokens: 126592,
+          },
+        },
+      },
+    },
+    storageRoot,
+  });
+
+  assert.equal(updated?.providerState?.codex?.sessionId, '019caa6f-8c63-7c81-a542-3dbcf922d065');
+  assert.equal(updated?.providerState?.codex?.latestUsage?.modelContextWindow, 258400);
+
+  const rows = await listSessions({ limit: 10, storageRoot });
+  const row = rows.find((item) => item.sessionId === created.sessionId);
+  assert.equal(row?.providerState?.codex?.sessionId, '019caa6f-8c63-7c81-a542-3dbcf922d065');
+  assert.equal(row?.providerState?.codex?.latestUsage?.totalTokens, 128125);
+});
+
 test('listSessions fails fast on corrupted index metadata', async () => {
   writeFileSync(join(storageRoot, 'index.json'), '{this-is-not-json\n', 'utf8');
   await assert.rejects(
