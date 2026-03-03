@@ -169,6 +169,16 @@ In `single-active`, contention returns HTTP `409 Conflict` for additional `/cdp`
 
 MCP handles `409`/busy connect errors by entering standby and polling `GET /client-slot` with short jittered intervals (~200-400ms), then reconnecting when `busy: false` (up to a 30s connect timeout).
 
+### BrowserForce Agent Session Identity (No Fixed ID)
+
+For side-panel chat UX, **never hardcode or assume a fixed `sessionId`**.
+
+- Sessions are user-selectable conversation threads (ChatGPT/Atlas style).
+- The UI must list prior sessions and let the user resume any session.
+- New chats must create a new generated session ID (UUID/ULID), then persist metadata + transcript.
+- Streaming channels (`/events`) must be scoped by explicit selected `sessionId`.
+- Do not infer continuity from "current Codex turn/session" alone; BrowserForce Agent keeps its own session store.
+
 ## Security Rules
 
 - Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.
@@ -247,3 +257,5 @@ Run with: `node --test relay/test/relay-server.test.js` and `node --test mcp/tes
 5. **Relay port collision**: Default port 19222. If tests fail with EADDRINUSE, kill stale processes: `lsof -ti:19222 | xargs kill -9`.
 
 6. **Test writeCdpUrl**: Never call `relay.start()` in tests without `{ writeCdpUrl: false }` — it overwrites the production cdp-url file.
+
+7. **No fixed chat session IDs**: BrowserForce Agent chat must always use explicit user-selected/generated session IDs and persisted session history. Never bind side-panel chat to a single hardcoded ID.
