@@ -77,6 +77,18 @@ function isActiveRunInProgress() {
   return !!(run && !run.done);
 }
 
+function reconcileSessionRunState(sessionId) {
+  if (!sessionId) return false;
+  const runId = getSessionRunId(state.currentRunBySession, sessionId);
+  if (!runId) return false;
+  const run = state.value.runs[runId] || null;
+  if (!run || run.done) {
+    state.currentRunBySession = clearSessionRunId(state.currentRunBySession, sessionId, runId);
+    return true;
+  }
+  return false;
+}
+
 function autoResizeInput() {
   chatInputEl.style.height = 'auto';
   chatInputEl.style.height = `${Math.min(chatInputEl.scrollHeight, 160)}px`;
@@ -854,6 +866,9 @@ async function loadMessages(sessionId) {
   await ensureOk(res, 'Failed to load messages');
   const body = await readJsonOrEmpty(res);
   dispatch({ type: 'messages.loaded', sessionId, messages: body.messages || [] });
+  if (reconcileSessionRunState(sessionId)) {
+    render();
+  }
 }
 
 async function loadSessionMetadata(sessionId) {
@@ -1020,6 +1035,7 @@ function connectEvents(sessionId) {
         }
 
         backoffMs = 250;
+        await loadMessages(sessionId).catch(() => {});
         await consumeEventStream(response.body, loopToken);
       } catch {
         if (controller.signal.aborted || state.eventLoopToken !== loopToken) break;
