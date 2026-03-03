@@ -73,7 +73,20 @@ test('assistant transcript prefers ordered run timeline over grouped run steps',
 test('context usage renderer hides element when unavailable and only shows formatted values', () => {
   assert.match(js, /function renderContextUsageChip\(\)/);
   assert.match(js, /latestUsageBySession/);
-  assert.match(js, /contextUsageEl\.classList\.toggle\('hidden', !formatted\)/);
-  assert.match(js, /contextUsageEl\.textContent = `Context: \$\{formatted\}`/);
+  assert.match(js, /const note = state\.initialTabAttachInFlight[\s\S]*formatted[\s\S]*Context: \$\{formatted\}/);
+  assert.match(js, /contextUsageEl\.classList\.toggle\('hidden', !note\)/);
+  assert.match(js, /contextUsageEl\.textContent = note/);
   assert.doesNotMatch(js, /Context:\s*unavailable/);
+});
+
+test('init opens smoothly by starting tab attach asynchronously', () => {
+  assert.match(js, /function startInitialTabAttach\(\)/);
+  assert.match(js, /\(async function init\(\)[\s\S]*startInitialTabAttach\(\);/);
+  assert.doesNotMatch(js, /\(async function init\(\)[\s\S]*await ensureCurrentTabAttached\(\);/);
+});
+
+test('bottom note can show async attach status and still hides when no note is available', () => {
+  assert.match(js, /initialTabAttachInFlight:\s*false/);
+  assert.match(js, /state\.initialTabAttachInFlight\s*\?\s*'Attaching active tab\.\.\.'/);
+  assert.match(js, /contextUsageEl\.classList\.toggle\('hidden', !note\)/);
 });
