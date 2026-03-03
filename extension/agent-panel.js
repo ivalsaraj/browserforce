@@ -17,13 +17,19 @@ const state = {
   eventLoopToken: 0,
   sessionSelectionToken: 0,
   popover: 'none',
+  status: {
+    kind: 'info',
+    text: 'Starting...',
+  },
 };
 
 const statusEl = document.getElementById('bf-agent-status');
 const statusIconEl = document.getElementById('bf-agent-status-icon');
 const statusTextEl = document.getElementById('bf-agent-status-text');
 const modelTriggerBtn = document.getElementById('bf-model-trigger');
+const modelLabelEl = document.getElementById('bf-model-label');
 const sessionTriggerBtn = document.getElementById('bf-session-trigger');
+const sessionLabelEl = document.getElementById('bf-session-label');
 const newSessionBtn = document.getElementById('bf-new-session');
 const popoverBackdropEl = document.getElementById('bf-popover-backdrop');
 const modelPanelEl = document.getElementById('bf-model-panel');
@@ -41,16 +47,67 @@ const attachCurrentTabBtn = document.getElementById('bf-attach-current-tab');
 let tabAttachRefreshTimer = null;
 let tabAttachRefreshToken = 0;
 
+function getActiveSession() {
+  return state.value.sessions.find((item) => item.sessionId === state.value.activeSessionId) || null;
+}
+
+function getActiveMessages() {
+  return state.value.messagesBySession[state.value.activeSessionId] || [];
+}
+
+function getActiveRun() {
+  const sessionId = state.value.activeSessionId;
+  if (!sessionId) return null;
+  const runId = getSessionRunId(state.currentRunBySession, sessionId);
+  if (!runId) return null;
+  return state.value.runs[runId] || null;
+}
+
+function isActiveRunInProgress() {
+  const run = getActiveRun();
+  return !!(run && !run.done);
+}
+
+function autoResizeInput() {
+  chatInputEl.style.height = 'auto';
+  chatInputEl.style.height = `${Math.min(chatInputEl.scrollHeight, 160)}px`;
+}
+
+function syncComposerState() {
+  const enabled = !chatInputEl.disabled;
+  const hasText = chatInputEl.value.trim().length > 0;
+  const runInProgress = isActiveRunInProgress();
+
+  stopRunBtn.disabled = !enabled || !runInProgress;
+  stopRunBtn.classList.toggle('active', enabled && runInProgress);
+  sendBtn.disabled = !enabled || runInProgress || !hasText;
+}
+
+function syncStatusIndicator() {
+  const runInProgress = isActiveRunInProgress();
+  const hasError = state.status.kind === 'error';
+  const text = hasError
+    ? state.status.text
+    : runInProgress
+      ? 'Thinking...'
+      : state.status.text;
+
+  statusEl.classList.toggle('error', hasError);
+  statusEl.classList.toggle('thinking', runInProgress && !hasError);
+  statusEl.title = text || 'Ready';
+  statusTextEl.textContent = text || '';
+  statusIconEl.textContent = '';
+}
+
 function setStatus(kind, text) {
-  statusTextEl.textContent = text;
-  statusEl.classList.toggle('error', kind === 'error');
-  statusIconEl.textContent = kind === 'error' ? '!' : '●';
+  state.status = { kind, text };
+  syncStatusIndicator();
 }
 
 function setComposerEnabled(enabled) {
   chatInputEl.disabled = !enabled;
-  stopRunBtn.disabled = !enabled;
-  sendBtn.disabled = !enabled;
+  autoResizeInput();
+  syncComposerState();
 }
 
 function setTabAttachBannerState({
@@ -83,22 +140,26 @@ function dispatchEvent(evt) {
   render();
 }
 
-function getActiveSession() {
-  return state.value.sessions.find((item) => item.sessionId === state.value.activeSessionId) || null;
-}
-
-function getActiveMessages() {
-  return state.value.messagesBySession[state.value.activeSessionId] || [];
-}
-
 function formatModelLabel(model) {
   return model && String(model).trim() ? model : 'Default';
 }
 
 function renderSelectors() {
   const activeSession = getActiveSession();
-  modelTriggerBtn.textContent = `Model: ${formatModelLabel(activeSession?.model)}`;
-  sessionTriggerBtn.textContent = activeSession?.title || 'Session';
+  const modelLabel = `Model: ${formatModelLabel(activeSession?.model)}`;
+  const sessionLabel = activeSession?.title || 'Session';
+
+  if (modelLabelEl) {
+    modelLabelEl.textContent = modelLabel;
+  } else {
+    modelTriggerBtn.textContent = modelLabel;
+  }
+
+  if (sessionLabelEl) {
+    sessionLabelEl.textContent = sessionLabel;
+  } else {
+    sessionTriggerBtn.textContent = sessionLabel;
+  }
 }
 
 function renderModelList() {
@@ -107,9 +168,9 @@ function renderModelList() {
 
   const rows = state.modelPresets.map((preset) => {
     const active = (preset.value || null) === activeModel ? 'active' : '';
-    return `<li><button type="button" data-model="${escapeHtml(preset.value || '')}" class="${active}">${escapeHtml(preset.label)}</button></li>`;
+    return `<li><button type="button" data-model="${escapeHtml(preset.value || '')}" class="popover-item ${active}"><span>${escapeHtml(preset.label)}</span></button></li>`;
   });
-  rows.push('<li><button type="button" data-model-custom="1">Custom...</button></li>');
+  rows.push('<li><button type="button" data-model-custom="1" class="popover-item custom-item"><span>Custom...</span></button></li>');
 
   modelListEl.innerHTML = rows.join('');
 
@@ -156,7 +217,7 @@ function renderSessions() {
       const active = session.sessionId === state.value.activeSessionId ? 'active' : '';
       const title = session.title || session.sessionId;
       const suffix = (titleCounts.get(title) || 0) > 1 ? ` · ${session.sessionId.slice(0, 8)}` : '';
-      return `<li><button type="button" data-session-id="${session.sessionId}" class="${active}">${escapeHtml(`${title}${suffix}`)}</button></li>`;
+      return `<li><button type="button" data-session-id="${session.sessionId}" class="popover-item ${active}"><span>${escapeHtml(`${title}${suffix}`)}</span></button></li>`;
     })
     .join('');
 
@@ -185,22 +246,31 @@ function renderRunSteps(runId, run) {
   if (!runId || !run || !Array.isArray(run.steps) || run.steps.length === 0) return '';
   const count = run.steps.length;
   const expanded = isRunStepsExpanded(runId);
-  const summary = `<button type="button" class="run-steps-trigger" data-run-steps-toggle="${escapeHtml(runId)}">${count} step${count === 1 ? '' : 's'}</button>`;
-  if (!expanded) {
-    return `<div class="run-steps-summary">${summary}</div>`;
-  }
 
   const items = run.steps
     .map((step) => {
-      const kind = step?.kind || 'reasoning';
       const status = step?.status || 'running';
       const label = step?.label || 'Step';
       const icon = classifyRunStepIcon(step);
-      return `<li class="run-step ${escapeHtml(kind)} ${escapeHtml(status)}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="run-step-label">${escapeHtml(label)}</span></li>`;
+      return `<li class="step-item ${escapeHtml(status)}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${escapeHtml(label)}</span></li>`;
     })
     .join('');
 
-  return `<div class="run-steps-summary expanded">${summary}<ol class="run-steps-list">${items}</ol></div>`;
+  return `
+    <div class="run-steps-summary">
+      <button type="button" class="steps-toggle ${expanded ? 'open' : ''}" data-run-steps-toggle="${escapeHtml(runId)}">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"></path>
+        </svg>
+        <strong>${count} step${count === 1 ? '' : 's'}</strong>
+      </button>
+      <ol class="steps-list ${expanded ? 'open' : ''}">${items}</ol>
+    </div>
+  `;
+}
+
+function renderContent(value) {
+  return escapeHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>');
 }
 
 function bindTranscriptHandlers() {
@@ -220,21 +290,65 @@ function renderTranscript() {
   const chunks = messages.map((msg) => {
     const role = msg.role || 'assistant';
     if (role === 'user') {
-      return `<article class="message-row user"><div class="message user">${escapeHtml(msg.text || '')}</div></article>`;
+      return `
+        <article class="message user">
+          <div class="msg-meta"><span class="msg-author">You</span></div>
+          <div class="bubble-user">${escapeHtml(msg.text || '')}</div>
+        </article>
+      `;
     }
 
     const messageRun = msg.runId ? state.value.runs[msg.runId] : null;
-    return `<article class="message-row assistant">${renderRunSteps(msg.runId, messageRun)}<div class="message assistant">${escapeHtml(msg.text || '')}</div></article>`;
+    return `
+      <article class="message assistant">
+        <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
+        <div class="msg-content-wrap">
+          ${renderRunSteps(msg.runId, messageRun)}
+          <div class="bubble-assistant"><p>${renderContent(msg.text || '')}</p></div>
+        </div>
+      </article>
+    `;
   });
 
   if (run && !run.done) {
-    const liveText = run.text ? `<div class="message assistant">${escapeHtml(run.text || '')}</div>` : '';
-    chunks.push(`<article class="message-row assistant">${renderRunSteps(sessionRunId, run)}${liveText}</article>`);
+    if (run.text && run.text.trim()) {
+      chunks.push(`
+        <article class="message assistant">
+          <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
+          <div class="msg-content-wrap">
+            ${renderRunSteps(sessionRunId, run)}
+            <div class="bubble-assistant"><p>${renderContent(run.text)}</p></div>
+          </div>
+        </article>
+      `);
+    } else {
+      chunks.push(`
+        <article class="message assistant">
+          <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
+          <div class="thinking-bubble"><div class="spinner"></div><span>Thinking...</span></div>
+        </article>
+      `);
+    }
   }
 
-  transcriptEl.innerHTML = chunks.join('') || '<article class="message-row assistant"><div class="message assistant">No messages yet.</div></article>';
+  if (!chunks.length) {
+    transcriptEl.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">B</div>
+        <div>
+          <p class="empty-title">Start a conversation</p>
+          <p class="empty-sub">Ask BrowserForce to inspect your active tab or run a browser task.</p>
+        </div>
+      </div>
+    `;
+  } else {
+    transcriptEl.innerHTML = chunks.join('');
+  }
+
   bindTranscriptHandlers();
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  syncStatusIndicator();
+  syncComposerState();
 }
 
 function setPopover(popover) {
@@ -648,6 +762,7 @@ async function sendMessage(text) {
   if (body.runId) {
     state.currentRunBySession = assignSessionRunId(state.currentRunBySession, sessionId, body.runId);
   }
+  render();
 }
 
 async function stopRun() {
@@ -666,8 +781,11 @@ chatFormEl.addEventListener('submit', async (event) => {
   try {
     await sendMessage(text);
     chatInputEl.value = '';
+    autoResizeInput();
+    syncComposerState();
   } catch (error) {
     chatInputEl.value = text;
+    syncComposerState();
     setStatus('error', error?.message || 'Failed to send message');
   }
 });
@@ -676,6 +794,7 @@ chatInputEl.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' || event.shiftKey) return;
   if (event.isComposing) return;
   event.preventDefault();
+  if (sendBtn.disabled) return;
   chatFormEl.requestSubmit();
 });
 
@@ -694,6 +813,11 @@ if (attachCurrentTabBtn) {
     scheduleTabAttachRefresh(0);
   });
 }
+
+chatInputEl.addEventListener('input', () => {
+  autoResizeInput();
+  syncComposerState();
+});
 
 newSessionBtn.addEventListener('click', () => {
   createSession()
@@ -719,6 +843,7 @@ popoverBackdropEl.addEventListener('click', () => {
 
 (async function init() {
   try {
+    setComposerEnabled(false);
     setStatus('info', 'Connecting...');
     await loadAuth();
     await ensureCurrentTabAttached();
@@ -737,6 +862,7 @@ popoverBackdropEl.addEventListener('click', () => {
     setComposerEnabled(true);
     scheduleTabAttachRefresh(0);
     setStatus('ready', 'Ready');
+    render();
   } catch {
     setComposerEnabled(false);
     setTabAttachBannerState({ hidden: true });
