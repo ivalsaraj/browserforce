@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"019cb36d-0554-7a91-aee0-17a840d36372"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Confirming single-sentence response**"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Understood, I will stop after this sentence."}}
+{"type":"turn.completed","usage":{"input_tokens":15166,"cached_input_tokens":3456,"output_tokens":289}}
