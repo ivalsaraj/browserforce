@@ -668,14 +668,18 @@ function startInitialTabAttach() {
   state.initialTabAttachStarted = true;
   state.initialTabAttachInFlight = true;
   renderContextUsageChip();
-  ensureCurrentTabAttached()
-    .catch(() => {
-      // best-effort only
-    })
-    .finally(() => {
-      state.initialTabAttachInFlight = false;
-      renderContextUsageChip();
-    });
+  window.requestAnimationFrame(() => {
+    window.setTimeout(() => {
+      ensureCurrentTabAttached()
+        .catch(() => {
+          // best-effort only
+        })
+        .finally(() => {
+          state.initialTabAttachInFlight = false;
+          renderContextUsageChip();
+        });
+    }, 0);
+  });
 }
 
 async function getActiveTabContext() {
