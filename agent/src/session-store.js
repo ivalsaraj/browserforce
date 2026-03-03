@@ -71,6 +71,43 @@ function normalizeSteps(steps) {
     .slice(-100);
 }
 
+function normalizeTimelineEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.type === 'text') {
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    if (!text) return null;
+    return { type: 'text', text };
+  }
+  const step = normalizeStep(entry);
+  if (!step) return null;
+  return { type: 'step', ...step };
+}
+
+function normalizeTimeline(timeline) {
+  if (!Array.isArray(timeline)) return [];
+  const entries = [];
+  for (const item of timeline.slice(-200)) {
+    const normalized = normalizeTimelineEntry(item);
+    if (!normalized) continue;
+    const last = entries[entries.length - 1];
+    if (normalized.type === 'text' && last?.type === 'text') {
+      last.text = `${last.text || ''}${normalized.text || ''}`;
+      continue;
+    }
+    if (
+      normalized.type === 'step'
+      && last?.type === 'step'
+      && last.label === normalized.label
+      && last.kind === normalized.kind
+      && last.status === normalized.status
+    ) {
+      continue;
+    }
+    entries.push(normalized);
+  }
+  return entries.slice(-200);
+}
+
 async function ensureStorageRoot(storageRoot) {
   await fs.mkdir(storageRoot, { recursive: true });
 }
@@ -287,7 +324,7 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
   });
 }
 
-export async function appendMessage({ sessionId, role, text, runId, steps, storageRoot } = {}) {
+export async function appendMessage({ sessionId, role, text, runId, steps, timeline, storageRoot } = {}) {
   assertValidSessionId(sessionId, 'appendMessage');
   if (!role) throw new Error('appendMessage requires role');
   if (typeof text !== 'string') throw new Error('appendMessage requires text');
@@ -310,6 +347,10 @@ export async function appendMessage({ sessionId, role, text, runId, steps, stora
   const normalizedSteps = normalizeSteps(steps);
   if (normalizedSteps.length > 0) {
     entry.steps = normalizedSteps;
+  }
+  const normalizedTimeline = normalizeTimeline(timeline);
+  if (normalizedTimeline.length > 0) {
+    entry.timeline = normalizedTimeline;
   }
 
   const logPath = messageLogPath(root, sessionId);

@@ -272,6 +272,9 @@ test('POST /v1/runs persists run steps so reopened sessions can render them', as
     assert.equal(Array.isArray(assistant?.steps), true);
     assert.equal(assistant.steps.length >= 1, true);
     assert.equal(assistant.steps.some((step) => /Inspecting active tab/.test(step?.label || '')), true);
+    assert.equal(Array.isArray(assistant?.timeline), true);
+    assert.equal(assistant.timeline.some((item) => item?.type === 'step'), true);
+    assert.equal(assistant.timeline.some((item) => item?.type === 'text' && /done/i.test(item?.text || '')), true);
   } finally {
     await daemon.stop();
   }
