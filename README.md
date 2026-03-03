@@ -83,6 +83,8 @@ After loading, the extension icon appears in your toolbar (gray = disconnected).
 
 The relay auto-starts when you run any command or connect via MCP — no manual step needed. Extension icon turns green once connected.
 
+Contributor/dev workflows (alternate ports, stream debugging, MCP wiring) are documented in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 To run the relay manually (optional):
 
 ```bash
