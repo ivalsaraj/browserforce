@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BrowserForce Agent</title>
+  <link rel="stylesheet" href="agent-panel.css">
+</head>
+<body>
+  <main class="agent-shell">
+    <header class="agent-header">
+      <div class="header-row">
+        <button id="bf-model-trigger" type="button" class="selector-pill" aria-expanded="false">Model</button>
+        <button id="bf-session-trigger" type="button" class="selector-pill" aria-expanded="false">Session</button>
+        <button id="bf-new-session" type="button" class="icon-btn" aria-label="New Session" title="New Session">+</button>
+      </div>
+      <p id="bf-agent-status" class="status">
+        <span id="bf-agent-status-icon" class="status-icon" aria-hidden="true">●</span>
+        <span id="bf-agent-status-text">Starting...</span>
+      </p>
+    </header>
+
+    <section class="chat">
+      <div id="bf-transcript" class="transcript"></div>
+      <form id="bf-chat-form" class="composer">
+        <textarea id="bf-chat-input" placeholder="Send a message to BrowserForce Agent"></textarea>
+        <div class="composer-actions">
+          <button id="bf-stop-run" type="button" class="secondary">Stop</button>
+          <button type="submit">Send</button>
+        </div>
+      </form>
+    </section>
+
+    <div id="bf-popover-backdrop" class="menu-backdrop hidden"></div>
+
+    <section id="bf-model-panel" class="popover-panel hidden">
+      <ul id="bf-model-list" class="popover-list"></ul>
+    </section>
+
+    <section id="bf-session-panel" class="popover-panel hidden">
+      <ul id="bf-switch-session-list" class="popover-list"></ul>
+    </section>
+  </main>
+
+  <script type="module" src="agent-panel.js"></script>
+</body>
+</html>

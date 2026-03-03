@@ -16,6 +16,7 @@ const DEFAULT_CDP_LOG_BUFFER_LIMIT = 10000;
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
 const CDP_URL_FILE = path.join(BF_DIR, 'cdp-url');
+const CHATD_URL_FILE = path.join(BF_DIR, 'chatd-url.json');
 const BF_PLUGINS_DIR = path.join(BF_DIR, 'plugins');
 const CLIENT_MODE_SINGLE = 'single-active';
 const CLIENT_MODE_MULTI = 'multi-client';
@@ -356,6 +357,42 @@ class RelayServer {
       return;
     }
 
+    if (url.pathname === '/chatd-url' && req.method === 'GET') {
+      if (!this._requireExtensionOrigin(req, res)) return;
+      try {
+        const body = fs.readFileSync(CHATD_URL_FILE, 'utf8');
+        const parsed = JSON.parse(body);
+        if (!Number.isInteger(parsed?.port) || typeof parsed?.token !== 'string') {
+          throw new Error('invalid shape');
+        }
+
+        let healthy = false;
+        try {
+          const healthRes = await fetch(`http://127.0.0.1:${parsed.port}/health`, {
+            signal: AbortSignal.timeout(500),
+          });
+          healthy = healthRes.ok;
+        } catch {
+          healthy = false;
+        }
+        if (!healthy) {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: 'chatd not running' }));
+          return;
+        }
+        res.end(JSON.stringify(parsed));
+      } catch (err) {
+        if (err && err.code === 'ENOENT') {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: 'chatd not running' }));
+          return;
+        }
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: 'invalid chatd-url metadata' }));
+      }
+      return;
+    }
+
     if (url.pathname === '/logs/status' && req.method === 'GET') {
       if (!this._requireExtensionOrigin(req, res)) return;
       res.end(JSON.stringify(this._logsStatus()));
@@ -538,7 +575,10 @@ class RelayServer {
 
   _requireExtensionOrigin(req, res) {
     const origin = this._extensionOriginFromReq(req);
-    if (!origin) {
+    const requestedExtensionId = String(req?.headers?.['x-browserforce-extension-id'] || '').trim();
+    const extensionIdPattern = /^[a-p]{32}$/;
+
+    if (!origin && !extensionIdPattern.test(requestedExtensionId)) {
       res.statusCode = 403;
       res.end(JSON.stringify({ error: 'Forbidden — extension origin required' }));
       return false;
@@ -550,11 +590,23 @@ class RelayServer {
       res.end(JSON.stringify({ error: 'Extension not connected' }));
       return false;
     }
-    if (trustedOrigin && origin !== trustedOrigin) {
+
+    if (origin) {
+      if (origin !== trustedOrigin) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: 'Forbidden — extension origin mismatch' }));
+        return false;
+      }
+      return true;
+    }
+
+    const trustedExtensionId = String(trustedOrigin).replace('chrome-extension://', '');
+    if (requestedExtensionId !== trustedExtensionId) {
       res.statusCode = 403;
       res.end(JSON.stringify({ error: 'Forbidden — extension origin mismatch' }));
       return false;
     }
+
     return true;
   }
 
