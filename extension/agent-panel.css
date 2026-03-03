@@ -593,47 +593,45 @@ body {
 
 .composer-wrap {
   flex-shrink: 0;
-  background: linear-gradient(180deg, rgba(18, 20, 25, 0) 0%, rgba(18, 20, 25, 0.9) 36%, rgba(18, 20, 25, 0.96) 100%);
-  border-top: 0;
-  padding: 12px;
+  background: #f3f5f8;
+  border-top: 1px solid #d8dee6;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .composer-box {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 32px;
-  background: linear-gradient(180deg, #33363A 0%, #2A2D30 100%);
-  padding: 10px 12px;
-  min-height: 56px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  gap: 8px;
+  border: 1px solid #8ea8c2;
+  border-radius: 28px;
+  background: linear-gradient(90deg, #6e93b7 0%, #759ec1 100%);
+  padding: 6px 10px;
+  min-height: 46px;
+  box-shadow: 0 2px 8px rgba(25, 46, 68, 0.16);
   transition: border-color 0.16s, box-shadow 0.16s, min-height 0.16s, padding 0.16s;
 }
 
 .composer-box:focus-within {
-  border-color: rgba(255, 255, 255, 0.22);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.14),
-    0 16px 34px rgba(0, 0, 0, 0.4);
+  border-color: #6f8eac;
+  box-shadow: 0 0 0 2px rgba(111, 142, 172, 0.28);
 }
 
 .composer-box.is-multiline {
   align-items: stretch;
   grid-template-rows: minmax(0, 1fr) auto;
-  min-height: 138px;
-  padding-top: 14px;
-  padding-bottom: 12px;
+  min-height: 68px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .composer-box.is-multiline .composer-textarea {
   grid-column: 1 / -1;
   grid-row: 1;
-  margin: 0 2px 2px;
+  margin: 0;
 }
 
 .composer-box.is-multiline .composer-actions {
@@ -650,16 +648,16 @@ body {
   outline: none;
   font-size: 15px;
   font-family: inherit;
-  color: rgba(255, 255, 255, 0.95);
+  color: #f1f7ff;
   line-height: 1.38;
-  min-height: 22px;
-  max-height: 160px;
+  min-height: 20px;
+  max-height: 84px;
   overflow-y: auto;
-  padding: 2px 0;
+  padding: 0;
 }
 
 .composer-textarea::placeholder {
-  color: rgba(255, 255, 255, 0.56);
+  color: rgba(228, 240, 252, 0.74);
 }
 
 .composer-textarea::-webkit-scrollbar {
@@ -667,7 +665,7 @@ body {
 }
 
 .composer-textarea::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(241, 247, 255, 0.4);
   border-radius: 999px;
 }
 
@@ -681,7 +679,7 @@ body {
 .context-usage-note {
   font-size: 10px;
   line-height: 1.35;
-  color: rgba(255, 255, 255, 0.42);
+  color: #6f7f92;
   padding: 0 4px;
   white-space: nowrap;
   overflow: hidden;
@@ -690,8 +688,8 @@ body {
 
 .btn-stop,
 .btn-send {
-  width: 44px;
-  height: 44px;
+  width: 36px;
+  height: 36px;
   border-radius: 999px;
   border: 0;
   display: flex;
@@ -701,7 +699,7 @@ body {
 }
 
 .btn-stop {
-  background: rgba(255, 90, 90, 0.14);
+  background: rgba(255, 90, 90, 0.18);
   cursor: pointer;
   color: #FF5A5A;
   opacity: 1;
@@ -712,7 +710,7 @@ body {
 }
 
 .btn-stop.active:hover {
-  background: rgba(255, 90, 90, 0.2);
+  background: rgba(255, 90, 90, 0.28);
 }
 
 .btn-stop:disabled {
@@ -721,15 +719,15 @@ body {
 }
 
 .btn-stop svg {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
 }
 
 .btn-send {
   background: #2B78F6;
   color: #fff;
   cursor: pointer;
-  box-shadow: 0 8px 18px rgba(43, 120, 246, 0.45);
+  box-shadow: 0 3px 8px rgba(43, 120, 246, 0.35);
 }
 
 .btn-send:hover:not(:disabled) {
@@ -743,16 +741,16 @@ body {
 }
 
 .btn-send:disabled {
-  background: rgba(255, 255, 255, 0.18);
-  color: rgba(255, 255, 255, 0.62);
+  background: rgba(214, 226, 239, 0.82);
+  color: #8da2b9;
   opacity: 1;
   cursor: not-allowed;
   box-shadow: none;
 }
 
 .btn-send svg {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 .popover-backdrop {
