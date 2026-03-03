@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"019cb36d-3da8-75c1-a959-d6db6519091d"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Confirming response approach**"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"This is the only sentence in my reply."}}
+{"type":"turn.completed","usage":{"input_tokens":15166,"cached_input_tokens":15104,"output_tokens":201}}
