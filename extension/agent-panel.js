@@ -1,6 +1,7 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
   assignSessionRunId,
+  classifyRunStepIcon,
   clearSessionRunId,
   getSessionRunId,
   shouldApplySessionSelection,
@@ -175,7 +176,8 @@ function renderRunSteps(runId, run) {
       const kind = step?.kind || 'reasoning';
       const status = step?.status || 'running';
       const label = step?.label || 'Step';
-      return `<li class="run-step ${escapeHtml(kind)} ${escapeHtml(status)}"><span class="run-step-marker" aria-hidden="true"></span><span class="run-step-label">${escapeHtml(label)}</span></li>`;
+      const icon = classifyRunStepIcon(step);
+      return `<li class="run-step ${escapeHtml(kind)} ${escapeHtml(status)}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="run-step-label">${escapeHtml(label)}</span></li>`;
     })
     .join('');
 

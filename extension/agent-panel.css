@@ -180,25 +180,138 @@ body {
   white-space: pre-wrap;
 }
 
-.run-step-marker {
+.run-step-icon {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex: 0 0 16px;
+  color: #97a2b8;
+  position: relative;
+}
+
+.run-step-icon::before,
+.run-step-icon::after {
+  content: '';
+  position: absolute;
+}
+
+.run-step-icon.icon-reasoning::before {
+  top: 4px;
+  left: 4px;
   width: 8px;
   height: 8px;
-  margin-top: 6px;
   border-radius: 999px;
-  background: #96a1b8;
-  flex: 0 0 8px;
+  background: currentColor;
 }
 
-.run-step.tool .run-step-marker {
-  background: #2f7bf6;
+.run-step-icon.icon-tool::before {
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
 }
 
-.run-step.done .run-step-marker {
-  background: #1f9d63;
+.run-step-icon.icon-view::before {
+  top: 5px;
+  left: 1px;
+  width: 14px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-radius: 10px;
 }
 
-.run-step.failed .run-step-marker {
-  background: #d14357;
+.run-step-icon.icon-view::after {
+  top: 7px;
+  left: 6px;
+  width: 4px;
+  height: 4px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+}
+
+.run-step-icon.icon-camera::before {
+  top: 5px;
+  left: 1px;
+  width: 14px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+}
+
+.run-step-icon.icon-camera::after {
+  top: 1px;
+  left: 4px;
+  width: 6px;
+  height: 4px;
+  border: 1.5px solid currentColor;
+  border-bottom: 0;
+  border-radius: 2px 2px 0 0;
+}
+
+.run-step-icon.icon-plan::before {
+  top: 3px;
+  left: 3px;
+  width: 2px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 4px 0 currentColor, 0 8px 0 currentColor;
+}
+
+.run-step-icon.icon-plan::after {
+  top: 3px;
+  left: 7px;
+  width: 7px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  box-shadow: 0 4px 0 currentColor, 0 8px 0 currentColor;
+}
+
+.run-step-icon.icon-done::before {
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+}
+
+.run-step-icon.icon-done::after {
+  top: 6px;
+  left: 5px;
+  width: 6px;
+  height: 3px;
+  border-left: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.run-step-icon.icon-failed::before {
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+}
+
+.run-step-icon.icon-failed::after {
+  top: 7px;
+  left: 4px;
+  width: 8px;
+  height: 1.5px;
+  background: currentColor;
+}
+
+.run-step.done .run-step-icon {
+  color: #1f9d63;
+}
+
+.run-step.failed .run-step-icon {
+  color: #d14357;
 }
 
 .composer {
