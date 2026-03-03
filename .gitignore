@@ -9,3 +9,4 @@ pnpm-debug.log*
 .worktrees/
 docs/plans/*
 .superset
+AGENTS.local.md
