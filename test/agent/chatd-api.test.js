@@ -280,6 +280,66 @@ test('POST /v1/runs persists run steps so reopened sessions can render them', as
   }
 });
 
+test('POST /v1/runs abort persists partial assistant output for session reloads', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent }) => {
+      setTimeout(() => {
+        onEvent({ event: 'chat.delta', runId, sessionId, payload: { delta: 'Partial answer' } });
+      }, 10);
+      setTimeout(() => {
+        onEvent({ event: 'tool.started', runId, sessionId, payload: { tool: 'snapshot' } });
+      }, 15);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Abort persistence' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'start and stop' }),
+    });
+    assert.equal(runRes.status, 202);
+    const runBody = await runRes.json();
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const abortRes = await fetch(`${daemon.baseUrl}/v1/runs/${encodeURIComponent(runBody.runId)}/abort`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(abortRes.status, 200);
+
+    const messagesBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    const assistant = (messagesBody.messages || []).at(-1);
+
+    assert.equal(assistant?.role, 'assistant');
+    assert.equal(assistant?.runId, runBody.runId);
+    assert.equal(assistant?.text, 'Partial answer');
+    assert.equal(Array.isArray(assistant?.timeline), true);
+    assert.equal(assistant.timeline.some((item) => item?.type === 'step' && item?.status === 'aborted'), true);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('runExecutor synchronous failure does not leak abortable run', async () => {
   const storageRoot = mkdtempSync(join(tmpdir(), 'bf-chatd-run-fail-'));
   let attemptedRunId = null;

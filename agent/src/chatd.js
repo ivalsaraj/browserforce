@@ -650,6 +650,27 @@ export async function startChatd(opts = {}) {
     runs.delete(run.runId);
   }
 
+  async function persistAbortedRun(run) {
+    if (!run) return;
+    trackRunStep(run, { event: 'run.aborted', payload: {} });
+    const partialText = String(run.assistantBuffer || '');
+    syncFinalTextToRunTimeline(run, partialText);
+    const hasContent = Boolean(
+      partialText
+      || (Array.isArray(run.timeline) && run.timeline.length > 0),
+    );
+    if (!hasContent) return;
+    await appendMessage({
+      sessionId: run.sessionId,
+      role: 'assistant',
+      text: partialText,
+      runId: run.runId,
+      steps: run.steps,
+      timeline: run.timeline,
+      storageRoot,
+    });
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
       const base = `http://${req.headers.host || '127.0.0.1'}`;
@@ -1015,6 +1036,7 @@ export async function startChatd(opts = {}) {
         }
 
         run.status = 'aborted';
+        await persistAbortedRun(run);
         run.abort?.();
         runs.delete(decodedRunId);
         broadcast(buildEvent({ event: 'run.aborted', runId: decodedRunId, sessionId: run.sessionId, payload: {} }));
