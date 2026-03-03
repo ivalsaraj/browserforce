@@ -4,7 +4,6 @@ import {
   classifyRunStepIcon,
   clearSessionRunId,
   formatContextUsage,
-  getLatestInFlightStepIndex,
   getSessionRunId,
   renderInlineContent,
   shouldApplySessionSelection,
@@ -17,7 +16,6 @@ const state = {
   currentRunBySession: {},
   editingSessionId: null,
   sessionTitleDrafts: {},
-  expandedRunSteps: {},
   eventController: null,
   eventLoopToken: 0,
   sessionSelectionToken: 0,
@@ -355,48 +353,62 @@ function renderSessions() {
   });
 }
 
-function isRunStepsExpanded(runId) {
-  return !!state.expandedRunSteps?.[runId];
+function normalizeRunTimeline(run, fallbackText = '') {
+  if (!run) return [];
+  if (Array.isArray(run.timeline) && run.timeline.length > 0) {
+    return run.timeline.filter((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      if (entry.type === 'text') return typeof entry.text === 'string' && entry.text.length > 0;
+      if (entry.type === 'step') return typeof entry.label === 'string' && entry.label.trim().length > 0;
+      return false;
+    });
+  }
+
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+  const timeline = steps.map((step) => ({
+    type: 'step',
+    kind: step?.kind || 'reasoning',
+    status: step?.status || 'running',
+    label: step?.label || '',
+  }));
+
+  const text = typeof fallbackText === 'string' && fallbackText
+    ? fallbackText
+    : (typeof run.text === 'string' ? run.text : '');
+  if (text) timeline.push({ type: 'text', text });
+  return timeline;
 }
 
-function toggleRunSteps(runId) {
-  if (!runId) return;
-  state.expandedRunSteps = {
-    ...(state.expandedRunSteps || {}),
-    [runId]: !isRunStepsExpanded(runId),
-  };
-  renderTranscript();
+function getLatestInFlightTimelineStepIndex(run, timeline) {
+  if (!run || run.done) return -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.type !== 'step') continue;
+    const status = String(entry.status || 'running').toLowerCase();
+    if (status === 'running') return index;
+  }
+  return -1;
 }
 
-function renderRunSteps(runId, run) {
-  if (!runId || !run || !Array.isArray(run.steps) || run.steps.length === 0) return '';
-  const count = run.steps.length;
-  const expanded = isRunStepsExpanded(runId);
-  const latestStepIndex = getLatestInFlightStepIndex(run);
-
-  const items = run.steps
-    .map((step, index) => {
-      const status = step?.status || 'running';
-      const label = step?.label || 'Step';
-      const icon = classifyRunStepIcon(step);
-      const isLatest = index === latestStepIndex;
-      const shouldPulse = isLatest && status === 'running';
-      const classes = ['step-item', escapeHtml(status)];
-      if (isLatest) classes.push('latest');
-      if (shouldPulse) classes.push('pulse');
-      return `<li class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${renderInlineContent(label)}</span></li>`;
-    })
-    .join('');
-
+function renderRunTimeline(run, fallbackText = '') {
+  const timeline = normalizeRunTimeline(run, fallbackText);
+  if (!timeline.length) return '';
+  const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
   return `
-    <div class="run-steps-summary">
-      <button type="button" class="steps-toggle ${expanded ? 'open' : ''}" data-run-steps-toggle="${escapeHtml(runId)}">
-        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"></path>
-        </svg>
-        <strong>${count} step${count === 1 ? '' : 's'}</strong>
-      </button>
-      <ol class="steps-list ${expanded ? 'open' : ''}">${items}</ol>
+    <div class="run-timeline">
+      ${timeline.map((entry, index) => {
+    if (entry.type === 'text') {
+      return `<div class="bubble-assistant"><p>${renderContent(entry.text || '')}</p></div>`;
+    }
+    const status = entry?.status || 'running';
+    const icon = classifyRunStepIcon(entry);
+    const isLatest = index === latestStepIndex;
+    const shouldPulse = isLatest && status === 'running';
+    const classes = ['step-item', 'timeline-step', escapeHtml(status)];
+    if (isLatest) classes.push('latest');
+    if (shouldPulse) classes.push('pulse');
+    return `<div class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${renderInlineContent(entry.label || 'Step')}</span></div>`;
+  }).join('')}
     </div>
   `;
 }
@@ -406,11 +418,7 @@ function renderContent(value) {
 }
 
 function bindTranscriptHandlers() {
-  transcriptEl.querySelectorAll('button[data-run-steps-toggle]').forEach((button) => {
-    button.addEventListener('click', () => {
-      toggleRunSteps(button.getAttribute('data-run-steps-toggle'));
-    });
-  });
+  // Transcript rows are static render output; no delegated actions required.
 }
 
 function renderTranscript() {
@@ -431,39 +439,30 @@ function renderTranscript() {
     }
 
     const messageRun = msg.runId ? state.value.runs[msg.runId] : null;
+    const timelineHtml = renderRunTimeline(messageRun, msg.text || '');
+    const fallbackHtml = `<div class="bubble-assistant"><p>${renderContent(msg.text || '')}</p></div>`;
     return `
       <article class="message assistant">
         <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
         <div class="msg-content-wrap">
-          ${renderRunSteps(msg.runId, messageRun)}
-          <div class="bubble-assistant"><p>${renderContent(msg.text || '')}</p></div>
+          ${timelineHtml || fallbackHtml}
         </div>
       </article>
     `;
   });
 
   if (run && !run.done) {
-    if (run.text && run.text.trim()) {
-      chunks.push(`
-        <article class="message assistant">
-          <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
-          <div class="msg-content-wrap">
-            ${renderRunSteps(sessionRunId, run)}
-            <div class="bubble-assistant"><p>${renderContent(run.text)}</p></div>
-          </div>
-        </article>
-      `);
-    } else {
-      chunks.push(`
-        <article class="message assistant">
-          <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
-          <div class="msg-content-wrap">
-            ${renderRunSteps(sessionRunId, run)}
-            <div class="thinking-bubble"><div class="spinner"></div><span>Thinking...</span></div>
-          </div>
-        </article>
-      `);
-    }
+    const timelineHtml = renderRunTimeline(run, run.text || '');
+    const shouldShowThinking = !(run.text && run.text.trim());
+    chunks.push(`
+      <article class="message assistant">
+        <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
+        <div class="msg-content-wrap">
+          ${timelineHtml}
+          ${shouldShowThinking ? '<div class="thinking-bubble"><div class="spinner"></div><span>Thinking...</span></div>' : ''}
+        </div>
+      </article>
+    `);
   }
 
   if (!chunks.length) {
