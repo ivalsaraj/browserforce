@@ -70,6 +70,51 @@ function stepLabelForToolEvent(evt) {
   return '';
 }
 
+function humanizeToken(value) {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/[_./-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!normalized) return '';
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function stepStatusForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const type = String(payload.type || '').toLowerCase();
+  if (/error|failed|aborted/.test(type)) return 'failed';
+  if (/completed|final|done|finished|succeeded|success|end/.test(type)) return 'done';
+  return 'running';
+}
+
+function stepKindForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const itemType = String(payload?.item?.type || '').toLowerCase();
+  const eventType = String(payload?.type || '').toLowerCase();
+  if (/reason/.test(itemType) || /reason/.test(eventType)) return 'reasoning';
+  return 'tool';
+}
+
+function stepLabelForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const item = payload?.item && typeof payload.item === 'object' ? payload.item : {};
+  return firstString([
+    payload.title,
+    payload.message,
+    payload.text,
+    payload.status,
+    item.summary,
+    item.text,
+    item.message,
+    item.title,
+    item.name,
+    item.tool,
+    item.command,
+    item.type ? humanizeToken(item.type) : '',
+    payload.type ? humanizeToken(payload.type) : '',
+  ]) || 'Working...';
+}
+
 function upsertRun(state, runId, patch) {
   return {
     ...state.runs,
@@ -78,6 +123,37 @@ function upsertRun(state, runId, patch) {
       ...patch,
     },
   };
+}
+
+function normalizeStoredStep(step) {
+  if (!step || typeof step !== 'object') return null;
+  const label = trimStepLabel(step.label);
+  if (!label) return null;
+  return {
+    kind: step.kind || 'reasoning',
+    status: step.status || 'running',
+    label,
+  };
+}
+
+function hydrateRunsFromMessages(messages, sessionId, currentRuns) {
+  const hydrated = {};
+  for (const message of messages) {
+    const runId = typeof message?.runId === 'string' ? message.runId.trim() : '';
+    if (!runId) continue;
+    const steps = Array.isArray(message?.steps)
+      ? message.steps.map(normalizeStoredStep).filter(Boolean)
+      : [];
+    hydrated[runId] = {
+      ...(currentRuns?.[runId] || { runId, text: '', done: false, steps: [] }),
+      runId,
+      sessionId,
+      text: typeof message?.text === 'string' ? message.text : (currentRuns?.[runId]?.text || ''),
+      done: true,
+      steps: steps.length > 0 ? steps : (currentRuns?.[runId]?.steps || []),
+    };
+  }
+  return hydrated;
 }
 
 export function reduceState(state = initialState, action = {}) {
@@ -102,11 +178,17 @@ export function reduceState(state = initialState, action = {}) {
   }
 
   if (action.type === 'messages.loaded') {
+    const messages = Array.isArray(action.messages) ? action.messages : [];
+    const hydratedRuns = hydrateRunsFromMessages(messages, action.sessionId, state.runs);
     return {
       ...state,
       messagesBySession: {
         ...state.messagesBySession,
-        [action.sessionId]: Array.isArray(action.messages) ? action.messages : [],
+        [action.sessionId]: messages,
+      },
+      runs: {
+        ...state.runs,
+        ...hydratedRuns,
       },
     };
   }
@@ -210,6 +292,21 @@ export function applyEvent(state = initialState, evt = {}) {
       ? 'reasoning'
       : 'tool';
     const label = stepLabelForToolEvent(evt);
+    return {
+      ...state,
+      runs: upsertRun(state, evt.runId, {
+        sessionId: evt.sessionId,
+        done: false,
+        steps: pushStep(run, { kind, status, label }),
+      }),
+    };
+  }
+
+  if (evt.event === 'run.event') {
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [] };
+    const status = stepStatusForRunEvent(evt);
+    const kind = stepKindForRunEvent(evt);
+    const label = stepLabelForRunEvent(evt);
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {

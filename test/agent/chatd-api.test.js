@@ -211,6 +211,72 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
   }
 });
 
+test('POST /v1/runs persists run steps so reopened sessions can render them', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent, onExit }) => {
+      setTimeout(() => {
+        onEvent({ event: 'tool.started', runId, sessionId, payload: { tool: 'snapshot' } });
+      }, 5);
+      setTimeout(() => {
+        onEvent({
+          event: 'tool.delta',
+          runId,
+          sessionId,
+          payload: { type: 'reasoning', text: 'Inspecting active tab' },
+        });
+      }, 10);
+      setTimeout(() => {
+        onEvent({ event: 'tool.final', runId, sessionId, payload: { tool: 'snapshot' } });
+      }, 15);
+      setTimeout(() => {
+        onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'done' } });
+      }, 20);
+      setTimeout(() => onExit({ code: 0 }), 25);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Steps' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'hi' }),
+    });
+    assert.equal(runRes.status, 202);
+    const runBody = await runRes.json();
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const messagesBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    const assistant = (messagesBody.messages || []).at(-1);
+
+    assert.equal(assistant?.role, 'assistant');
+    assert.equal(assistant?.runId, runBody.runId);
+    assert.equal(Array.isArray(assistant?.steps), true);
+    assert.equal(assistant.steps.length >= 1, true);
+    assert.equal(assistant.steps.some((step) => /Inspecting active tab/.test(step?.label || '')), true);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('runExecutor synchronous failure does not leak abortable run', async () => {
   const storageRoot = mkdtempSync(join(tmpdir(), 'bf-chatd-run-fail-'));
   let attemptedRunId = null;
