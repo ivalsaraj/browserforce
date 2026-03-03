@@ -19,14 +19,21 @@ function trimStepLabel(label) {
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
 
-function pushStep(run, step) {
-  const steps = Array.isArray(run?.steps) ? run.steps.slice() : [];
-  const normalized = {
+function normalizeStep(step) {
+  if (!step || typeof step !== 'object') return null;
+  const label = trimStepLabel(step.label);
+  if (!label) return null;
+  return {
     kind: step.kind || 'reasoning',
     status: step.status || 'running',
-    label: trimStepLabel(step.label),
+    label,
   };
-  if (!normalized.label) return steps;
+}
+
+function pushStep(run, step) {
+  const steps = Array.isArray(run?.steps) ? run.steps.slice() : [];
+  const normalized = normalizeStep(step);
+  if (!normalized || !normalized.label) return steps;
   const last = steps[steps.length - 1];
   if (last && last.label === normalized.label && last.kind === normalized.kind && last.status === normalized.status) {
     return steps;
@@ -34,6 +41,92 @@ function pushStep(run, step) {
   steps.push(normalized);
   if (steps.length > 100) steps.shift();
   return steps;
+}
+
+function pushTimelineEntry(run, entry) {
+  const timeline = Array.isArray(run?.timeline) ? run.timeline.slice() : [];
+  if (!entry || typeof entry !== 'object') return timeline;
+
+  if (entry.type === 'text') {
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    if (!text) return timeline;
+    const last = timeline[timeline.length - 1];
+    if (last?.type === 'text') {
+      last.text = `${last.text || ''}${text}`;
+    } else {
+      timeline.push({ type: 'text', text });
+    }
+  } else if (entry.type === 'step') {
+    const normalized = normalizeStep(entry);
+    if (!normalized) return timeline;
+    const candidate = { type: 'step', ...normalized };
+    const last = timeline[timeline.length - 1];
+    if (
+      last
+      && last.type === 'step'
+      && last.label === candidate.label
+      && last.kind === candidate.kind
+      && last.status === candidate.status
+    ) {
+      return timeline;
+    }
+    timeline.push(candidate);
+  }
+
+  if (timeline.length > 200) timeline.shift();
+  return timeline;
+}
+
+function normalizeStoredTimelineEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.type === 'text') {
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    if (!text) return null;
+    return { type: 'text', text };
+  }
+  const step = normalizeStep(entry);
+  if (!step) return null;
+  return { type: 'step', ...step };
+}
+
+function fallbackTimelineFromMessage({ steps, text }) {
+  const timeline = [];
+  for (const step of steps) {
+    timeline.push({ type: 'step', ...step });
+  }
+  if (typeof text === 'string' && text) {
+    timeline.push({ type: 'text', text });
+  }
+  return timeline;
+}
+
+function hasTimelineText(timeline) {
+  return Array.isArray(timeline) && timeline.some((entry) => entry?.type === 'text' && entry.text);
+}
+
+function applyFinalTextToTimeline(run, finalText) {
+  let timeline = Array.isArray(run?.timeline) ? run.timeline.slice() : [];
+  const currentText = String(run?.text || '');
+  const resolved = String(finalText || '');
+  if (!resolved) return timeline;
+
+  if (!timeline.length || !hasTimelineText(timeline)) {
+    timeline = pushTimelineEntry({ timeline }, { type: 'text', text: resolved });
+    return timeline;
+  }
+
+  if (resolved === currentText) return timeline;
+
+  if (currentText && resolved.startsWith(currentText)) {
+    const suffix = resolved.slice(currentText.length);
+    if (suffix) {
+      timeline = pushTimelineEntry({ timeline }, { type: 'text', text: suffix });
+    }
+    return timeline;
+  }
+
+  timeline = pushTimelineEntry({ timeline }, { type: 'text', text: resolved });
+  return timeline;
 }
 
 function stepLabelForToolEvent(evt) {
@@ -149,14 +242,7 @@ function normalizeUsagePayload(payload) {
 }
 
 function normalizeStoredStep(step) {
-  if (!step || typeof step !== 'object') return null;
-  const label = trimStepLabel(step.label);
-  if (!label) return null;
-  return {
-    kind: step.kind || 'reasoning',
-    status: step.status || 'running',
-    label,
-  };
+  return normalizeStep(step);
 }
 
 function hydrateRunsFromMessages(messages, sessionId, currentRuns) {
@@ -167,13 +253,23 @@ function hydrateRunsFromMessages(messages, sessionId, currentRuns) {
     const steps = Array.isArray(message?.steps)
       ? message.steps.map(normalizeStoredStep).filter(Boolean)
       : [];
+    const timeline = Array.isArray(message?.timeline)
+      ? message.timeline.map(normalizeStoredTimelineEntry).filter(Boolean)
+      : [];
+    const resolvedText = typeof message?.text === 'string' ? message.text : (currentRuns?.[runId]?.text || '');
     hydrated[runId] = {
       ...(currentRuns?.[runId] || { runId, text: '', done: false, steps: [] }),
       runId,
       sessionId,
-      text: typeof message?.text === 'string' ? message.text : (currentRuns?.[runId]?.text || ''),
+      text: resolvedText,
       done: true,
       steps: steps.length > 0 ? steps : (currentRuns?.[runId]?.steps || []),
+      timeline: timeline.length > 0
+        ? timeline
+        : fallbackTimelineFromMessage({
+          steps: steps.length > 0 ? steps : (currentRuns?.[runId]?.steps || []),
+          text: resolvedText,
+        }),
     };
   }
   return hydrated;
@@ -243,30 +339,39 @@ export function applyEvent(state = initialState, evt = {}) {
         done: false,
         error: null,
         steps: [],
+        timeline: [],
       }),
     };
   }
 
   if (evt.event === 'chat.delta') {
-    const run = state.runs[evt.runId] || { text: '', done: false };
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     const delta = evt.payload?.delta || '';
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         text: `${run.text || ''}${delta}`,
+        timeline: pushTimelineEntry(run, { type: 'text', text: delta }),
       }),
     };
   }
 
   if (evt.event === 'chat.final') {
-    const finalText = evt.payload?.text || state.runs[evt.runId]?.text || '';
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
+    const finalText = evt.payload?.text || run.text || '';
+    const timeline = applyFinalTextToTimeline(run, finalText);
     const currentMessages = state.messagesBySession[evt.sessionId] || [];
     const hasStoredFinal = currentMessages.some(
       (message) => message.runId === evt.runId && message.role === 'assistant',
     );
-    const nextMessages = (!hasStoredFinal && finalText)
-      ? [...currentMessages, { role: 'assistant', text: finalText, runId: evt.runId }]
+    const nextMessages = (!hasStoredFinal && (finalText || timeline.length > 0))
+      ? [...currentMessages, {
+        role: 'assistant',
+        text: finalText,
+        runId: evt.runId,
+        timeline,
+      }]
       : currentMessages;
 
     return {
@@ -279,47 +384,52 @@ export function applyEvent(state = initialState, evt = {}) {
         sessionId: evt.sessionId,
         text: finalText,
         done: true,
+        timeline,
       }),
     };
   }
 
   if (evt.event === 'run.error') {
-    const run = state.runs[evt.runId] || { steps: [] };
+    const run = state.runs[evt.runId] || { steps: [], timeline: [] };
     const error = evt.payload?.error || 'Unknown error';
+    const step = {
+      kind: 'status',
+      status: 'failed',
+      label: `Failed: ${error}`,
+    };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         done: true,
         error,
-        steps: pushStep(run, {
-          kind: 'status',
-          status: 'failed',
-          label: `Failed: ${error}`,
-        }),
+        steps: pushStep(run, step),
+        timeline: pushTimelineEntry(run, { type: 'step', ...step }),
       }),
     };
   }
 
   if (evt.event === 'run.aborted') {
-    const run = state.runs[evt.runId] || { steps: [] };
+    const run = state.runs[evt.runId] || { steps: [], timeline: [] };
+    const step = {
+      kind: 'status',
+      status: 'aborted',
+      label: 'Stopped',
+    };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         done: true,
         aborted: true,
-        steps: pushStep(run, {
-          kind: 'status',
-          status: 'aborted',
-          label: 'Stopped',
-        }),
+        steps: pushStep(run, step),
+        timeline: pushTimelineEntry(run, { type: 'step', ...step }),
       }),
     };
   }
 
   if (evt.event === 'tool.started' || evt.event === 'tool.delta' || evt.event === 'tool.final') {
-    const run = state.runs[evt.runId] || { text: '', done: false, steps: [] };
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     const status = evt.event === 'tool.final'
       ? 'done'
       : 'running';
@@ -327,27 +437,31 @@ export function applyEvent(state = initialState, evt = {}) {
       ? 'reasoning'
       : 'tool';
     const label = stepLabelForToolEvent(evt);
+    const step = { kind, status, label };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         done: false,
-        steps: pushStep(run, { kind, status, label }),
+        steps: pushStep(run, step),
+        timeline: pushTimelineEntry(run, { type: 'step', ...step }),
       }),
     };
   }
 
   if (evt.event === 'run.event') {
-    const run = state.runs[evt.runId] || { text: '', done: false, steps: [] };
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     const status = stepStatusForRunEvent(evt);
     const kind = stepKindForRunEvent(evt);
     const label = stepLabelForRunEvent(evt);
+    const step = { kind, status, label };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         done: false,
-        steps: pushStep(run, { kind, status, label }),
+        steps: pushStep(run, step),
+        timeline: pushTimelineEntry(run, { type: 'step', ...step }),
       }),
     };
   }
@@ -355,7 +469,7 @@ export function applyEvent(state = initialState, evt = {}) {
   if (evt.event === 'run.usage') {
     const usage = normalizeUsagePayload(evt.payload);
     if (!usage) return state;
-    const run = state.runs[evt.runId] || { text: '', done: false, steps: [] };
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {

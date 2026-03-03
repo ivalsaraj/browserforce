@@ -57,10 +57,17 @@ test('session popover renders per-session timestamp metadata', () => {
   assert.match(js, /toLocaleString/);
 });
 
-test('in-flight thinking state keeps run steps visible above the thinking bubble', () => {
+test('in-flight thinking state keeps inline timeline visible above the thinking bubble', () => {
   assert.match(js, /if \(run && !run\.done\)/);
-  assert.match(js, /renderRunSteps\(sessionRunId, run\)/);
+  assert.match(js, /function renderRunTimeline\(run, fallbackText = ''\)/);
+  assert.match(js, /renderRunTimeline\(run, run\.text \|\| ''\)/);
   assert.match(js, /class="thinking-bubble"/);
+});
+
+test('assistant transcript prefers ordered run timeline over grouped run steps', () => {
+  assert.match(js, /function normalizeRunTimeline\(run, fallbackText = ''\)/);
+  assert.match(js, /if \(Array\.isArray\(run\.timeline\) && run\.timeline\.length > 0\)/);
+  assert.match(js, /const timelineHtml = renderRunTimeline\(messageRun, msg\.text \|\| ''\)/);
 });
 
 test('status row renders context usage from latestUsageBySession with fallback', () => {
