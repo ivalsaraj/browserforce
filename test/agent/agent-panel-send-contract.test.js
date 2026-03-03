@@ -33,3 +33,26 @@ test('enter key submits composer and shift+enter keeps newline', () => {
   assert.match(js, /event\.preventDefault\(\);/);
   assert.match(js, /chatFormEl\.requestSubmit\(\);/);
 });
+
+test('session labels fall back to session id when title is default', () => {
+  assert.match(js, /function isDefaultSessionTitle\(title\)/);
+  assert.match(js, /new session/);
+  assert.match(js, /new chat/);
+  assert.match(js, /function formatSessionDisplayName\(session\)/);
+  assert.match(js, /session\.sessionId/);
+});
+
+test('session popover supports inline rename and saves via session patch endpoint', () => {
+  assert.match(js, /data-session-edit-btn/);
+  assert.match(js, /data-session-edit-form/);
+  assert.match(js, /async function updateSessionTitle/);
+  assert.match(js, /\/v1\/sessions\/\$\{encodeURIComponent\(sessionId\)\}/);
+  assert.match(js, /method:\s*'PATCH'/);
+  assert.match(js, /JSON\.stringify\(\{\s*title\s*:\s*title/);
+});
+
+test('session popover renders per-session timestamp metadata', () => {
+  assert.match(js, /function formatSessionTimestamp/);
+  assert.match(js, /updatedAt|createdAt/);
+  assert.match(js, /toLocaleString/);
+});

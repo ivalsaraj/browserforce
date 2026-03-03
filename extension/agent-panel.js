@@ -12,6 +12,8 @@ const state = {
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
   currentRunBySession: {},
+  editingSessionId: null,
+  sessionTitleDrafts: {},
   expandedRunSteps: {},
   eventController: null,
   eventLoopToken: 0,
@@ -144,10 +146,48 @@ function formatModelLabel(model) {
   return model && String(model).trim() ? model : 'Default';
 }
 
+function isDefaultSessionTitle(title) {
+  const lowered = String(title || '').trim().toLowerCase();
+  return !lowered || lowered === 'new session' || lowered === 'new chat';
+}
+
+function formatShortSessionId(sessionId) {
+  const raw = String(sessionId || '').trim();
+  if (!raw) return 'unknown';
+  return raw.slice(0, 8);
+}
+
+function formatSessionDisplayName(session) {
+  if (!session) return 'Session';
+  const title = String(session.title || '').trim();
+  if (!isDefaultSessionTitle(title)) return title;
+  return session.sessionId || 'Session';
+}
+
+function formatSessionLabel(session) {
+  if (!session) return 'Session';
+  const title = String(session.title || '').trim();
+  if (!isDefaultSessionTitle(title)) return title;
+  return formatShortSessionId(session.sessionId);
+}
+
+function formatSessionTimestamp(session) {
+  const raw = session?.updatedAt || session?.createdAt;
+  if (!raw) return 'Unknown time';
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return 'Unknown time';
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 function renderSelectors() {
   const activeSession = getActiveSession();
   const modelLabel = `Model: ${formatModelLabel(activeSession?.model)}`;
-  const sessionLabel = activeSession?.title || 'Session';
+  const sessionLabel = formatSessionLabel(activeSession);
 
   if (modelLabelEl) {
     modelLabelEl.textContent = modelLabel;
@@ -206,18 +246,49 @@ function renderSessions() {
     return;
   }
 
-  const titleCounts = new Map();
-  for (const session of sessions) {
-    const title = (session.title || '').trim() || session.sessionId;
-    titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
-  }
-
   switchSessionListEl.innerHTML = sessions
     .map((session) => {
       const active = session.sessionId === state.value.activeSessionId ? 'active' : '';
-      const title = session.title || session.sessionId;
-      const suffix = (titleCounts.get(title) || 0) > 1 ? ` · ${session.sessionId.slice(0, 8)}` : '';
-      return `<li><button type="button" data-session-id="${session.sessionId}" class="popover-item ${active}"><span>${escapeHtml(`${title}${suffix}`)}</span></button></li>`;
+      const displayName = formatSessionDisplayName(session);
+      const timestamp = formatSessionTimestamp(session);
+      const shortId = formatShortSessionId(session.sessionId);
+      const editing = session.sessionId === state.editingSessionId;
+      const draftTitle = Object.prototype.hasOwnProperty.call(state.sessionTitleDrafts, session.sessionId)
+        ? state.sessionTitleDrafts[session.sessionId]
+        : (isDefaultSessionTitle(session.title) ? '' : String(session.title || '').trim());
+
+      if (editing) {
+        return `
+          <li class="session-row editing">
+            <form class="session-edit-form" data-session-edit-form="${escapeHtml(session.sessionId)}">
+              <input
+                type="text"
+                data-session-edit-input="${escapeHtml(session.sessionId)}"
+                value="${escapeHtml(draftTitle)}"
+                placeholder="Session name"
+                maxlength="180"
+              >
+              <button type="submit" class="session-edit-save">Save</button>
+              <button type="button" class="session-edit-cancel" data-session-edit-cancel="${escapeHtml(session.sessionId)}">Cancel</button>
+            </form>
+          </li>
+        `;
+      }
+
+      return `
+        <li class="session-row">
+          <button type="button" data-session-id="${escapeHtml(session.sessionId)}" class="popover-item session-item ${active}">
+            <span class="session-main">${escapeHtml(displayName)}</span>
+            <span class="session-meta">${escapeHtml(`${shortId} · ${timestamp}`)}</span>
+          </button>
+          <button type="button" class="session-edit-btn" data-session-edit-btn="${escapeHtml(session.sessionId)}" aria-label="Rename session" title="Rename session">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+            </svg>
+          </button>
+        </li>
+      `;
     })
     .join('');
 
@@ -225,6 +296,48 @@ function renderSessions() {
     button.addEventListener('click', async () => {
       await selectSession(button.dataset.sessionId);
       setPopover('none');
+    });
+  });
+
+  switchSessionListEl.querySelectorAll('button[data-session-edit-btn]').forEach((button) => {
+    button.addEventListener('click', () => {
+      beginSessionEdit(button.getAttribute('data-session-edit-btn') || '');
+    });
+  });
+
+  switchSessionListEl.querySelectorAll('form[data-session-edit-form]').forEach((form) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const sessionId = form.getAttribute('data-session-edit-form') || '';
+      const input = form.querySelector('input[data-session-edit-input]');
+      const title = input?.value || '';
+      try {
+        await updateSessionTitle(sessionId, title);
+      } catch (error) {
+        setStatus('error', error?.message || 'Unable to rename session');
+      }
+    });
+  });
+
+  switchSessionListEl.querySelectorAll('button[data-session-edit-cancel]').forEach((button) => {
+    button.addEventListener('click', () => {
+      cancelSessionEdit(button.getAttribute('data-session-edit-cancel') || '');
+    });
+  });
+
+  switchSessionListEl.querySelectorAll('input[data-session-edit-input]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const sessionId = input.getAttribute('data-session-edit-input') || '';
+      state.sessionTitleDrafts = {
+        ...(state.sessionTitleDrafts || {}),
+        [sessionId]: input.value,
+      };
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      const sessionId = input.getAttribute('data-session-edit-input') || '';
+      cancelSessionEdit(sessionId);
     });
   });
 }
@@ -653,6 +766,62 @@ async function createSession() {
   const created = await readJsonOrEmpty(res);
   await loadSessions(created.sessionId);
   await selectSession(created.sessionId);
+}
+
+function beginSessionEdit(sessionId) {
+  if (!sessionId) return;
+  const session = state.value.sessions.find((item) => item.sessionId === sessionId);
+  if (!session) return;
+
+  const current = isDefaultSessionTitle(session.title) ? '' : String(session.title || '').trim();
+  state.editingSessionId = sessionId;
+  state.sessionTitleDrafts = {
+    ...(state.sessionTitleDrafts || {}),
+    [sessionId]: current,
+  };
+  renderSessions();
+
+  window.requestAnimationFrame(() => {
+    const input = switchSessionListEl.querySelector(`input[data-session-edit-input="${sessionId}"]`);
+    if (!input) return;
+    input.focus();
+    input.select();
+  });
+}
+
+function cancelSessionEdit(sessionId) {
+  if (!sessionId) return;
+  state.editingSessionId = null;
+  const nextDrafts = { ...(state.sessionTitleDrafts || {}) };
+  delete nextDrafts[sessionId];
+  state.sessionTitleDrafts = nextDrafts;
+  renderSessions();
+}
+
+async function updateSessionTitle(sessionId, rawTitle) {
+  const title = String(rawTitle || '').trim();
+  if (!sessionId) return;
+  if (!title) {
+    throw new Error('Session name cannot be empty');
+  }
+
+  const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title: title }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Unable to rename session');
+  }
+
+  state.editingSessionId = null;
+  const nextDrafts = { ...(state.sessionTitleDrafts || {}) };
+  delete nextDrafts[sessionId];
+  state.sessionTitleDrafts = nextDrafts;
+
+  const activeSessionId = state.value.activeSessionId || sessionId;
+  await loadSessions(activeSessionId);
+  setStatus('ready', 'Ready');
 }
 
 async function updateActiveSessionModel(model) {
