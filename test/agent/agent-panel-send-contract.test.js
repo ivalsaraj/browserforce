@@ -70,9 +70,10 @@ test('assistant transcript prefers ordered run timeline over grouped run steps',
   assert.match(js, /const timelineHtml = renderRunTimeline\(messageRun, msg\.text \|\| ''\)/);
 });
 
-test('status row renders context usage from latestUsageBySession with fallback', () => {
+test('context usage renderer hides element when unavailable and only shows formatted values', () => {
   assert.match(js, /function renderContextUsageChip\(\)/);
   assert.match(js, /latestUsageBySession/);
-  assert.match(js, /Context:\s*unavailable/);
-  assert.match(js, /formatted \? `Context: \$\{formatted\}` : 'Context: unavailable'/);
+  assert.match(js, /contextUsageEl\.classList\.toggle\('hidden', !formatted\)/);
+  assert.match(js, /contextUsageEl\.textContent = `Context: \$\{formatted\}`/);
+  assert.doesNotMatch(js, /Context:\s*unavailable/);
 });

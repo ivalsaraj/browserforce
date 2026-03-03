@@ -108,7 +108,13 @@ function renderContextUsageChip() {
   const sessionId = state.value.activeSessionId;
   const usage = sessionId ? state.value.latestUsageBySession?.[sessionId] : null;
   const formatted = formatContextUsage(usage || {});
-  contextUsageEl.textContent = formatted ? `Context: ${formatted}` : 'Context: unavailable';
+  contextUsageEl.classList.toggle('hidden', !formatted);
+  if (!formatted) {
+    contextUsageEl.textContent = '';
+    contextUsageEl.removeAttribute('title');
+    return;
+  }
+  contextUsageEl.textContent = `Context: ${formatted}`;
   contextUsageEl.title = contextUsageEl.textContent;
 }
 
