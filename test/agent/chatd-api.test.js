@@ -298,7 +298,8 @@ test('POST /v1/runs includes active tab context in runExecutor prompt', async ()
     const prompt = seenRuns.at(-1)?.message || '';
     assert.match(prompt, /Active tab title: Pricing/);
     assert.match(prompt, /Active tab URL: https:\/\/example\.com\/pricing/);
-    assert.match(prompt, /If the request is ambiguous/i);
+    assert.match(prompt, /inspect the active page and answer directly/i);
+    assert.match(prompt, /do not ask for permission to inspect/i);
     assert.match(prompt, /User request:\s*summarize this page/i);
   } finally {
     await daemon.stop();

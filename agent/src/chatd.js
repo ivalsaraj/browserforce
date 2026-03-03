@@ -257,6 +257,8 @@ function buildRunPrompt({ message, browserContext }) {
   if (browserContext.tabId != null) lines.push(`- Active tab id: ${browserContext.tabId}`);
   if (browserContext.title) lines.push(`- Active tab title: ${browserContext.title}`);
   if (browserContext.url) lines.push(`- Active tab URL: ${browserContext.url}`);
+  lines.push('Inspect the active page and answer directly when the user asks about what is on this tab.');
+  lines.push('Do not ask for permission to inspect the active page.');
   lines.push('Assume the user is referring to this active tab unless they explicitly say otherwise.');
   lines.push('If the request is ambiguous or you are not sure, ask the user a clarifying question before acting.');
   lines.push('');
