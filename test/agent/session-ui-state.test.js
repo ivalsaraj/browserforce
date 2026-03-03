@@ -59,3 +59,32 @@ test('messages.loaded hydrates stored run metadata for reopened sessions', () =>
   assert.equal(next.runs.run_1?.steps?.length, 1);
   assert.equal(next.runs.run_1?.steps?.[0]?.label, 'Snapshot page');
 });
+
+test('session.metadata.loaded hydrates persisted codex usage for reopened session', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+    latestUsageBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'session.metadata.loaded',
+    sessionId: 's1',
+    session: {
+      sessionId: 's1',
+      providerState: {
+        codex: {
+          latestUsage: {
+            modelContextWindow: 258400,
+            totalTokens: 1120,
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(next.latestUsageBySession.s1.modelContextWindow, 258400);
+  assert.equal(next.latestUsageBySession.s1.totalTokens, 1120);
+});

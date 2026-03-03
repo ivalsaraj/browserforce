@@ -56,3 +56,16 @@ test('session popover renders per-session timestamp metadata', () => {
   assert.match(js, /updatedAt|createdAt/);
   assert.match(js, /toLocaleString/);
 });
+
+test('in-flight thinking state keeps run steps visible above the thinking bubble', () => {
+  assert.match(js, /if \(run && !run\.done\)/);
+  assert.match(js, /renderRunSteps\(sessionRunId, run\)/);
+  assert.match(js, /class="thinking-bubble"/);
+});
+
+test('status row renders context usage from latestUsageBySession with fallback', () => {
+  assert.match(js, /function renderContextUsageChip\(\)/);
+  assert.match(js, /latestUsageBySession/);
+  assert.match(js, /Context:\s*unavailable/);
+  assert.match(js, /formatted \? `Context: \$\{formatted\}` : 'Context: unavailable'/);
+});

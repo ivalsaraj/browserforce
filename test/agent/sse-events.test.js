@@ -7,6 +7,7 @@ const baseState = {
   activeSessionId: null,
   messagesBySession: {},
   runs: {},
+  latestUsageBySession: {},
 };
 
 test('chat.delta appends to in-flight run text', () => {
@@ -53,4 +54,56 @@ test('run.error appends a final failed step', () => {
   const last = s2.runs.r1.steps.at(-1);
   assert.equal(last.status, 'failed');
   assert.match(last.label, /boom/);
+});
+
+test('run.event is converted into a visible in-flight step', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'run.event',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      type: 'item.started',
+      item: {
+        type: 'reasoning',
+        summary: 'Planning skill invocation',
+      },
+    },
+  });
+  const last = s2.runs.r1.steps.at(-1);
+  assert.equal(last.status, 'running');
+  assert.equal(last.kind, 'reasoning');
+  assert.match(last.label, /Planning skill invocation/);
+});
+
+test('run.usage stores normalized usage for run and session', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'run.usage',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      totalTokens: 1120,
+      modelContextWindow: 258400,
+      cachedInputTokens: 700,
+    },
+  });
+
+  assert.equal(s2.runs.r1.usage.totalTokens, 1120);
+  assert.equal(s2.latestUsageBySession.s1.modelContextWindow, 258400);
+  assert.equal(s2.latestUsageBySession.s1.cachedInputTokens, 700);
+});
+
+test('run.usage accepts missing context window without crashing', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'run.usage',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      totalTokens: 1120,
+    },
+  });
+  assert.equal(s2.latestUsageBySession.s1.totalTokens, 1120);
+  assert.equal(Object.prototype.hasOwnProperty.call(s2.latestUsageBySession.s1, 'modelContextWindow'), false);
 });
