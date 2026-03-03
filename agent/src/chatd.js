@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -22,6 +23,7 @@ import {
 const BF_DIR = join(homedir(), '.browserforce');
 const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
+const MODEL_LIST_TIMEOUT_MS = 5000;
 
 function parseTopLevelTomlString(raw, key) {
   const lines = String(raw || '').split(/\r?\n/);
@@ -66,7 +68,138 @@ function dedupeModelRows(rows) {
   return out;
 }
 
-async function listModelPresets({ storageRoot } = {}) {
+function safeParseJsonLine(line) {
+  if (typeof line !== 'string') return null;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeModelCatalogRows(models) {
+  return (Array.isArray(models) ? models : [])
+    .filter((row) => row && typeof row === 'object' && !row.hidden)
+    .map((row) => {
+      const value = String(row.model || row.id || '').trim();
+      const label = String(row.displayName || row.model || row.id || '').trim();
+      if (!value || !isValidModelId(value)) return null;
+      return { value, label: label || value };
+    })
+    .filter(Boolean);
+}
+
+async function fetchCodexModelCatalog({
+  command = process.env.BF_CHATD_CODEX_COMMAND || 'codex',
+  timeoutMs = MODEL_LIST_TIMEOUT_MS,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, ['app-server', '--listen', 'stdio://'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    let settled = false;
+    let stderrText = '';
+    let stdoutBuffer = '';
+
+    const finish = (error, models = []) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill('SIGTERM'); } catch {}
+      if (error) reject(error);
+      else resolve(models);
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error('Timed out while loading Codex models'));
+    }, timeoutMs);
+
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderrText += String(chunk || '');
+    });
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdoutBuffer += String(chunk || '');
+      let idx = stdoutBuffer.indexOf('\n');
+      while (idx !== -1) {
+        const line = stdoutBuffer.slice(0, idx).trim();
+        stdoutBuffer = stdoutBuffer.slice(idx + 1);
+        idx = stdoutBuffer.indexOf('\n');
+        if (!line) continue;
+
+        const msg = safeParseJsonLine(line);
+        if (!msg || typeof msg !== 'object') continue;
+
+        if (msg.id === 1 && msg.error) {
+          finish(new Error(msg.error?.message || 'Codex initialize failed'));
+          return;
+        }
+        if (msg.id === 1 && msg.result) {
+          try {
+            child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'initialized' })}\n`);
+            child.stdin.write(`${JSON.stringify({
+              jsonrpc: '2.0',
+              id: 2,
+              method: 'model/list',
+              params: { includeHidden: false, limit: 100 },
+            })}\n`);
+          } catch {
+            finish(new Error('Failed to request Codex model list'));
+          }
+          continue;
+        }
+
+        if (msg.id === 2 && msg.error) {
+          finish(new Error(msg.error?.message || 'Codex model/list failed'));
+          return;
+        }
+
+        if (msg.id === 2 && msg.result) {
+          finish(null, msg.result?.data || []);
+        }
+      }
+    });
+
+    child.on('error', (error) => {
+      finish(error);
+    });
+
+    child.on('exit', (code) => {
+      if (settled) return;
+      finish(new Error(`Codex app-server exited before model/list (${code ?? 'unknown'}) ${stderrText}`.trim()));
+    });
+
+    try {
+      child.stdin.write(`${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          clientInfo: { name: 'browserforce-chatd', version: '1.0.0' },
+          capabilities: { experimentalApi: false },
+        },
+      })}\n`);
+    } catch {
+      finish(new Error('Failed to initialize Codex app-server'));
+    }
+  });
+}
+
+async function listModelPresets({ storageRoot, modelFetcher } = {}) {
+  let liveRows = [];
+  if (typeof modelFetcher === 'function') {
+    try {
+      const liveModels = await modelFetcher();
+      liveRows = normalizeModelCatalogRows(liveModels);
+    } catch {
+      liveRows = [];
+    }
+  }
+
   const configuredModel = await resolveConfiguredModel();
   const sessions = await listSessions({ limit: 200, storageRoot });
   const sessionRows = sessions
@@ -74,11 +207,11 @@ async function listModelPresets({ storageRoot } = {}) {
     .filter(Boolean)
     .map((value) => ({ value, label: value }));
 
-  const configuredRow = configuredModel
+  const configuredRow = configuredModel && !liveRows.some((row) => row.value === configuredModel)
     ? [{ value: configuredModel, label: `${configuredModel} (Configured)` }]
     : [];
 
-  return dedupeModelRows([...configuredRow, ...sessionRows]);
+  return dedupeModelRows([...liveRows, ...configuredRow, ...sessionRows]);
 }
 
 function nowIso() {
@@ -155,6 +288,10 @@ export async function startChatd(opts = {}) {
   const token = opts.token || process.env.BF_CHATD_TOKEN || randomBytes(32).toString('base64url');
   const chatdUrlPath = opts.chatdUrlPath || process.env.BF_CHATD_URL_PATH || CHATD_URL_PATH;
   const runExecutor = opts.runExecutor || createDefaultRunExecutor({ codexCwd: opts.codexCwd || process.cwd() });
+  const modelFetcher = opts.modelFetcher || (() => fetchCodexModelCatalog({
+    command: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
+    timeoutMs: Number(process.env.BF_CHATD_MODEL_LIST_TIMEOUT_MS || MODEL_LIST_TIMEOUT_MS),
+  }));
 
   let desiredPort = Number.isFinite(opts.port) ? Number(opts.port) : Number(process.env.BF_CHATD_PORT || 0);
   if (!Number.isInteger(desiredPort) || desiredPort < 0) desiredPort = 0;
@@ -238,7 +375,7 @@ export async function startChatd(opts = {}) {
       }
 
       if (url.pathname === '/v1/models' && req.method === 'GET') {
-        const models = await listModelPresets({ storageRoot });
+        const models = await listModelPresets({ storageRoot, modelFetcher });
         json(res, 200, { models });
         return;
       }

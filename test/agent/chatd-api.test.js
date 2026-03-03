@@ -30,10 +30,15 @@ test('GET /health returns daemon metadata', async () => {
   }
 });
 
-test('GET /v1/models returns default and configured model', async () => {
-  const previous = process.env.BF_CHATD_DEFAULT_MODEL;
-  process.env.BF_CHATD_DEFAULT_MODEL = 'gpt-5.3-codex';
-  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+test('GET /v1/models returns Codex live model list from model fetcher', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    modelFetcher: async () => ([
+      { model: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', isDefault: true, hidden: false },
+      { model: 'gpt-5.1-codex-mini', displayName: 'GPT-5.1 Codex Mini', isDefault: false, hidden: false },
+    ]),
+  });
   try {
     const res = await fetch(`${daemon.baseUrl}/v1/models`, {
       headers: { authorization: `Bearer ${daemon.token}` },
@@ -41,6 +46,29 @@ test('GET /v1/models returns default and configured model', async () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.deepEqual(body.models[0], { value: null, label: 'Default' });
+    assert.deepEqual(body.models[1], { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' });
+    assert.deepEqual(body.models[2], { value: 'gpt-5.1-codex-mini', label: 'GPT-5.1 Codex Mini' });
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('GET /v1/models falls back to configured model when model fetcher fails', async () => {
+  const previous = process.env.BF_CHATD_DEFAULT_MODEL;
+  process.env.BF_CHATD_DEFAULT_MODEL = 'gpt-5.3-codex';
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    modelFetcher: async () => {
+      throw new Error('model list unavailable');
+    },
+  });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/models`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
     assert.equal(body.models.some((row) => row.value === 'gpt-5.3-codex'), true);
   } finally {
     await daemon.stop();
