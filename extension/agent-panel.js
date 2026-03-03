@@ -14,6 +14,8 @@ const state = {
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
   currentRunBySession: {},
+  expandedTimelineEntries: {},
+  transcriptHandlersBound: false,
   initialTabAttachInFlight: false,
   initialTabAttachStarted: false,
   editingSessionId: null,
@@ -405,6 +407,13 @@ function renderRunTimeline(run, fallbackText = '') {
   const timeline = normalizeRunTimeline(run, fallbackText);
   if (!timeline.length) return '';
   const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
+  const getTimelineEntryKey = (entry, index) => {
+    const runId = String(run?.runId || 'run');
+    const kind = String(entry?.kind || '');
+    const status = String(entry?.status || '');
+    const label = String(entry?.label || '');
+    return `${runId}:${index}:${kind}:${status}:${label}`;
+  };
   return `
     <div class="run-timeline">
       ${timeline.map((entry, index) => {
@@ -415,10 +424,33 @@ function renderRunTimeline(run, fallbackText = '') {
     const icon = classifyRunStepIcon(entry);
     const isLatest = index === latestStepIndex;
     const shouldPulse = isLatest && status === 'running';
+    const details = Array.isArray(entry?.details) ? entry.details.filter(Boolean) : [];
+    const isCollapsible = details.length > 0;
     const classes = ['step-item', 'timeline-step', escapeHtml(status)];
     if (isLatest) classes.push('latest');
     if (shouldPulse) classes.push('pulse');
-    return `<div class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${renderInlineContent(entry.label || 'Step')}</span></div>`;
+    if (!isCollapsible) {
+      return `<div class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${renderInlineContent(entry.label || 'Step')}</span></div>`;
+    }
+    classes.push('collapsible');
+    const key = getTimelineEntryKey(entry, index);
+    const expanded = !!state.expandedTimelineEntries[key];
+    if (expanded) classes.push('expanded');
+    const detailsHtml = details
+      .map((line) => `<li>${renderInlineContent(line)}</li>`)
+      .join('');
+    return `
+      <div class="${classes.join(' ')}">
+        <span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span>
+        <div class="step-body">
+          <button type="button" class="step-toggle" data-step-key="${escapeHtml(key)}" aria-expanded="${expanded ? 'true' : 'false'}">
+            <span class="step-label">${renderInlineContent(entry.label || 'Step')}</span>
+            <span class="step-caret" aria-hidden="true"></span>
+          </button>
+          ${expanded ? `<ul class="step-details">${detailsHtml}</ul>` : ''}
+        </div>
+      </div>
+    `;
   }).join('')}
     </div>
   `;
@@ -429,10 +461,24 @@ function renderContent(value) {
 }
 
 function bindTranscriptHandlers() {
-  // Transcript rows are static render output; no delegated actions required.
+  if (state.transcriptHandlersBound) return;
+  transcriptEl.addEventListener('click', (event) => {
+    const toggleBtn = event.target.closest('button[data-step-key]');
+    if (!toggleBtn || !transcriptEl.contains(toggleBtn)) return;
+    const stepKey = toggleBtn.getAttribute('data-step-key');
+    if (!stepKey) return;
+    const nextExpanded = !state.expandedTimelineEntries[stepKey];
+    state.expandedTimelineEntries = {
+      ...state.expandedTimelineEntries,
+      [stepKey]: nextExpanded,
+    };
+    const scrollTop = transcriptEl.scrollTop;
+    renderTranscript({ preserveScrollTop: scrollTop });
+  });
+  state.transcriptHandlersBound = true;
 }
 
-function renderTranscript() {
+function renderTranscript({ preserveScrollTop = null } = {}) {
   const messages = getActiveMessages();
   const sessionId = state.value.activeSessionId;
   const sessionRunId = getSessionRunId(state.currentRunBySession, sessionId);
@@ -491,7 +537,11 @@ function renderTranscript() {
   }
 
   bindTranscriptHandlers();
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  if (Number.isFinite(preserveScrollTop)) {
+    transcriptEl.scrollTop = preserveScrollTop;
+  } else {
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
   syncStatusIndicator();
   syncComposerState();
 }
