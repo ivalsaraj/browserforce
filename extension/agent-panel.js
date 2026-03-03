@@ -3,7 +3,10 @@ import {
   assignSessionRunId,
   classifyRunStepIcon,
   clearSessionRunId,
+  formatContextUsage,
+  getLatestInFlightStepIndex,
   getSessionRunId,
+  renderInlineContent,
   shouldApplySessionSelection,
 } from './agent-panel-runtime.js';
 
@@ -28,6 +31,7 @@ const state = {
 const statusEl = document.getElementById('bf-agent-status');
 const statusIconEl = document.getElementById('bf-agent-status-icon');
 const statusTextEl = document.getElementById('bf-agent-status-text');
+const contextUsageEl = document.getElementById('bf-context-usage');
 const modelTriggerBtn = document.getElementById('bf-model-trigger');
 const modelLabelEl = document.getElementById('bf-model-label');
 const sessionTriggerBtn = document.getElementById('bf-session-trigger');
@@ -99,6 +103,15 @@ function syncStatusIndicator() {
   statusEl.title = text || 'Ready';
   statusTextEl.textContent = text || '';
   statusIconEl.textContent = '';
+}
+
+function renderContextUsageChip() {
+  if (!contextUsageEl) return;
+  const sessionId = state.value.activeSessionId;
+  const usage = sessionId ? state.value.latestUsageBySession?.[sessionId] : null;
+  const formatted = formatContextUsage(usage || {});
+  contextUsageEl.textContent = formatted ? `Context: ${formatted}` : 'Context: unavailable';
+  contextUsageEl.title = contextUsageEl.textContent;
 }
 
 function setStatus(kind, text) {
@@ -359,13 +372,19 @@ function renderRunSteps(runId, run) {
   if (!runId || !run || !Array.isArray(run.steps) || run.steps.length === 0) return '';
   const count = run.steps.length;
   const expanded = isRunStepsExpanded(runId);
+  const latestStepIndex = getLatestInFlightStepIndex(run);
 
   const items = run.steps
-    .map((step) => {
+    .map((step, index) => {
       const status = step?.status || 'running';
       const label = step?.label || 'Step';
       const icon = classifyRunStepIcon(step);
-      return `<li class="step-item ${escapeHtml(status)}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${escapeHtml(label)}</span></li>`;
+      const isLatest = index === latestStepIndex;
+      const shouldPulse = isLatest && status === 'running';
+      const classes = ['step-item', escapeHtml(status)];
+      if (isLatest) classes.push('latest');
+      if (shouldPulse) classes.push('pulse');
+      return `<li class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${renderInlineContent(label)}</span></li>`;
     })
     .join('');
 
@@ -383,7 +402,7 @@ function renderRunSteps(runId, run) {
 }
 
 function renderContent(value) {
-  return escapeHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>');
+  return renderInlineContent(value);
 }
 
 function bindTranscriptHandlers() {
@@ -438,7 +457,10 @@ function renderTranscript() {
       chunks.push(`
         <article class="message assistant">
           <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
-          <div class="thinking-bubble"><div class="spinner"></div><span>Thinking...</span></div>
+          <div class="msg-content-wrap">
+            ${renderRunSteps(sessionRunId, run)}
+            <div class="thinking-bubble"><div class="spinner"></div><span>Thinking...</span></div>
+          </div>
         </article>
       `);
     }
@@ -483,6 +505,7 @@ function renderPopovers() {
 
 function render() {
   renderSelectors();
+  renderContextUsageChip();
   renderModelList();
   renderSessions();
   renderTranscript();
@@ -741,11 +764,22 @@ async function loadMessages(sessionId) {
   dispatch({ type: 'messages.loaded', sessionId, messages: body.messages || [] });
 }
 
+async function loadSessionMetadata(sessionId) {
+  const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'GET',
+    headers: {},
+  });
+  await ensureOk(res, 'Failed to load session metadata');
+  const session = await readJsonOrEmpty(res);
+  dispatch({ type: 'session.metadata.loaded', sessionId, session });
+}
+
 async function selectSession(sessionId) {
   state.sessionSelectionToken += 1;
   const selectionToken = state.sessionSelectionToken;
   dispatch({ type: 'session.selected', sessionId });
   await loadMessages(sessionId);
+  await loadSessionMetadata(sessionId);
   if (!shouldApplySessionSelection({
     requestToken: selectionToken,
     latestRequestToken: state.sessionSelectionToken,

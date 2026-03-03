@@ -3,6 +3,7 @@ export const initialState = {
   activeSessionId: null,
   messagesBySession: {},
   runs: {},
+  latestUsageBySession: {},
 };
 
 function firstString(values) {
@@ -125,6 +126,28 @@ function upsertRun(state, runId, patch) {
   };
 }
 
+function normalizeUsageValue(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.round(parsed);
+}
+
+function normalizeUsagePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const normalized = {
+    modelContextWindow: normalizeUsageValue(payload.modelContextWindow),
+    totalTokens: normalizeUsageValue(payload.totalTokens),
+    inputTokens: normalizeUsageValue(payload.inputTokens),
+    cachedInputTokens: normalizeUsageValue(payload.cachedInputTokens),
+    outputTokens: normalizeUsageValue(payload.outputTokens),
+    reasoningOutputTokens: normalizeUsageValue(payload.reasoningOutputTokens),
+  };
+  for (const [key, value] of Object.entries(normalized)) {
+    if (value == null) delete normalized[key];
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
 function normalizeStoredStep(step) {
   if (!step || typeof step !== 'object') return null;
   const label = trimStepLabel(step.label);
@@ -189,6 +212,18 @@ export function reduceState(state = initialState, action = {}) {
       runs: {
         ...state.runs,
         ...hydratedRuns,
+      },
+    };
+  }
+
+  if (action.type === 'session.metadata.loaded') {
+    const usage = normalizeUsagePayload(action.session?.providerState?.codex?.latestUsage);
+    if (!usage || !action.sessionId) return state;
+    return {
+      ...state,
+      latestUsageBySession: {
+        ...(state.latestUsageBySession || {}),
+        [action.sessionId]: usage,
       },
     };
   }
@@ -314,6 +349,24 @@ export function applyEvent(state = initialState, evt = {}) {
         done: false,
         steps: pushStep(run, { kind, status, label }),
       }),
+    };
+  }
+
+  if (evt.event === 'run.usage') {
+    const usage = normalizeUsagePayload(evt.payload);
+    if (!usage) return state;
+    const run = state.runs[evt.runId] || { text: '', done: false, steps: [] };
+    return {
+      ...state,
+      runs: upsertRun(state, evt.runId, {
+        sessionId: evt.sessionId,
+        done: run.done || false,
+        usage,
+      }),
+      latestUsageBySession: {
+        ...(state.latestUsageBySession || {}),
+        [evt.sessionId]: usage,
+      },
     };
   }
 

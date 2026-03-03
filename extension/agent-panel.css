@@ -53,6 +53,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
+  flex-wrap: wrap;
 }
 
 .pill-btn {
@@ -126,6 +127,22 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.context-usage-chip {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 10px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 11px;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-dot {
@@ -378,6 +395,21 @@ body {
   white-space: pre-wrap;
 }
 
+.step-label strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.step-label code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  background: var(--sand);
+  color: var(--crail-dark);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+
 .run-step-icon {
   width: 13px;
   height: 13px;
@@ -385,6 +417,18 @@ body {
   margin-top: 1px;
   color: var(--text-subtle);
   position: relative;
+}
+
+.step-item.latest .step-label {
+  color: var(--text);
+}
+
+.step-item.latest .run-step-icon {
+  color: var(--crail);
+}
+
+.step-item.pulse .run-step-icon {
+  animation: step-pulse 1.2s ease-in-out infinite;
 }
 
 .run-step-icon::before,
@@ -866,5 +910,17 @@ body {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes step-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.65;
   }
 }

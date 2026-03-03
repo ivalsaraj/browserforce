@@ -17,6 +17,7 @@ test('agent panel has inline model and session selectors with popovers', () => {
   assert.match(html, /id="bf-tab-attach-banner"/);
   assert.match(html, /id="bf-tab-attach-text"/);
   assert.match(html, /id="bf-attach-current-tab"/);
+  assert.match(html, /id="bf-context-usage"/);
 });
 
 test('agent panel no longer renders title or persistent session sidebar', () => {
