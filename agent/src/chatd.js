@@ -300,15 +300,22 @@ function trimStepLabel(label) {
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
 
+function normalizeRunStep(step) {
+  if (!step || typeof step !== 'object') return null;
+  const label = trimStepLabel(step.label);
+  if (!label) return null;
+  return {
+    kind: String(step?.kind || '').trim() || 'reasoning',
+    status: String(step?.status || '').trim() || 'running',
+    label,
+  };
+}
+
 function pushRunStep(run, step) {
   if (!run) return;
   const steps = Array.isArray(run.steps) ? run.steps : [];
-  const normalized = {
-    kind: String(step?.kind || '').trim() || 'reasoning',
-    status: String(step?.status || '').trim() || 'running',
-    label: trimStepLabel(step?.label),
-  };
-  if (!normalized.label) return;
+  const normalized = normalizeRunStep(step);
+  if (!normalized || !normalized.label) return;
   const last = steps[steps.length - 1];
   if (last && last.label === normalized.label && last.kind === normalized.kind && last.status === normalized.status) {
     return;
@@ -316,6 +323,64 @@ function pushRunStep(run, step) {
   steps.push(normalized);
   if (steps.length > 100) steps.shift();
   run.steps = steps;
+}
+
+function pushRunTimelineEntry(run, entry) {
+  if (!run || !entry || typeof entry !== 'object') return;
+  const timeline = Array.isArray(run.timeline) ? run.timeline : [];
+  if (entry.type === 'text') {
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    if (!text) return;
+    const last = timeline[timeline.length - 1];
+    if (last?.type === 'text') {
+      last.text = `${last.text || ''}${text}`;
+    } else {
+      timeline.push({ type: 'text', text });
+    }
+  } else if (entry.type === 'step') {
+    const normalized = normalizeRunStep(entry);
+    if (!normalized) return;
+    const next = { type: 'step', ...normalized };
+    const last = timeline[timeline.length - 1];
+    if (
+      last
+      && last.type === 'step'
+      && last.label === next.label
+      && last.kind === next.kind
+      && last.status === next.status
+    ) {
+      return;
+    }
+    timeline.push(next);
+  } else {
+    return;
+  }
+  if (timeline.length > 200) timeline.shift();
+  run.timeline = timeline;
+}
+
+function runTimelineHasText(run) {
+  return Array.isArray(run?.timeline) && run.timeline.some((entry) => entry?.type === 'text' && entry.text);
+}
+
+function syncFinalTextToRunTimeline(run, finalText) {
+  if (!run) return;
+  const text = String(finalText || '');
+  if (!text) return;
+  const assistantBuffer = String(run.assistantBuffer || '');
+
+  if (!runTimelineHasText(run)) {
+    pushRunTimelineEntry(run, { type: 'text', text });
+    return;
+  }
+  if (assistantBuffer && text.startsWith(assistantBuffer)) {
+    const suffix = text.slice(assistantBuffer.length);
+    if (suffix) pushRunTimelineEntry(run, { type: 'text', text: suffix });
+    return;
+  }
+  if (text !== assistantBuffer) {
+    pushRunTimelineEntry(run, { type: 'text', text });
+  }
 }
 
 function stepLabelForToolEvent(evt) {
@@ -402,38 +467,46 @@ function trackRunStep(run, evt) {
   if (!run || !evt?.event) return;
 
   if (evt.event === 'tool.started' || evt.event === 'tool.delta' || evt.event === 'tool.final') {
-    pushRunStep(run, {
+    const step = {
       kind: evt.event === 'tool.delta' ? 'reasoning' : 'tool',
       status: evt.event === 'tool.final' ? 'done' : 'running',
       label: stepLabelForToolEvent(evt),
-    });
+    };
+    pushRunStep(run, step);
+    pushRunTimelineEntry(run, { type: 'step', ...step });
     return;
   }
 
   if (evt.event === 'run.event') {
-    pushRunStep(run, {
+    const step = {
       kind: stepKindForRunEvent(evt),
       status: stepStatusForRunEvent(evt),
       label: stepLabelForRunEvent(evt),
-    });
+    };
+    pushRunStep(run, step);
+    pushRunTimelineEntry(run, { type: 'step', ...step });
     return;
   }
 
   if (evt.event === 'run.error') {
-    pushRunStep(run, {
+    const step = {
       kind: 'status',
       status: 'failed',
       label: `Failed: ${evt.payload?.error || 'Unknown error'}`,
-    });
+    };
+    pushRunStep(run, step);
+    pushRunTimelineEntry(run, { type: 'step', ...step });
     return;
   }
 
   if (evt.event === 'run.aborted') {
-    pushRunStep(run, {
+    const step = {
       kind: 'status',
       status: 'aborted',
       label: 'Stopped',
-    });
+    };
+    pushRunStep(run, step);
+    pushRunTimelineEntry(run, { type: 'step', ...step });
   }
 }
 
@@ -551,12 +624,14 @@ export async function startChatd(opts = {}) {
     if (!run || run.status !== 'running' || run.finalSent) return;
     run.finalSent = true;
     run.status = 'done';
+    syncFinalTextToRunTimeline(run, finalText);
     await appendMessage({
       sessionId: run.sessionId,
       role: 'assistant',
       text: finalText,
       runId: run.runId,
       steps: run.steps,
+      timeline: run.timeline,
       storageRoot,
     });
     broadcast(buildEvent({ event: 'chat.final', runId: run.runId, sessionId: run.sessionId, payload: { text: finalText } }));
@@ -771,6 +846,7 @@ export async function startChatd(opts = {}) {
           abort: null,
           assistantBuffer: '',
           steps: [],
+          timeline: [],
           finalSent: false,
           queue: Promise.resolve(),
           lastError: null,
@@ -803,6 +879,7 @@ export async function startChatd(opts = {}) {
                   const delta = evt.payload?.delta || '';
                   if (delta) {
                     active.assistantBuffer += delta;
+                    pushRunTimelineEntry(active, { type: 'text', text: delta });
                     broadcast(buildEvent({ event: 'chat.delta', runId, sessionId, payload: { delta } }));
                   }
                   return;

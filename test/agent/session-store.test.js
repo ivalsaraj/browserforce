@@ -42,12 +42,20 @@ test('messages preserve optional run metadata used for transcript rehydration', 
     text: 'done',
     runId: 'run_123',
     steps: [{ kind: 'tool', status: 'done', label: 'Snapshot page' }],
+    timeline: [
+      { type: 'step', kind: 'tool', status: 'done', label: 'Snapshot page' },
+      { type: 'text', text: 'done' },
+    ],
     storageRoot,
   });
   const rows = await readMessages({ sessionId, limit: 20, storageRoot });
   const last = rows.at(-1);
   assert.equal(last.runId, 'run_123');
   assert.deepEqual(last.steps, [{ kind: 'tool', status: 'done', label: 'Snapshot page' }]);
+  assert.deepEqual(last.timeline, [
+    { type: 'step', kind: 'tool', status: 'done', label: 'Snapshot page' },
+    { type: 'text', text: 'done' },
+  ]);
 });
 
 test('rejects unsafe session ids', async () => {
