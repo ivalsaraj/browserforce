@@ -5,6 +5,12 @@ const RELAY_URL_DEFAULT = 'ws://127.0.0.1:19222/extension';
 const RECONNECT_DELAY_MS = 3000;
 const CDP_VERSION = '1.3';
 const RELAY_HTTP_DEFAULT = 'http://127.0.0.1:19222';
+const TAB_GROUP_COLOR = 'orange';
+const BADGE_COLORS = {
+  connected: '#C15F3C',
+  connecting: '#B1ADA1',
+  disconnected: '#B1ADA1',
+};
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -732,7 +738,7 @@ async function syncTabGroup() {
 
     // Always ensure group title/color are correct
     if (groupId !== undefined) {
-      await chrome.tabGroups.update(groupId, { title: 'browserforce', color: 'cyan' });
+      await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
     }
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);
@@ -756,13 +762,13 @@ function updateBadge() {
 
   if (connectionState === 'connected') {
     chrome.action.setBadgeText({ text: count > 0 ? String(count) : 'ON' });
-    chrome.action.setBadgeBackgroundColor({ color: '#4CAF50' });
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_COLORS.connected });
   } else if (connectionState === 'connecting') {
     chrome.action.setBadgeText({ text: '...' });
-    chrome.action.setBadgeBackgroundColor({ color: '#FF9800' });
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_COLORS.connecting });
   } else {
     chrome.action.setBadgeText({ text: '' });
-    chrome.action.setBadgeBackgroundColor({ color: '#9E9E9E' });
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_COLORS.disconnected });
   }
 }
 
