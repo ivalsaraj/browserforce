@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 const DEFAULT_STORAGE_ROOT = join(homedir(), '.browserforce', 'agent', 'sessions');
 const INDEX_FILE = 'index.json';
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const RUN_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const MODEL_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
 const indexWriteQueues = new Map();
 
@@ -33,6 +34,37 @@ function assertValidSessionId(sessionId, fnName) {
   if (!isValidSessionId(sessionId)) {
     throw new Error(`${fnName} requires a safe sessionId`);
   }
+}
+
+function normalizeRunId(runId) {
+  if (runId == null) return null;
+  const normalized = String(runId).trim();
+  if (!normalized) return null;
+  if (!RUN_ID_RE.test(normalized)) {
+    throw new Error('appendMessage requires a safe runId');
+  }
+  return normalized;
+}
+
+function normalizeStep(step) {
+  if (!step || typeof step !== 'object') return null;
+  const label = String(step.label || '').trim();
+  if (!label) return null;
+  const kind = String(step.kind || '').trim() || 'reasoning';
+  const status = String(step.status || '').trim() || 'running';
+  return {
+    kind,
+    status,
+    label: label.length > 160 ? `${label.slice(0, 157)}...` : label,
+  };
+}
+
+function normalizeSteps(steps) {
+  if (!Array.isArray(steps)) return [];
+  return steps
+    .map(normalizeStep)
+    .filter(Boolean)
+    .slice(-100);
 }
 
 async function ensureStorageRoot(storageRoot) {
@@ -169,7 +201,7 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
   });
 }
 
-export async function appendMessage({ sessionId, role, text, storageRoot } = {}) {
+export async function appendMessage({ sessionId, role, text, runId, steps, storageRoot } = {}) {
   assertValidSessionId(sessionId, 'appendMessage');
   if (!role) throw new Error('appendMessage requires role');
   if (typeof text !== 'string') throw new Error('appendMessage requires text');
@@ -185,6 +217,14 @@ export async function appendMessage({ sessionId, role, text, storageRoot } = {})
     text,
     createdAt: now,
   };
+  const safeRunId = normalizeRunId(runId);
+  if (safeRunId) {
+    entry.runId = safeRunId;
+  }
+  const normalizedSteps = normalizeSteps(steps);
+  if (normalizedSteps.length > 0) {
+    entry.steps = normalizedSteps;
+  }
 
   const logPath = messageLogPath(root, sessionId);
   await fs.appendFile(logPath, `${JSON.stringify(entry)}\n`, 'utf8');

@@ -248,6 +248,156 @@ function normalizeBrowserContext(raw) {
   return { tabId, title, url };
 }
 
+function firstString(values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function trimStepLabel(label) {
+  const text = String(label || '').trim();
+  if (!text) return '';
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+function pushRunStep(run, step) {
+  if (!run) return;
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+  const normalized = {
+    kind: String(step?.kind || '').trim() || 'reasoning',
+    status: String(step?.status || '').trim() || 'running',
+    label: trimStepLabel(step?.label),
+  };
+  if (!normalized.label) return;
+  const last = steps[steps.length - 1];
+  if (last && last.label === normalized.label && last.kind === normalized.kind && last.status === normalized.status) {
+    return;
+  }
+  steps.push(normalized);
+  if (steps.length > 100) steps.shift();
+  run.steps = steps;
+}
+
+function stepLabelForToolEvent(evt) {
+  const payload = evt?.payload || {};
+  if (evt.event === 'tool.started') {
+    return firstString([
+      payload.title,
+      payload.name,
+      payload.tool,
+      payload.toolName,
+      payload.command,
+    ]) || 'Tool call started';
+  }
+  if (evt.event === 'tool.final') {
+    return firstString([
+      payload.title,
+      payload.name,
+      payload.tool,
+      payload.toolName,
+      payload.command,
+    ]) || 'Tool call completed';
+  }
+  if (evt.event === 'tool.delta') {
+    return firstString([
+      payload.text,
+      payload.message,
+      payload.delta,
+      payload.command,
+      payload.name,
+      payload.tool,
+      payload.toolName,
+      payload.type === 'reasoning' ? 'Reasoning' : '',
+    ]) || 'Working...';
+  }
+  return '';
+}
+
+function humanizeToken(value) {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/[_./-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!normalized) return '';
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function stepStatusForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const type = String(payload.type || '').toLowerCase();
+  if (/error|failed|aborted/.test(type)) return 'failed';
+  if (/completed|final|done|finished|succeeded|success|end/.test(type)) return 'done';
+  return 'running';
+}
+
+function stepKindForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const itemType = String(payload?.item?.type || '').toLowerCase();
+  const eventType = String(payload?.type || '').toLowerCase();
+  if (/reason/.test(itemType) || /reason/.test(eventType)) return 'reasoning';
+  return 'tool';
+}
+
+function stepLabelForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const item = payload?.item && typeof payload.item === 'object' ? payload.item : {};
+  return firstString([
+    payload.title,
+    payload.message,
+    payload.text,
+    payload.status,
+    item.summary,
+    item.text,
+    item.message,
+    item.title,
+    item.name,
+    item.tool,
+    item.command,
+    item.type ? humanizeToken(item.type) : '',
+    payload.type ? humanizeToken(payload.type) : '',
+  ]) || 'Working...';
+}
+
+function trackRunStep(run, evt) {
+  if (!run || !evt?.event) return;
+
+  if (evt.event === 'tool.started' || evt.event === 'tool.delta' || evt.event === 'tool.final') {
+    pushRunStep(run, {
+      kind: evt.event === 'tool.delta' ? 'reasoning' : 'tool',
+      status: evt.event === 'tool.final' ? 'done' : 'running',
+      label: stepLabelForToolEvent(evt),
+    });
+    return;
+  }
+
+  if (evt.event === 'run.event') {
+    pushRunStep(run, {
+      kind: stepKindForRunEvent(evt),
+      status: stepStatusForRunEvent(evt),
+      label: stepLabelForRunEvent(evt),
+    });
+    return;
+  }
+
+  if (evt.event === 'run.error') {
+    pushRunStep(run, {
+      kind: 'status',
+      status: 'failed',
+      label: `Failed: ${evt.payload?.error || 'Unknown error'}`,
+    });
+    return;
+  }
+
+  if (evt.event === 'run.aborted') {
+    pushRunStep(run, {
+      kind: 'status',
+      status: 'aborted',
+      label: 'Stopped',
+    });
+  }
+}
+
 function buildRunPrompt({ message, browserContext }) {
   if (!browserContext) return message;
 
@@ -260,7 +410,10 @@ function buildRunPrompt({ message, browserContext }) {
   lines.push('Inspect the active page and answer directly when the user asks about what is on this tab.');
   lines.push('Do not ask for permission to inspect the active page.');
   lines.push('Assume the user is referring to this active tab unless they explicitly say otherwise.');
-  lines.push('If the request is ambiguous or you are not sure, ask the user a clarifying question before acting.');
+  lines.push('When the user asks what you can see, asks about this page/tab, or requests a summary of the current page, inspect the active page and answer directly.');
+  lines.push('Use BrowserForce browser tools to read the current page content before replying in these cases.');
+  lines.push('Do not ask for permission to inspect, and do not say you only have tab metadata.');
+  lines.push('If the request is still ambiguous after inspecting, ask one focused clarifying question.');
   lines.push('');
   lines.push(`User request: ${message}`);
   return lines.join('\n');
@@ -358,7 +511,14 @@ export async function startChatd(opts = {}) {
     if (!run || run.status !== 'running' || run.finalSent) return;
     run.finalSent = true;
     run.status = 'done';
-    await appendMessage({ sessionId: run.sessionId, role: 'assistant', text: finalText, storageRoot });
+    await appendMessage({
+      sessionId: run.sessionId,
+      role: 'assistant',
+      text: finalText,
+      runId: run.runId,
+      steps: run.steps,
+      storageRoot,
+    });
     broadcast(buildEvent({ event: 'chat.final', runId: run.runId, sessionId: run.sessionId, payload: { text: finalText } }));
     runs.delete(run.runId);
   }
@@ -555,6 +715,7 @@ export async function startChatd(opts = {}) {
           status: 'running',
           abort: null,
           assistantBuffer: '',
+          steps: [],
           finalSent: false,
           queue: Promise.resolve(),
         };
@@ -593,6 +754,7 @@ export async function startChatd(opts = {}) {
                 }
 
                 if (evt.event === 'run.error') {
+                  trackRunStep(active, evt);
                   failRun(active, evt.payload?.error || 'Run failed');
                   return;
                 }
@@ -601,6 +763,7 @@ export async function startChatd(opts = {}) {
                   return;
                 }
 
+                trackRunStep(active, evt);
                 broadcast(buildEvent({ event: evt.event, runId, sessionId, payload: evt.payload }));
               });
             },

@@ -34,6 +34,22 @@ test('messages are stored and loaded by sessionId', async () => {
   assert.equal(rows.at(-1).text, 'hello');
 });
 
+test('messages preserve optional run metadata used for transcript rehydration', async () => {
+  const { sessionId } = await createSession({ title: 'Runs', storageRoot });
+  await appendMessage({
+    sessionId,
+    role: 'assistant',
+    text: 'done',
+    runId: 'run_123',
+    steps: [{ kind: 'tool', status: 'done', label: 'Snapshot page' }],
+    storageRoot,
+  });
+  const rows = await readMessages({ sessionId, limit: 20, storageRoot });
+  const last = rows.at(-1);
+  assert.equal(last.runId, 'run_123');
+  assert.deepEqual(last.steps, [{ kind: 'tool', status: 'done', label: 'Snapshot page' }]);
+});
+
 test('rejects unsafe session ids', async () => {
   await assert.rejects(
     appendMessage({ sessionId: '../escape', role: 'user', text: 'x', storageRoot }),
