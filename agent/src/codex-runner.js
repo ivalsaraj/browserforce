@@ -86,13 +86,19 @@ function toCount(value) {
   return Math.round(parsed);
 }
 
+function toPositiveCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed);
+}
+
 function toUsagePayload(source = {}) {
   const inputTokens = toCount(source.input_tokens ?? source.inputTokens);
   const cachedInputTokens = toCount(source.cached_input_tokens ?? source.cachedInputTokens);
   const outputTokens = toCount(source.output_tokens ?? source.outputTokens);
   const reasoningOutputTokens = toCount(source.reasoning_output_tokens ?? source.reasoningOutputTokens);
   const explicitTotalTokens = toCount(source.total_tokens ?? source.totalTokens);
-  const modelContextWindow = toCount(source.model_context_window ?? source.modelContextWindow);
+  const modelContextWindow = toPositiveCount(source.model_context_window ?? source.modelContextWindow);
 
   const totalTokens = explicitTotalTokens != null
     ? explicitTotalTokens

@@ -174,6 +174,21 @@ test('maps codex token_count into run.usage event', () => {
   assert.equal(evt.payload.reasoningOutputTokens, 14);
 });
 
+test('treats zero model_context_window in token_count as missing context window', () => {
+  const line = JSON.stringify({
+    type: 'token_count',
+    info: {
+      total_token_usage: { input_tokens: 1000, cached_input_tokens: 700, output_tokens: 120, total_tokens: 1120 },
+      model_context_window: 0,
+      reasoning_output_tokens: 14,
+    },
+  });
+  const evt = normalizeCodexLine({ runId: 'r1', sessionId: 's1', line });
+  assert.equal(evt.event, 'run.usage');
+  assert.equal(evt.payload.modelContextWindow, null);
+  assert.equal(evt.payload.totalTokens, 1120);
+});
+
 test('maps codex thread.started provider session id event to run.provider_session', () => {
   const line = JSON.stringify({
     type: 'thread.started',
