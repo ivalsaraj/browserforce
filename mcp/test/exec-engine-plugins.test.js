@@ -36,6 +36,66 @@ function createSnapshotPage() {
   };
 }
 
+function createLabeledScreenshotPage() {
+  const screenshotCalls = [];
+  const screenshotBuffer = Buffer.from('jpeg-image-data');
+  const locatorCalls = [];
+  let a11yInjected = false;
+  return {
+    isClosed: () => false,
+    url: () => 'https://example.test',
+    title: async () => 'Snapshot Test',
+    screenshot: async (opts) => {
+      screenshotCalls.push(opts);
+      return screenshotBuffer;
+    },
+    locator: (selector) => {
+      locatorCalls.push(selector);
+      return {
+        first: () => ({
+          boundingBox: async () => ({ x: 20, y: 30, width: 160, height: 40 }),
+        }),
+      };
+    },
+    evaluate: async (_fn, arg) => {
+      if (typeof _fn === 'string') {
+        a11yInjected = true;
+        return undefined;
+      }
+      const source = String(_fn);
+      if (source.includes('typeof globalThis.__bf_a11y')) {
+        return a11yInjected;
+      }
+      if (source.includes('renderA11yLabels(entries)')) {
+        return Array.isArray(arg) ? arg.length : 0;
+      }
+      if (source.includes('__bf_labels__')) {
+        return undefined;
+      }
+      if (arg && typeof arg === 'object' && Array.isArray(arg.testIdAttrs)) {
+        return {};
+      }
+      if (typeof arg === 'number') {
+        return { width: 1200, height: 700 };
+      }
+      return {
+        role: 'WebArea',
+        name: '',
+        children: [
+          {
+            role: 'main',
+            name: '',
+            children: [{ role: 'button', name: 'Submit', children: [] }],
+          },
+        ],
+      };
+    },
+    getScreenshotCalls: () => screenshotCalls,
+    getScreenshotBuffer: () => screenshotBuffer,
+    getLocatorCalls: () => locatorCalls,
+  };
+}
+
 function createCleanHtmlPage() {
   return {
     isClosed: () => false,
@@ -434,6 +494,30 @@ test('buildExecContext exposes screenshot and content helpers in execute scope',
   assert.equal(typeof ctx.screenshotWithAccessibilityLabels, 'function');
   assert.equal(typeof ctx.cleanHTML, 'function');
   assert.equal(typeof ctx.pageMarkdown, 'function');
+});
+
+test('screenshotWithAccessibilityLabels runs snapshot and direct screenshot sequentially', async () => {
+  const page = createLabeledScreenshotPage();
+  const ctx = buildExecContext(page, { pages: () => [page] }, {}, {}, {});
+
+  const result = await ctx.screenshotWithAccessibilityLabels({ interactiveOnly: false });
+  const calls = page.getScreenshotCalls();
+  const locatorCalls = page.getLocatorCalls();
+
+  assert.equal(calls.length, 1);
+  assert.equal(locatorCalls.length, 2);
+  assert.deepEqual(calls[0], {
+    type: 'jpeg',
+    quality: 80,
+    scale: 'css',
+    clip: { x: 0, y: 0, width: 1200, height: 700 },
+  });
+  assert.equal(result._bf_type, 'labeled_screenshot');
+  assert.equal(result.screenshot.toString('base64'), page.getScreenshotBuffer().toString('base64'));
+  assert.ok(result.snapshot.includes('Page: Snapshot Test (https://example.test)'));
+  assert.ok(result.snapshot.includes('- button "Submit" [ref=e2]'));
+  assert.equal(result.labelCount, 2);
+  assert.ok(result.snapshot.includes('- main [ref=e1]'));
 });
 
 test('buildExecContext exposes callable ref and CDP helpers', async () => {
