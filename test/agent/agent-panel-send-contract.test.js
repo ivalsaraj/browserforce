@@ -130,3 +130,20 @@ test('stale run pointer is reconciled from loaded messages so stop does not stay
   assert.match(js, /state\.currentRunBySession = clearSessionRunId\(state\.currentRunBySession, sessionId, runId\)/);
   assert.match(js, /async function loadMessages\(sessionId\)[\s\S]*reconcileSessionRunState\(sessionId\)/);
 });
+
+test('init maps relay/chatd boot failures into explicit startup issues', () => {
+  assert.match(js, /function normalizeStartupError\(code = '', fallbackMessage = 'Unable to connect to BrowserForce Agent'\)/);
+  assert.match(js, /agent_not_running/);
+  assert.match(js, /extension_not_connected/);
+  assert.match(js, /relay_unreachable/);
+  assert.match(js, /browserforce agent start/);
+  assert.match(js, /browserforce serve/);
+  assert.match(js, /state\.startupIssue = normalizeStartupError\(error\?\.code, error\?\.message\)/);
+});
+
+test('chatd-url auth bootstrap reports specific failure codes before generic daemon unavailable', () => {
+  assert.match(js, /async function loadAuth\(\)/);
+  assert.match(js, /if \(res\.status === 404 && relayError\.includes\('chatd not running'\)\)/);
+  assert.match(js, /if \(res\.status === 503 && relayError\.includes\('extension not connected'\)\)/);
+  assert.match(js, /error\.code = 'daemon_unavailable'/);
+});

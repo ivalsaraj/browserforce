@@ -75,3 +75,12 @@ test('reasoning title rows use shimmer and enter transition treatment', () => {
   assert.match(css, /@keyframes reasoning-title-in/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
+
+test('agent panel includes visible startup error empty-state treatment', () => {
+  assert.match(panelJs, /state\.startupIssue = null/);
+  assert.match(panelJs, /class="empty-state error-state"/);
+  assert.match(panelJs, /empty-command/);
+  assert.match(css, /\.empty-state\.error-state/);
+  assert.match(css, /\.empty-icon\.error/);
+  assert.match(css, /\.empty-command code/);
+});
