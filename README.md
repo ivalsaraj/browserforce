@@ -392,6 +392,8 @@ Each `-e` command is one-shot — state does not persist between calls. For pers
 
 BrowserForce now includes a side-panel chat UI in the Chrome extension for resumable local sessions.
 
+Dedicated guide: [`docs/BROWSERFORCE_AGENT.md`](docs/BROWSERFORCE_AGENT.md) (setup, API, config files/env vars, and troubleshooting).
+
 - Open popup -> `Open BrowserForce Agent` to open the side panel.
 - Use the session list to switch between chats; transcripts hydrate per selected `sessionId`.
 - Session identity is explicit and persisted; there is no fixed/hardcoded chat session ID.
