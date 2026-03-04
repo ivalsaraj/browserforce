@@ -645,7 +645,7 @@ body {
 }
 
 .step-branch-preview.done .step-branch-call {
-  color: var(--ok);
+  color: var(--crail-dark);
 }
 
 .step-item.latest .step-branch-preview.running .step-branch-call {
@@ -755,6 +755,39 @@ body {
   position: relative;
 }
 
+.run-step-icon.icon-done {
+  width: 16px;
+  height: 16px;
+  margin-top: 0;
+  color: var(--crail);
+}
+
+.run-step-icon-done-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.run-step-icon-done-ring {
+  stroke: var(--crail);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 151;
+  stroke-dashoffset: 151;
+  animation: run-step-done-ring-draw 380ms ease-out forwards;
+}
+
+.run-step-icon-done-check {
+  stroke: var(--crail-dark);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 36;
+  stroke-dashoffset: 36;
+  animation: run-step-done-check-draw 260ms ease-out 220ms forwards;
+}
+
 .step-item.latest .step-label {
   color: var(--text);
 }
@@ -849,25 +882,6 @@ body {
   box-shadow: 0 4px 0 currentColor, 0 8px 0 currentColor;
 }
 
-.run-step-icon.icon-done::before {
-  top: 1px;
-  left: 1px;
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid currentColor;
-  border-radius: 999px;
-}
-
-.run-step-icon.icon-done::after {
-  top: 6px;
-  left: 4px;
-  width: 5px;
-  height: 3px;
-  border-left: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-}
-
 .run-step-icon.icon-failed::before {
   top: 1px;
   left: 1px;
@@ -886,7 +900,7 @@ body {
 }
 
 .step-item.done .run-step-icon {
-  color: var(--ok);
+  color: var(--crail);
 }
 
 .step-item.failed .run-step-icon {
@@ -1348,6 +1362,28 @@ body {
   }
 }
 
+@keyframes run-step-done-ring-draw {
+  from {
+    stroke-dashoffset: 151;
+    opacity: 0.35;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes run-step-done-check-draw {
+  from {
+    stroke-dashoffset: 36;
+    opacity: 0;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .step-item.pulse .run-step-icon,
   .step-label.title-label.shimmer-text,
@@ -1355,5 +1391,12 @@ body {
   .step-label.title-label.shimmer-text.title-transition-in,
   .inline-local-image:not([src]) {
     animation: none;
+  }
+
+  .run-step-icon-done-ring,
+  .run-step-icon-done-check {
+    animation: none;
+    stroke-dashoffset: 0;
+    opacity: 1;
   }
 }

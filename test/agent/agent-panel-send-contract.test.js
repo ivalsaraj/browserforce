@@ -150,6 +150,13 @@ test('tool-call timeline entries render collapsed toggle rows with click-to-expa
   assert.match(js, /closest\('button\[data-step-key\]'\)/);
 });
 
+test('done tool-call icon renders animated svg check markup', () => {
+  assert.match(js, /function renderRunStepIcon\(icon\)/);
+  assert.match(js, /run-step-icon-done-svg/);
+  assert.match(js, /run-step-icon-done-ring/);
+  assert.match(js, /run-step-icon-done-check/);
+});
+
 test('composer toggles single-line and multiline visual state from textarea height', () => {
   assert.match(js, /const composerBoxEl = chatFormEl\.querySelector\('\.composer-box'\)/);
   assert.match(js, /function syncComposerLayoutState\(\)/);

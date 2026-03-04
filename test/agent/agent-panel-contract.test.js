@@ -77,6 +77,15 @@ test('reasoning title rows use shimmer and enter transition treatment', () => {
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
 
+test('done step icon uses branded animated svg check treatment', () => {
+  assert.match(css, /\.run-step-icon\.icon-done/);
+  assert.match(css, /\.run-step-icon-done-svg/);
+  assert.match(css, /\.run-step-icon-done-ring/);
+  assert.match(css, /\.run-step-icon-done-check/);
+  assert.match(css, /@keyframes run-step-done-ring-draw/);
+  assert.match(css, /@keyframes run-step-done-check-draw/);
+});
+
 test('agent panel includes visible startup error empty-state treatment', () => {
   assert.match(panelJs, /state\.startupIssue = null/);
   assert.match(panelJs, /class="empty-state error-state"/);
@@ -91,6 +100,7 @@ test('collapsed execute helper preview has tree-like branch styling', () => {
   assert.match(css, /\.step-branch-node/);
   assert.match(css, /\.step-branch-node::before/);
   assert.match(css, /\.step-branch-call/);
+  assert.match(css, /\.step-branch-preview\.done \.step-branch-call[\s\S]*var\(--crail-dark\)/);
 });
 
 test('startup error card action buttons have dedicated styling hooks', () => {
