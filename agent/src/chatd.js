@@ -302,9 +302,15 @@ function normalizeUsageNumber(value) {
   return Math.round(parsed);
 }
 
+function normalizePositiveUsageNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed);
+}
+
 function normalizeUsagePayload(payload) {
   if (!payload || typeof payload !== 'object') return null;
-  const modelContextWindow = normalizeUsageNumber(payload.modelContextWindow);
+  const modelContextWindow = normalizePositiveUsageNumber(payload.modelContextWindow);
   const totalTokens = normalizeUsageNumber(payload.totalTokens);
   const inputTokens = normalizeUsageNumber(payload.inputTokens);
   const cachedInputTokens = normalizeUsageNumber(payload.cachedInputTokens);
