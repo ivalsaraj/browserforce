@@ -140,9 +140,7 @@ function renderContextUsageChip() {
   const sessionId = state.value.activeSessionId;
   const usage = sessionId ? state.value.latestUsageBySession?.[sessionId] : null;
   const formatted = formatContextUsage(usage || {});
-  const note = state.initialTabAttachInFlight
-    ? 'Attaching active tab...'
-    : (formatted ? `Context: ${formatted}` : '');
+  const note = formatted ? `Context: ${formatted}` : '';
   contextUsageEl.classList.toggle('hidden', !note);
   if (!note) {
     contextUsageEl.textContent = '';
@@ -215,6 +213,16 @@ function setTabAttachBannerState({
   tabAttachTextEl.textContent = text;
   attachCurrentTabBtn.disabled = busy || !canAttach;
   attachCurrentTabBtn.textContent = busy ? 'Attaching...' : 'Attach current tab';
+}
+
+function getTabAttachInProgressState() {
+  if (!state.initialTabAttachInFlight) return null;
+  return {
+    hidden: false,
+    text: 'Currently attaching active tab...',
+    canAttach: false,
+    busy: true,
+  };
 }
 
 function dispatch(action) {
@@ -895,6 +903,11 @@ async function getCurrentTabAttachmentState() {
 
 async function refreshTabAttachBanner() {
   const token = ++tabAttachRefreshToken;
+  const inProgressState = getTabAttachInProgressState();
+  if (inProgressState) {
+    setTabAttachBannerState(inProgressState);
+    return;
+  }
   const next = await getCurrentTabAttachmentState();
   if (token !== tabAttachRefreshToken) return;
   setTabAttachBannerState(next);
@@ -931,6 +944,7 @@ function startInitialTabAttach() {
   if (state.initialTabAttachStarted) return;
   state.initialTabAttachStarted = true;
   state.initialTabAttachInFlight = true;
+  setTabAttachBannerState(getTabAttachInProgressState() || undefined);
   renderContextUsageChip();
   window.setTimeout(() => {
     ensureCurrentTabAttached()
