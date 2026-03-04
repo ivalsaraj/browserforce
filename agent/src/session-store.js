@@ -103,6 +103,14 @@ function normalizeTimeline(timeline) {
     const normalized = String(label || '').trim().toLowerCase();
     return normalized === 'tool call started' || normalized === 'tool call completed' || normalized === 'working...';
   };
+  const shouldLegacyTerminalCollapseMatch = (existing, candidate) => {
+    if (!existing || existing.key) return false;
+    if (isTerminal(existing.status)) return false;
+    if (String(existing.kind || '') !== String(candidate.kind || '')) return false;
+    const wildcardLabel = candidate.kind === 'tool' && isGenericLabel(candidate.label);
+    if (wildcardLabel) return true;
+    return String(existing.label || '') === String(candidate.label || '');
+  };
   for (const item of timeline.slice(-200)) {
     const normalized = normalizeTimelineEntry(item);
     if (!normalized) continue;
@@ -138,14 +146,7 @@ function normalizeTimeline(timeline) {
       const index = (() => {
         for (let idx = entries.length - 1; idx >= 0; idx -= 1) {
           const entry = entries[idx];
-          if (
-            entry
-            && entry.type === 'step'
-            && !entry.key
-            && entry.kind === normalized.kind
-            && entry.label === normalized.label
-            && !isTerminal(entry.status)
-          ) {
+          if (entry?.type === 'step' && shouldLegacyTerminalCollapseMatch(entry, normalized)) {
             return idx;
           }
         }
@@ -156,6 +157,7 @@ function normalizeTimeline(timeline) {
         entries[index] = {
           ...existing,
           ...normalized,
+          label: (isGenericLabel(normalized.label) && existing?.label) ? existing.label : normalized.label,
           details: normalized.details && normalized.details.length > 0 ? normalized.details : existing?.details,
         };
         continue;

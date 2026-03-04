@@ -119,6 +119,35 @@ test('messages.loaded collapses legacy running+done duplicate tool entries on re
   assert.equal(timeline[1]?.type, 'text');
 });
 
+test('messages.loaded collapses generic terminal tool row onto latest running row', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'messages.loaded',
+    sessionId: 's1',
+    messages: [{
+      role: 'assistant',
+      text: 'Done',
+      runId: 'run_4',
+      timeline: [
+        { type: 'step', kind: 'tool', status: 'running', label: "/bin/zsh -lc 'cat skills/browserforce/SKILL.md'" },
+        { type: 'step', kind: 'tool', status: 'done', label: 'Tool call completed' },
+        { type: 'text', text: 'Done' },
+      ],
+    }],
+  });
+
+  const timeline = next.runs.run_4?.timeline || [];
+  assert.equal(timeline.length, 2);
+  assert.equal(timeline[0]?.status, 'done');
+  assert.match(timeline[0]?.label || '', /cat skills\/browserforce\/SKILL\.md/);
+});
+
 test('session.metadata.loaded hydrates persisted codex usage for reopened session', () => {
   const state = {
     activeSessionId: 's1',

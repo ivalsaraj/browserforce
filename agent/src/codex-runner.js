@@ -128,6 +128,15 @@ function messageTextFromContent(content) {
   return parts.join('');
 }
 
+function isFinalPhase(phase) {
+  return String(phase || '').trim().toLowerCase() === 'final_answer';
+}
+
+function isCommentaryPhase(phase) {
+  const normalized = String(phase || '').trim().toLowerCase();
+  return normalized === 'commentary' || normalized === 'analysis' || normalized === 'thinking';
+}
+
 function normalizeResponseItem({ runId, sessionId, payload }) {
   if (!payload || typeof payload !== 'object') return null;
   const itemType = String(payload.type || '').toLowerCase();
@@ -142,10 +151,13 @@ function normalizeResponseItem({ runId, sessionId, payload }) {
     ]);
     if (!text) return null;
     const phase = String(payload.phase || '').toLowerCase();
-    if (phase === 'final_answer') {
+    if (isFinalPhase(phase)) {
       return envelope({ event: 'chat.final', runId, sessionId, payload: { text, phase } });
     }
-    return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
+    if (isCommentaryPhase(phase)) {
+      return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
+    }
+    return envelope({ event: 'chat.delta', runId, sessionId, payload: { delta: text, phase } });
   }
 
   if (itemType === 'function_call' || itemType === 'custom_tool_call') {
@@ -235,10 +247,13 @@ function normalizeEventMsg({ runId, sessionId, payload }) {
     const text = firstString([payload.message, payload.text]);
     if (!text) return null;
     const phase = String(payload.phase || '').toLowerCase();
-    if (phase === 'final_answer') {
+    if (isFinalPhase(phase)) {
       return envelope({ event: 'chat.final', runId, sessionId, payload: { text, phase } });
     }
-    return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
+    if (isCommentaryPhase(phase)) {
+      return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
+    }
+    return envelope({ event: 'chat.delta', runId, sessionId, payload: { delta: text, phase } });
   }
 
   if (payloadType === 'task_started') {
