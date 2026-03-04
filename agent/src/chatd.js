@@ -323,6 +323,15 @@ function isGenericToolLabel(label) {
   return normalized === 'tool call started' || normalized === 'tool call completed' || normalized === 'working...';
 }
 
+function shouldLegacyTerminalCollapseMatch(existing, candidate) {
+  if (!existing || existing.key) return false;
+  if (isTerminalStepStatus(existing.status)) return false;
+  if (String(existing.kind || '') !== String(candidate.kind || '')) return false;
+  const wildcardLabel = candidate.kind === 'tool' && isGenericToolLabel(candidate.label);
+  if (wildcardLabel) return true;
+  return String(existing.label || '') === String(candidate.label || '');
+}
+
 function detailsEqual(a, b) {
   return JSON.stringify(a || []) === JSON.stringify(b || []);
 }
@@ -369,13 +378,7 @@ function pushRunStep(run, step) {
     let fallbackIndex = -1;
     for (let idx = steps.length - 1; idx >= 0; idx -= 1) {
       const entry = steps[idx];
-      if (
-        entry
-        && !entry.key
-        && String(entry.kind || '') === normalized.kind
-        && String(entry.label || '') === normalized.label
-        && !isTerminalStepStatus(entry.status)
-      ) {
+      if (shouldLegacyTerminalCollapseMatch(entry, normalized)) {
         fallbackIndex = idx;
         break;
       }
@@ -385,6 +388,7 @@ function pushRunStep(run, step) {
       steps[fallbackIndex] = {
         ...existing,
         ...normalized,
+        label: (isGenericToolLabel(normalized.label) && existing?.label) ? existing.label : normalized.label,
         details: normalized.details && normalized.details.length > 0 ? normalized.details : existing?.details,
       };
       run.steps = steps;
@@ -445,14 +449,7 @@ function pushRunTimelineEntry(run, entry) {
         let fallbackIndex = -1;
         for (let idx = timeline.length - 1; idx >= 0; idx -= 1) {
           const item = timeline[idx];
-          if (
-            item
-            && item.type === 'step'
-            && !item.key
-            && String(item.kind || '') === next.kind
-            && String(item.label || '') === next.label
-            && !isTerminalStepStatus(item.status)
-          ) {
+          if (item?.type === 'step' && shouldLegacyTerminalCollapseMatch(item, next)) {
             fallbackIndex = idx;
             break;
           }
@@ -462,6 +459,7 @@ function pushRunTimelineEntry(run, entry) {
           timeline[fallbackIndex] = {
             ...existing,
             ...next,
+            label: (isGenericToolLabel(next.label) && existing?.label) ? existing.label : next.label,
             details: next.details && next.details.length > 0 ? next.details : existing?.details,
           };
           run.timeline = timeline;

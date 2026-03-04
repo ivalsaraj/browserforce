@@ -184,3 +184,36 @@ test('maps event_msg agent_message commentary to chat.commentary and final_answe
   assert.equal(final.event, 'chat.final');
   assert.equal(final.payload.text, 'All done');
 });
+
+test('maps agent_message without phase to chat.delta so text is not dropped', () => {
+  const evt = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'agent_message',
+        message: 'Hello without phase',
+      },
+    }),
+  });
+  assert.equal(evt.event, 'chat.delta');
+  assert.equal(evt.payload.delta, 'Hello without phase');
+});
+
+test('maps response_item assistant message without phase to chat.delta', () => {
+  const evt = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Final text without phase' }],
+      },
+    }),
+  });
+  assert.equal(evt.event, 'chat.delta');
+  assert.equal(evt.payload.delta, 'Final text without phase');
+});

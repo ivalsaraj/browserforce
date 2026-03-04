@@ -103,6 +103,30 @@ test('tool.final replaces matching in-flight tool step at original timeline posi
   assert.equal((s5.runs.r1.steps || []).filter((item) => item?.key === 'tool:call_1').length, 1);
 });
 
+test('tool.final with generic label collapses latest in-flight non-keyed tool step', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'tool.started',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { tool: 'execute', command: "/bin/zsh -lc 'rg --files'" },
+  });
+  const s3 = applyEvent(s2, {
+    event: 'tool.final',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {},
+  });
+
+  const steps = s3.runs.r1.steps || [];
+  const timeline = s3.runs.r1.timeline || [];
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0]?.status, 'done');
+  assert.match(steps[0]?.label || '', /rg --files/);
+  assert.equal(timeline.filter((item) => item.type === 'step').length, 1);
+  assert.equal(timeline.find((item) => item.type === 'step')?.status, 'done');
+});
+
 test('chat.commentary text stays inline but does not pollute final assistant message text', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, {
