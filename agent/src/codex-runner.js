@@ -465,7 +465,16 @@ export function normalizeCodexLine({ runId, sessionId, line }) {
   return envelope({ event: 'run.event', runId, sessionId, payload: parsed });
 }
 
-export function buildCodexExecArgs({ prompt, model, args, resumeSessionId } = {}) {
+function normalizeReasoningEffort(reasoningEffort) {
+  const normalized = String(reasoningEffort || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') {
+    return normalized;
+  }
+  return null;
+}
+
+export function buildCodexExecArgs({ prompt, model, reasoningEffort, args, resumeSessionId } = {}) {
   if (Array.isArray(args) && args.length > 0) return args;
   const resumeId = typeof resumeSessionId === 'string' ? resumeSessionId.trim() : '';
   const resolved = resumeId
@@ -473,6 +482,10 @@ export function buildCodexExecArgs({ prompt, model, args, resumeSessionId } = {}
     : ['exec', '--json'];
   if (typeof model === 'string' && model.trim()) {
     resolved.push('--model', model.trim());
+  }
+  const normalizedReasoningEffort = normalizeReasoningEffort(reasoningEffort);
+  if (normalizedReasoningEffort) {
+    resolved.push('-c', `model_reasoning_effort="${normalizedReasoningEffort}"`);
   }
   resolved.push(prompt || '');
   return resolved;
@@ -489,10 +502,11 @@ export function startCodexRun({
   command,
   args,
   model,
+  reasoningEffort,
   resumeSessionId,
 } = {}) {
   const cmd = command || process.env.BF_CHATD_CODEX_COMMAND || 'codex';
-  const argv = buildCodexExecArgs({ prompt, model, args, resumeSessionId });
+  const argv = buildCodexExecArgs({ prompt, model, reasoningEffort, args, resumeSessionId });
 
   const child = spawn(cmd, argv, {
     cwd,

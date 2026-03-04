@@ -104,17 +104,29 @@ test('updateSession persists per-session model and title', async () => {
   const created = await createSession({ title: 'Before', storageRoot });
   const updated = await updateSession({
     sessionId: created.sessionId,
-    patch: { title: 'After', model: 'gpt-5' },
+    patch: { title: 'After', model: 'gpt-5', reasoningEffort: 'high' },
     storageRoot,
   });
 
   assert.equal(updated?.title, 'After');
   assert.equal(updated?.model, 'gpt-5');
+  assert.equal(updated?.reasoningEffort, 'high');
 
   const rows = await listSessions({ limit: 10, storageRoot });
   const row = rows.find((item) => item.sessionId === created.sessionId);
   assert.equal(row?.title, 'After');
   assert.equal(row?.model, 'gpt-5');
+  assert.equal(row?.reasoningEffort, 'high');
+});
+
+test('updateSession supports clearing reasoning effort back to config default', async () => {
+  const created = await createSession({ title: 'Before', storageRoot });
+  const updated = await updateSession({
+    sessionId: created.sessionId,
+    patch: { reasoningEffort: null },
+    storageRoot,
+  });
+  assert.equal(updated?.reasoningEffort, null);
 });
 
 test('updateSession persists codex provider session mapping', async () => {
