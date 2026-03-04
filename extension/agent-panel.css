@@ -266,6 +266,41 @@ body {
   word-break: break-word;
 }
 
+.empty-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.empty-action-btn {
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--crail);
+  background: var(--crail);
+  color: #fff;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.empty-action-btn.secondary {
+  background: var(--linen);
+  border-color: var(--line);
+  color: var(--crail-dark);
+}
+
+.empty-action-btn:hover {
+  background: var(--crail-dark);
+  border-color: var(--crail-dark);
+}
+
+.empty-action-btn.secondary:hover {
+  background: var(--sand);
+  border-color: var(--line);
+}
+
 .message {
   display: flex;
   flex-direction: column;
