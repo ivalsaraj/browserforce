@@ -111,8 +111,10 @@ function reconcileSessionRunState(sessionId) {
 }
 
 function autoResizeInput() {
+  const styles = window.getComputedStyle(chatInputEl);
+  const maxHeight = Number.parseFloat(styles.maxHeight) || 160;
   chatInputEl.style.height = 'auto';
-  chatInputEl.style.height = `${Math.min(chatInputEl.scrollHeight, 160)}px`;
+  chatInputEl.style.height = `${Math.min(chatInputEl.scrollHeight + 1, maxHeight)}px`;
 }
 
 function syncComposerLayoutState() {
