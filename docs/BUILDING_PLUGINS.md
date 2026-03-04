@@ -1,8 +1,39 @@
 # Building BrowserForce Plugins
 
-Adding a plugin extends BrowserForce for yourself or the whole community. Personal plugins stay in `~/.browserforce/plugins/` and are never shared unless you choose to. Public plugins get reviewed and merged into the repo, appearing in the plugin directory for anyone to install.
+Adding a plugin extends BrowserForce for yourself or the whole community. Personal plugins stay in `~/.browserforce/plugins/<name>/` and are never shared unless you choose to. Public plugins get reviewed and merged into the repo, appearing in the plugin directory for anyone to install.
+
+Repo plugin layout is:
+- Official: `plugins/official/<name>/SKILL.md`
+- Community: `plugins/community/<name>/SKILL.md`
+
+No migration to `plugin/skills/<name>/` is required.
 
 This guide walks through everything: building, testing, and submitting a plugin.
+
+---
+
+## Internal Plugins (Private Workflow)
+
+If your plugin is for internal QA or company-only automation, keep it local:
+
+- Create it at `~/.browserforce/plugins/<plugin-name>/`.
+- Keep plugin folders flat under `~/.browserforce/plugins/` (the loader scans one level deep).
+- Do not place internal plugins in this repo unless you intend to publish them.
+
+Because `~/.browserforce/plugins` is outside this repository, you do not need to change this repo's `.gitignore` for internal plugins.
+
+If you want version history, track internal plugins in a private Git repository:
+
+- Option 1: Run `git init` directly inside `~/.browserforce/plugins/<plugin-name>/` and push to a private remote.
+- Option 2: Keep plugins in a separate private repo directory and copy/sync them into `~/.browserforce/plugins/<plugin-name>/` when developing.
+
+Recommended development flow:
+
+1. Build and iterate in `~/.browserforce/plugins/<plugin-name>/` for fast local testing.
+2. Validate behavior end to end until checks pass.
+3. Promote the plugin to the BrowserForce repo at `plugins/community/<plugin-name>/` only when it is ready to publish.
+
+This keeps internal plugins private while still making them reproducible for your team.
 
 ---
 
@@ -18,7 +49,7 @@ touch ~/.browserforce/plugins/highlight/SKILL.md
 
 ### Step 2 — Write the export
 
-Start with just `name` and one helper. Here is a complete `highlight.js` plugin that visually highlights any element on the page:
+Start with just `name` and one helper. Here is a complete `highlight` plugin that visually highlights any element on the page:
 
 ```js
 // ~/.browserforce/plugins/highlight/index.js
@@ -108,11 +139,11 @@ await highlight(page, '.price', '#f0f', 0);       // permanent magenta on price
 
 ### Step 5 — Write a SKILL.md companion
 
-See [Section 4](#4-the-skillmd-companion) for what to include.
+See [Section 3](#3-the-skillmd-companion) for what to include.
 
 ### Step 6 — Submit as a PR (optional)
 
-See [Section 8](#8-submitting-a-plugin-pr-checklist) for the full checklist.
+See [Section 7](#7-submitting-a-plugin-pr-checklist) for the full checklist.
 
 ---
 
@@ -210,38 +241,68 @@ export default {
 
 ## 3. The SKILL.md Companion
 
-Every plugin should ship a `SKILL.md` alongside the `.js` file. This file is read by the AI agent at startup. It tells the agent when to use the plugin, when not to, and how to call it correctly. Without it, the agent has no context for the plugin's capabilities.
+Every plugin should ship a `SKILL.md` alongside `index.js`. BrowserForce now uses a metadata-first prompt model:
 
-**Required sections:**
+- Default prompt includes plugin metadata only.
+- Agents call `pluginCatalog()` to discover plugins and helpers.
+- Agents call `pluginHelp(name, section?)` when full or sectioned detail is needed.
+
+### Metadata source of truth
+
+For plugin prompt metadata, `SKILL.md` frontmatter is the source of truth. Do not treat `index.js` fields as metadata authority for prompt docs.
+
+### Frontmatter contract
+
+Frontmatter is expected at the top of `SKILL.md`:
 
 ```markdown
-# highlight plugin
-
-Use `highlight(page, selector, color, duration)` / `clearHighlights(page)` when you need to:
-- Visually mark an element for debugging or demonstration
-- Show a user which element the agent is about to interact with
-- Annotate a screenshot for reporting
-
-## When NOT to use this
-- Don't highlight before taking a screenshot if you need the original unmodified view
-- Don't leave permanent highlights (duration: 0) unless intentional — they persist across agent turns
-
-## Parameters
-- `selector` — any valid CSS selector
-- `color` — any CSS color value: `'#f90'`, `'red'`, `'rgba(255,0,0,0.3)'`
-- `duration` — milliseconds to hold the highlight; `0` = permanent until `clearHighlights()`
-
-## Example
-\`\`\`js
-// Highlight the submit button in orange for 3 seconds
-const { found } = await highlight(page, 'button[type="submit"]', '#f90', 3000);
-if (!found) return 'Submit button not found on this page';
-\`\`\`
-
-## Common mistakes
-- Calling `highlight` on a selector that matches zero elements — always check `result.found`
-- Forgetting to `clearHighlights()` before capturing a clean screenshot
+---
+name: highlight
+description: Visual outlining helpers for matching elements.
+when_to_use: ["Debugging selectors", "Previewing click targets"]
+helpers: ["highlight", "clearHighlights"]
+tools: []
+---
 ```
+
+Supported canonical keys:
+
+| Key | Status | Type | Notes |
+| --- | --- | --- | --- |
+| `name` | Required | string | Plugin metadata name shown in catalog. |
+| `description` | Required | string | Short summary shown in metadata-only prompt and `pluginCatalog()`. |
+| `helpers` | Optional | JSON array string | Helper names this plugin exposes. |
+| `tools` | Optional | JSON array string | MCP tool names this plugin exposes. |
+| `when_to_use` | Optional | JSON array string or block scalar | Guidance for agent selection behavior. |
+
+Notes:
+- Unknown frontmatter keys are ignored.
+- Keep arrays as JSON (`["item-a", "item-b"]`) for reliable parsing.
+- Block scalars (`|` or `>`) are supported for multiline text fields.
+
+### SKILL body guidance (on-demand help)
+
+The markdown body after frontmatter powers `pluginHelp(...)`. Keep it structured with `##` sections so section lookup is useful.
+
+Recommended sections:
+
+```markdown
+## when to use
+## when not to use
+## parameters
+## examples
+## common mistakes
+```
+
+### Legacy SKILL migration (no frontmatter)
+
+Legacy `SKILL.md` files without frontmatter still load, but they only provide on-demand body help and no structured metadata.
+
+Migration steps:
+1. Add a top `--- ... ---` frontmatter block with `name` and `description`.
+2. Add optional canonical keys (`helpers`, `tools`, `when_to_use`) as needed.
+3. Keep existing markdown body content below frontmatter.
+4. Restart MCP after install/update to refresh loaded metadata and help text.
 
 ---
 
@@ -433,7 +494,7 @@ const { found } = await highlight(page, 'h1', '#f90');
 ## Full Plugin Shape Reference
 
 ```js
-// ~/.browserforce/plugins/my-plugin.js
+// ~/.browserforce/plugins/my-plugin/index.js
 
 export default {
   // Required. Unique across all plugins.

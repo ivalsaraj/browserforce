@@ -2,12 +2,12 @@
 
 Extend BrowserForce with local JS files — no framework, no build step, no registry.
 
-Plugins live in `~/.browserforce/plugins/`. Each file exports a plain object. The MCP server loads them at startup and merges their helpers, tools, and hooks into the runtime.
+Plugins live in `~/.browserforce/plugins/<name>/`. Each plugin folder exports a plain object from `index.js`. The MCP server loads plugins at startup and merges their helpers, tools, and hooks into the runtime.
 
 **Minimal plugin — 10 lines:**
 
 ```js
-// ~/.browserforce/plugins/hello.js
+// ~/.browserforce/plugins/hello/index.js
 export default {
   name: 'hello',
   helpers: {
@@ -25,11 +25,29 @@ After installing, `greet(page)` is available as a global inside every `execute()
 
 ## How to Install a Plugin
 
-1. Drop a `.js` file in `~/.browserforce/plugins/`
-2. Restart the MCP server
+1. Drop a plugin folder at `~/.browserforce/plugins/<name>/` with at least `index.js`
+2. Restart the MCP server after every plugin install or update
 3. Done — helpers are injected, tools are registered
 
 No config changes. No manifest edits. The directory is auto-scanned on startup.
+
+### Internal and private plugins
+
+For company-internal plugins, use local folders under `~/.browserforce/plugins/<name>/`.
+
+- No `.gitignore` update is needed in this repo (that directory is outside repo git tracking).
+- Keep plugin folders one level deep (for example `~/.browserforce/plugins/ufe-qa/`).
+- If you need collaboration/versioning, track the plugin in a private Git repo and push there instead of the public BrowserForce repo.
+- Recommended flow: develop and test locally in `~/.browserforce/plugins/<name>/`, then move to `plugins/community/<name>/` in BrowserForce when all checks pass and you want to publish.
+
+### Prompt behavior (metadata-first)
+
+`SKILL.md` is no longer fully appended to the default `execute()` prompt. BrowserForce provides metadata first, then on-demand help:
+
+- `pluginCatalog()` returns installed plugin metadata (`name`, `description`, `helpers`, `sections`)
+- `pluginHelp(name, section?)` returns full `SKILL.md` text or just one section when requested
+
+Use `pluginCatalog()` before calling `pluginHelp(...)`; do not fetch every plugin's full help by default.
 
 ---
 
@@ -335,7 +353,7 @@ A single JSON file at `plugins/registry.json` in the repo is the source of truth
 | `audience`     | `"developer"`, `"headless"`, or both                                |
 | `capabilities` | Which plugin surfaces it uses: `helpers`, `tools`, `hooks`, `setup` |
 | `file`         | Path to `index.js` in the repo — fetched on install                 |
-| `skill`        | Path to `SKILL.md` — fetched on install, injected into AI context   |
+| `skill`        | Path to `SKILL.md` — fetched on install; metadata is exposed by default, full text via `pluginHelp(...)` |
 
 
 ---
@@ -354,7 +372,7 @@ Chrome extensions have no filesystem access. The relay runs at `127.0.0.1:19222`
 
 ```
 Extension UI
-    │  POST /plugins/install { name: "network" }
+    │  POST /v1/plugins/install { name: "network" }
     ▼
 Relay (127.0.0.1:19222)
     │  fetches index.js + SKILL.md from GitHub
@@ -368,9 +386,11 @@ Relay (127.0.0.1:19222)
 
 | Method   | Path               | Action                                       |
 | -------- | ------------------ | -------------------------------------------- |
-| `GET`    | `/plugins`         | List installed plugins + their metadata      |
-| `POST`   | `/plugins/install` | Download plugin from registry, write to disk |
-| `DELETE` | `/plugins/:name`   | Remove plugin file from disk                 |
+| `GET`    | `/v1/plugins`         | List installed plugins + their metadata      |
+| `POST`   | `/v1/plugins/install` | Download plugin from registry, write to disk |
+| `DELETE` | `/v1/plugins/:name`   | Remove plugin file from disk                 |
+
+Legacy non-versioned paths (`/plugins*`) remain accepted for backward compatibility.
 
 
 Plugins take effect on next MCP server restart (the extension shows a restart prompt).
@@ -398,7 +418,7 @@ browserforce plugin remove network
 browserforce plugin status
 ```
 
-`plugin install` fetches the JS directly from GitHub's raw content URL and writes it to `~/.browserforce/plugins/`. Same outcome as the extension UI, different path.
+`plugin install` fetches `index.js` (and `SKILL.md` when available) from GitHub and writes them to `~/.browserforce/plugins/<name>/`. Same outcome as the extension UI, different path.
 
 ---
 
@@ -427,6 +447,7 @@ plugins/
 ```
 
 Official plugins are maintained by the BrowserForce team. Community plugins are reviewed for safety (no `eval`, no network calls to external servers, no credential exfiltration) before merge.
+This layout is current and supported: `plugins/official/<name>/SKILL.md` and `plugins/community/<name>/SKILL.md`. No migration to `plugin/skills/<name>/` is required.
 
 ---
 
@@ -436,7 +457,7 @@ Plugins are arbitrary JS running in Node.js — they have full filesystem and ne
 
 - **Official plugins**: reviewed and maintained by BrowserForce
 - **Community plugins**: reviewed before merge (same bar as official)
-- **Local plugins**: `~/.browserforce/plugins/*.js` — user's own files, not from the registry, fully trusted
+- **Local plugins**: `~/.browserforce/plugins/<name>/` — user's own plugin folders, not from the registry, fully trusted
 
 The relay install endpoint only fetches from the known GitHub repo URL — no arbitrary URLs. The extension UI only shows registry plugins. Users who want to run untrusted code drop files manually into the plugins folder.
 
