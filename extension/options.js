@@ -148,9 +148,12 @@ async function pollOnce() {
 }
 
 async function fetchJson(pathname) {
+  const extensionId = chrome?.runtime?.id;
+  const headers = extensionId ? { 'x-browserforce-extension-id': extensionId } : {};
   const response = await fetch(`${state.relayHttpBase}${pathname}`, {
     method: 'GET',
     cache: 'no-store',
+    headers,
   });
 
   if (!response.ok) {
