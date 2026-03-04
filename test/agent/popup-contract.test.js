@@ -23,9 +23,12 @@ test('open agent action opens side panel and closes popup', () => {
 
 test('auto mode uses bottom note instead of dotted popup border', () => {
   assert.match(html, /id="bf-auto-mode-note"/);
+  assert.match(html, /class="auto-mode-note-text"/);
   assert.match(html, /NOTE:\s*Auto mode is on\./);
   assert.match(popupCss, /\.auto-mode-note\s*\{/);
-  assert.match(popupCss, /white-space:\s*nowrap/);
+  assert.match(popupCss, /\.auto-mode-note-text\s*\{/);
+  assert.match(popupCss, /\.auto-mode-note-text[\s\S]*max-width:\s*100%/);
+  assert.match(popupCss, /\.auto-mode-note-text[\s\S]*white-space:\s*nowrap/);
   assert.match(popupCss, /margin:\s*10px\s+-16px\s+-16px/);
   assert.match(popupCss, /\.auto-mode-note::before[\s\S]*background:\s*var\(--bf-danger-fg\)/);
   assert.match(popupCss, /\.auto-mode-note::after[\s\S]*background:\s*var\(--bf-accent\)/);

@@ -43,6 +43,7 @@ body {
 .bf-popup {
   width: 320px;
   padding: 16px;
+  overflow-x: hidden;
 }
 
 header {
@@ -414,11 +415,16 @@ textarea:focus {
   font-size: 11px;
   color: var(--bf-text-subtle);
   line-height: 1.2;
+  position: relative;
+  background: var(--bf-surface-soft);
+}
+
+.auto-mode-note-text {
+  display: block;
+  max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  position: relative;
-  background: var(--bf-surface-soft);
 }
 
 .auto-mode-note::before,
