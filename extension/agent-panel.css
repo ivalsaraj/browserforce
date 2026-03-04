@@ -676,6 +676,10 @@ body {
   flex-shrink: 0;
 }
 
+.composer-actions button[hidden] {
+  display: none;
+}
+
 .context-usage-note {
   font-size: 10px;
   line-height: 1.35;

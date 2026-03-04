@@ -429,6 +429,8 @@ test('POST /v1/runs includes active tab context in runExecutor prompt', async ()
     assert.match(prompt, /Active tab URL: https:\/\/example\.com\/pricing/);
     assert.match(prompt, /inspect the active page and answer directly/i);
     assert.match(prompt, /do not ask for permission to inspect/i);
+    assert.match(prompt, /state the exact error message/i);
+    assert.match(prompt, /do not infer page contents from title\/url\/tab metadata/i);
     assert.match(prompt, /User request:\s*summarize this page/i);
   } finally {
     await daemon.stop();

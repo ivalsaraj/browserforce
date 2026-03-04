@@ -525,6 +525,9 @@ function buildRunPrompt({ message, browserContext }) {
   lines.push('When the user asks what you can see, asks about this page/tab, or requests a summary of the current page, inspect the active page and answer directly.');
   lines.push('Use BrowserForce browser tools to read the current page content before replying in these cases.');
   lines.push('Do not ask for permission to inspect, and do not say you only have tab metadata.');
+  lines.push('If BrowserForce MCP, relay, or browser tool calls fail, state the exact error message and stop.');
+  lines.push('Do not infer page contents from title/URL/tab metadata, cached logs, or web search when live inspection fails.');
+  lines.push('After reporting the error, provide one concrete recovery action focused on MCP/relay health.');
   lines.push('If the request is still ambiguous after inspecting, ask one focused clarifying question.');
   lines.push('');
   lines.push(`User request: ${message}`);

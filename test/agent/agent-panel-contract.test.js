@@ -57,3 +57,7 @@ test('agent panel composer matches compact/expanded shell structure', () => {
   assert.match(css, /\.composer-box\.is-multiline/);
   assert.match(css, /\.btn-send[\s\S]*border-radius:\s*999px/);
 });
+
+test('composer action buttons respect hidden attribute for send/stop swapping', () => {
+  assert.match(css, /\.composer-actions button\[hidden\][\s\S]*display:\s*none/);
+});
