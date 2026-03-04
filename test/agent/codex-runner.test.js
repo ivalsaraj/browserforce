@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCodexExecArgs, normalizeCodexLine } from '../../agent/src/codex-runner.js';
+import {
+  buildCodexStderrStepPayload,
+  buildCodexExecArgs,
+  normalizeCodexLine,
+  shouldSuppressCodexStderrLine,
+} from '../../agent/src/codex-runner.js';
 
 test('maps text delta line to chat.delta event', () => {
   const evt = normalizeCodexLine({
@@ -71,6 +76,63 @@ test('maps transient codex error line to non-fatal tool event', () => {
   assert.equal(evt.event, 'tool.delta');
   assert.equal(evt.payload.level, 'warning');
   assert.match(evt.payload.message, /Reconnecting/);
+});
+
+test('suppresses refresh_token_reused auth stderr block', () => {
+  const state = {};
+  assert.equal(
+    shouldSuppressCodexStderrLine(
+      '2026-03-04T08:56:12.804579Z ERROR codex_core::auth: Failed to refresh token: 401 Unauthorized: {',
+      state,
+    ),
+    true,
+  );
+  assert.equal(shouldSuppressCodexStderrLine('  "error": {', state), true);
+  assert.equal(shouldSuppressCodexStderrLine('    "code": "refresh_token_reused"', state), true);
+  assert.equal(shouldSuppressCodexStderrLine('  }', state), true);
+  assert.equal(shouldSuppressCodexStderrLine('}', state), true);
+  assert.equal(
+    shouldSuppressCodexStderrLine(
+      '2026-03-04T08:56:12.804795Z ERROR codex_core::auth: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.',
+      state,
+    ),
+    true,
+  );
+});
+
+test('does not suppress non-auth stderr lines', () => {
+  const state = {};
+  assert.equal(
+    shouldSuppressCodexStderrLine(
+      '2026-03-04T08:56:14.841913Z  WARN codex_core::shell_snapshot: Failed to delete shell snapshot',
+      state,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldSuppressCodexStderrLine(
+      '2026-03-04T08:56:23.764711Z ERROR rmcp::transport::async_rw: Error reading from stream',
+      state,
+    ),
+    false,
+  );
+});
+
+test('builds human-readable stderr summary payload with singular/plural label', () => {
+  const single = buildCodexStderrStepPayload({ count: 1, lines: ['first warning'] });
+  assert.equal(single.message, 'Codex stderr (1 line)');
+  assert.deepEqual(single.details, ['first warning']);
+
+  const plural = buildCodexStderrStepPayload({ count: 2, lines: ['first', 'second'] });
+  assert.equal(plural.message, 'Codex stderr (2 lines)');
+  assert.deepEqual(plural.details, ['first', 'second']);
+});
+
+test('stderr summary payload keeps only latest detail lines', () => {
+  const lines = Array.from({ length: 11 }, (_, i) => `line-${i + 1}`);
+  const payload = buildCodexStderrStepPayload({ count: lines.length, lines });
+  assert.equal(payload.message, 'Codex stderr (11 lines)');
+  assert.deepEqual(payload.details, lines.slice(-8));
 });
 
 test('maps codex turn.completed usage into run.usage event', () => {
