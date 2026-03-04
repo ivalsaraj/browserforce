@@ -7,6 +7,7 @@ import {
   formatContextUsage,
   getLatestInFlightStepIndex,
   getSessionRunId,
+  renderMarkdownContent,
   renderInlineContent,
   shouldApplySessionSelection,
 } from '../../extension/agent-panel-runtime.js';
@@ -59,6 +60,73 @@ test('renders safe inline markdown for bold and code spans', () => {
     renderInlineContent('**<script>alert(1)</script>**'),
     '<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>',
   );
+});
+
+test('renders screenshot markdown links as image previews', () => {
+  const rendered = renderInlineContent('- Screenshot saved: [shopify-direct-1772647808095.png](/tmp/shopify-direct-1772647808095.png)');
+  assert.match(rendered, /Screenshot saved:/);
+  assert.match(rendered, /class="inline-image-link"/);
+  assert.match(rendered, /class="inline-image"/);
+  assert.match(rendered, /src="file:\/\/\/tmp\/shopify-direct-1772647808095\.png"/);
+});
+
+test('renders non-image markdown links as clickable anchors', () => {
+  const rendered = renderInlineContent('Open [BrowserForce](https://github.com/ivalsaraj/browserforce)');
+  assert.match(rendered, /class="inline-link"/);
+  assert.match(rendered, /href="https:\/\/github\.com\/ivalsaraj\/browserforce"/);
+});
+
+test('does not render unsafe markdown link protocols as HTML anchors', () => {
+  const rendered = renderInlineContent('[bad](javascript:alert(1))');
+  assert.equal(rendered, '[bad](javascript:alert(1))');
+});
+
+test('renders markdown blocks for headings, emphasis, list, quote, and hr', () => {
+  const rendered = renderMarkdownContent([
+    '# Heading',
+    '',
+    'Paragraph with *italic*, **bold**, and ~~strike~~.',
+    '',
+    '- Item one',
+    '- [x] Done task',
+    '',
+    '> quoted line',
+    '',
+    '---',
+  ].join('\n'));
+  assert.match(rendered, /class="md-content"/);
+  assert.match(rendered, /class="md-h1"/);
+  assert.match(rendered, /<em>italic<\/em>/);
+  assert.match(rendered, /<strong>bold<\/strong>/);
+  assert.match(rendered, /<del>strike<\/del>/);
+  assert.match(rendered, /class="md-list"/);
+  assert.match(rendered, /class="md-task-item"/);
+  assert.match(rendered, /class="md-blockquote"/);
+  assert.match(rendered, /class="md-hr"/);
+});
+
+test('renders fenced code blocks and table markdown', () => {
+  const rendered = renderMarkdownContent([
+    '```js',
+    'const ok = true;',
+    '```',
+    '',
+    '| Name | Value |',
+    '| :--- | ---: |',
+    '| foo | 42 |',
+  ].join('\n'));
+  assert.match(rendered, /class="md-pre"/);
+  assert.match(rendered, /language-js/);
+  assert.match(rendered, /const ok = true;/);
+  assert.match(rendered, /class="md-table"/);
+  assert.match(rendered, /<th style="text-align:left;">Name<\/th>/);
+  assert.match(rendered, /<th style="text-align:right;">Value<\/th>/);
+});
+
+test('escapes raw html inside markdown blocks', () => {
+  const rendered = renderMarkdownContent('Text <script>alert(1)</script>');
+  assert.match(rendered, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(rendered, /<script>/);
 });
 
 test('tracks latest step index for active runs only', () => {

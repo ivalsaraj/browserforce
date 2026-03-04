@@ -70,6 +70,12 @@ test('assistant transcript prefers ordered run timeline over grouped run steps',
   assert.match(js, /const timelineHtml = renderRunTimeline\(messageRun, msg\.text \|\| ''\)/);
 });
 
+test('assistant transcript renders message bodies with markdown block renderer', () => {
+  assert.match(js, /renderMarkdownContent/);
+  assert.match(js, /function renderContent\(value\)\s*\{\s*return renderMarkdownContent\(value\);\s*\}/);
+  assert.match(js, /<div class="bubble-assistant">\$\{renderContent\(entry\.text \|\| ''\)\}<\/div>/);
+});
+
 test('context usage renderer hides element when unavailable and only shows formatted values', () => {
   assert.match(js, /function renderContextUsageChip\(\)/);
   assert.match(js, /latestUsageBySession/);
