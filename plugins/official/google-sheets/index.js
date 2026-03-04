@@ -421,6 +421,96 @@ function hasData(cells) {
   return Object.values(cells).some((value) => Boolean(String(value || '').trim()));
 }
 
+async function scanContiguousRows(page, options = {}) {
+  const columns = normalizeColumns(options.columns || ['A', 'B']);
+  const startRow = Number.isInteger(options.startRow) && options.startRow > 0 ? options.startRow : 1;
+  const maxRows = Number.isInteger(options.maxRows) && options.maxRows > 0
+    ? options.maxRows
+    : DEFAULT_SCAN_MAX_ROWS;
+  const emptyStreakStop = Number.isInteger(options.emptyStreakStop) && options.emptyStreakStop > 0
+    ? options.emptyStreakStop
+    : DEFAULT_EMPTY_STREAK_STOP;
+
+  const rows = [];
+  let scannedRows = 0;
+  let seenData = false;
+  let emptyStreak = 0;
+  let stopReason = 'max_rows_reached';
+
+  for (let i = 0; i < maxRows; i += 1) {
+    const row = startRow + i;
+    const cells = await readRow(page, row, columns, options);
+    scannedRows += 1;
+
+    if (hasData(cells)) {
+      rows.push({ row, cells });
+      seenData = true;
+      emptyStreak = 0;
+      continue;
+    }
+
+    if (seenData) {
+      emptyStreak += 1;
+      if (emptyStreak >= emptyStreakStop) {
+        stopReason = 'empty_streak_stop';
+        break;
+      }
+    }
+  }
+
+  return {
+    rows,
+    scannedRows,
+    usedRowCount: rows.length,
+    stopReason,
+    config: { columns, startRow, maxRows, emptyStreakStop },
+  };
+}
+
+async function inferColumnsFromHeaderRow(page, options = {}) {
+  const startRow = Number.isInteger(options.startRow) && options.startRow > 0 ? options.startRow : 1;
+  const maxColumns = Number.isInteger(options.maxColumns) && options.maxColumns > 0
+    ? options.maxColumns
+    : 8;
+  const emptyColumnStreakStop = Number.isInteger(options.emptyColumnStreakStop) && options.emptyColumnStreakStop > 0
+    ? options.emptyColumnStreakStop
+    : 1;
+  const fallbackColumnsCount = Number.isInteger(options.fallbackColumnsCount) && options.fallbackColumnsCount > 0
+    ? options.fallbackColumnsCount
+    : 2;
+  const startColumn = normalizeColumns([options.startColumn || 'A'])[0];
+  const startColIdx = columnToIndex(startColumn);
+
+  const columns = [];
+  let seenData = false;
+  let emptyStreak = 0;
+
+  for (let i = 0; i < maxColumns; i += 1) {
+    const col = indexToColumn(startColIdx + i);
+    const { value } = await readCell(page, `${col}${startRow}`, options);
+    const nonEmpty = Boolean(String(value || '').trim());
+    if (nonEmpty) {
+      columns.push(col);
+      seenData = true;
+      emptyStreak = 0;
+      continue;
+    }
+    if (seenData) {
+      emptyStreak += 1;
+      if (emptyStreak >= emptyColumnStreakStop) break;
+    }
+  }
+
+  if (columns.length > 0) return columns;
+
+  const fallback = [];
+  const count = Math.min(Math.max(fallbackColumnsCount, 1), maxColumns);
+  for (let i = 0; i < count; i += 1) {
+    fallback.push(indexToColumn(startColIdx + i));
+  }
+  return fallback;
+}
+
 export default {
   name: 'google-sheets',
   description: 'Google Sheets helpers for reliable row scanning, cell reads, and issue logging',
@@ -447,49 +537,35 @@ export default {
 
     gsReadContiguousRows: async (page, ctx, state, options = {}) => {
       assertGoogleSheet(page, 'gsReadContiguousRows');
+      return scanContiguousRows(page, options);
+    },
 
-      const columns = normalizeColumns(options.columns || ['A', 'B']);
-      const startRow = Number.isInteger(options.startRow) && options.startRow > 0 ? options.startRow : 1;
-      const maxRows = Number.isInteger(options.maxRows) && options.maxRows > 0
-        ? options.maxRows
-        : DEFAULT_SCAN_MAX_ROWS;
-      const emptyStreakStop = Number.isInteger(options.emptyStreakStop) && options.emptyStreakStop > 0
-        ? options.emptyStreakStop
-        : DEFAULT_EMPTY_STREAK_STOP;
-
-      const rows = [];
-      let scannedRows = 0;
-      let seenData = false;
-      let emptyStreak = 0;
-      let stopReason = 'max_rows_reached';
-
-      for (let i = 0; i < maxRows; i += 1) {
-        const row = startRow + i;
-        const cells = await readRow(page, row, columns, options);
-        scannedRows += 1;
-
-        if (hasData(cells)) {
-          rows.push({ row, cells });
-          seenData = true;
-          emptyStreak = 0;
-          continue;
-        }
-
-        if (seenData) {
-          emptyStreak += 1;
-          if (emptyStreak >= emptyStreakStop) {
-            stopReason = 'empty_streak_stop';
-            break;
-          }
-        }
-      }
+    gsSummarizeSheet: async (page, ctx, state, options = {}) => {
+      assertGoogleSheet(page, 'gsSummarizeSheet');
+      const title = await page.title();
+      const sheet = { ...parseSheetMeta(page.url()), title };
+      const includeRows = options.includeRows === true;
+      const previewRows = Number.isInteger(options.previewRows) && options.previewRows > 0 ? options.previewRows : 8;
+      const columns = options.columns
+        ? normalizeColumns(options.columns)
+        : await inferColumnsFromHeaderRow(page, options);
+      const scanResult = await scanContiguousRows(page, { ...options, columns });
+      const preview = scanResult.rows.slice(0, previewRows).map((entry) => ({ row: entry.row, cells: entry.cells }));
+      const firstDataRow = scanResult.rows[0] || null;
+      const headerCandidate = scanResult.rows.find((entry) => entry.row === scanResult.config.startRow) || null;
 
       return {
-        rows,
-        scannedRows,
-        usedRowCount: rows.length,
-        stopReason,
-        config: { columns, startRow, maxRows, emptyStreakStop },
+        sheet,
+        columns,
+        scan: {
+          scannedRows: scanResult.scannedRows,
+          usedRowCount: scanResult.usedRowCount,
+          stopReason: scanResult.stopReason,
+        },
+        firstDataRow: firstDataRow ? { row: firstDataRow.row, cells: firstDataRow.cells } : null,
+        headerCandidate: headerCandidate ? { row: headerCandidate.row, cells: headerCandidate.cells } : null,
+        preview,
+        ...(includeRows ? { rows: scanResult.rows } : {}),
       };
     },
 

@@ -35,3 +35,9 @@ Use this format for each new entry:
 - Root cause: Feature work started before surveying existing Claude and MCP Google Sheets solutions.
 - Fix: Added a mandatory pre-build lookup step against official docs + known MCP repositories.
 - Rule: Before expanding Sheets automation behavior, check official support and existing MCP implementations.
+
+## 2026-03-04 — [SUMMARY] Export Drift During Simple Read Requests
+- Symptom: Agent attempted gviz/CSV export and extra-tab fetch flows when the user only asked for a page summary.
+- Root cause: Skill guidance did not enforce a summary-first path for Google Sheets and lacked anti-export guardrails.
+- Fix: Added `gsSummarizeSheet()` helper plus strict skill rules to summarize directly from active-sheet helpers first.
+- Rule: For "summarize/read this sheet" requests, use helper-driven page reads and answer directly before any export path.
