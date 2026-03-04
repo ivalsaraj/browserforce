@@ -117,3 +117,70 @@ test('maps codex thread.started provider session id event to run.provider_sessio
   assert.equal(evt.payload.provider, 'codex');
   assert.equal(evt.payload.sessionId, '019caa6f-8c63-7c81-a542-3dbcf922d065');
 });
+
+test('maps response_item function_call/function_call_output into keyed tool lifecycle events', () => {
+  const start = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        call_id: 'call_123',
+        name: 'exec_command',
+        arguments: JSON.stringify({ cmd: 'rg --files' }),
+      },
+    }),
+  });
+  const done = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'function_call_output',
+        call_id: 'call_123',
+        output: 'ok',
+      },
+    }),
+  });
+
+  assert.equal(start.event, 'tool.started');
+  assert.equal(start.payload.callId, 'call_123');
+  assert.equal(start.payload.command, "/bin/zsh -lc 'rg --files'");
+  assert.equal(done.event, 'tool.final');
+  assert.equal(done.payload.callId, 'call_123');
+  assert.equal(done.payload.stepKey, 'tool:call_123');
+});
+
+test('maps event_msg agent_message commentary to chat.commentary and final_answer to chat.final', () => {
+  const commentary = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'agent_message',
+        phase: 'commentary',
+        message: 'Inspecting files',
+      },
+    }),
+  });
+  const final = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'agent_message',
+        phase: 'final_answer',
+        message: 'All done',
+      },
+    }),
+  });
+
+  assert.equal(commentary.event, 'chat.commentary');
+  assert.equal(commentary.payload.delta, 'Inspecting files');
+  assert.equal(final.event, 'chat.final');
+  assert.equal(final.payload.text, 'All done');
+});

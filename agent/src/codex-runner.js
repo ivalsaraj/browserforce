@@ -48,6 +48,214 @@ function toUsagePayload(source = {}) {
   };
 }
 
+function firstString(values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function safeParseJson(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeToolIdentity(payload = {}, fallbackCallId = '') {
+  const callId = firstString([
+    payload.callId,
+    payload.call_id,
+    payload.toolCallId,
+    payload.tool_call_id,
+    payload.id,
+    fallbackCallId,
+  ]);
+  const stepKey = firstString([
+    payload.stepKey,
+    payload.step_key,
+    callId ? `tool:${callId}` : '',
+  ]);
+  return {
+    ...payload,
+    ...(callId ? { callId } : {}),
+    ...(stepKey ? { stepKey } : {}),
+  };
+}
+
+function quoteForShell(value) {
+  const source = String(value || '');
+  if (!source) return '';
+  return source.replace(/'/g, `'\"'\"'`);
+}
+
+function toolCommandLabel({ name, parsedArgs, rawArgs }) {
+  if (parsedArgs && typeof parsedArgs === 'object') {
+    const cmd = firstString([
+      parsedArgs.cmd,
+      parsedArgs.command,
+    ]);
+    if (cmd) {
+      return `/bin/zsh -lc '${quoteForShell(cmd)}'`;
+    }
+  }
+
+  if (typeof rawArgs === 'string' && rawArgs.trim() && rawArgs.trim().startsWith('{')) {
+    const parsed = safeParseJson(rawArgs);
+    if (parsed && typeof parsed === 'object') {
+      const cmd = firstString([parsed.cmd, parsed.command]);
+      if (cmd) return `/bin/zsh -lc '${quoteForShell(cmd)}'`;
+    }
+  }
+
+  if (name === 'exec_command' && typeof rawArgs === 'string' && rawArgs.trim()) {
+    return rawArgs.trim().length > 160 ? `${rawArgs.trim().slice(0, 157)}...` : rawArgs.trim();
+  }
+  return '';
+}
+
+function messageTextFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts = [];
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue;
+    const text = firstString([item.text, item.message, item.delta]);
+    if (text) parts.push(text);
+  }
+  return parts.join('');
+}
+
+function normalizeResponseItem({ runId, sessionId, payload }) {
+  if (!payload || typeof payload !== 'object') return null;
+  const itemType = String(payload.type || '').toLowerCase();
+
+  if (itemType === 'message') {
+    const role = String(payload.role || '').toLowerCase();
+    if (role !== 'assistant') return null;
+    const text = firstString([
+      payload.text,
+      payload.message,
+      messageTextFromContent(payload.content),
+    ]);
+    if (!text) return null;
+    const phase = String(payload.phase || '').toLowerCase();
+    if (phase === 'final_answer') {
+      return envelope({ event: 'chat.final', runId, sessionId, payload: { text, phase } });
+    }
+    return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
+  }
+
+  if (itemType === 'function_call' || itemType === 'custom_tool_call') {
+    const callId = firstString([payload.call_id, payload.callId, payload.id]);
+    const parsedArgs = safeParseJson(payload.arguments);
+    const command = toolCommandLabel({
+      name: String(payload.name || ''),
+      parsedArgs,
+      rawArgs: payload.arguments,
+    });
+    return envelope({
+      event: 'tool.started',
+      runId,
+      sessionId,
+      payload: normalizeToolIdentity({
+        ...payload,
+        ...(command ? { command } : {}),
+        ...(parsedArgs && typeof parsedArgs === 'object' ? { args: parsedArgs } : {}),
+      }, callId),
+    });
+  }
+
+  if (itemType === 'function_call_output' || itemType === 'custom_tool_call_output') {
+    const callId = firstString([payload.call_id, payload.callId, payload.id]);
+    return envelope({
+      event: 'tool.final',
+      runId,
+      sessionId,
+      payload: normalizeToolIdentity(payload, callId),
+    });
+  }
+
+  if (itemType === 'reasoning') {
+    const text = firstString([
+      payload.text,
+      payload.message,
+      ...(Array.isArray(payload.summary)
+        ? payload.summary
+          .map((summaryItem) => summaryItem?.text || summaryItem?.summary_text || '')
+          .filter(Boolean)
+        : []),
+    ]);
+    if (!text) return null;
+    return envelope({
+      event: 'tool.delta',
+      runId,
+      sessionId,
+      payload: { type: 'reasoning', text },
+    });
+  }
+
+  return envelope({ event: 'run.event', runId, sessionId, payload });
+}
+
+function normalizeEventMsg({ runId, sessionId, payload }) {
+  if (!payload || typeof payload !== 'object') return null;
+  const payloadType = String(payload.type || '').toLowerCase();
+
+  if (payloadType === 'token_count' && payload.info && typeof payload.info === 'object') {
+    const usage = payload.info.total_token_usage && typeof payload.info.total_token_usage === 'object'
+      ? payload.info.total_token_usage
+      : {};
+    return envelope({
+      event: 'run.usage',
+      runId,
+      sessionId,
+      payload: toUsagePayload({
+        ...usage,
+        model_context_window: payload.info.model_context_window,
+        reasoning_output_tokens: payload.info.reasoning_output_tokens,
+      }),
+    });
+  }
+
+  if (payloadType === 'agent_reasoning') {
+    const text = firstString([payload.text, payload.message]);
+    if (!text) return null;
+    return envelope({
+      event: 'tool.delta',
+      runId,
+      sessionId,
+      payload: { type: 'reasoning', text },
+    });
+  }
+
+  if (payloadType === 'agent_message') {
+    const text = firstString([payload.message, payload.text]);
+    if (!text) return null;
+    const phase = String(payload.phase || '').toLowerCase();
+    if (phase === 'final_answer') {
+      return envelope({ event: 'chat.final', runId, sessionId, payload: { text, phase } });
+    }
+    return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
+  }
+
+  if (payloadType === 'task_started') {
+    return envelope({ event: 'run.started', runId, sessionId, payload });
+  }
+
+  if (payloadType === 'task_complete') {
+    const text = firstString([payload.last_agent_message, payload.message, payload.text]);
+    if (text) {
+      return envelope({ event: 'chat.final', runId, sessionId, payload: { text } });
+    }
+    return envelope({ event: 'run.event', runId, sessionId, payload });
+  }
+
+  return envelope({ event: 'run.event', runId, sessionId, payload });
+}
+
 export function normalizeCodexLine({ runId, sessionId, line }) {
   const parsed = safeParse(line);
   if (!parsed || typeof parsed !== 'object') {
@@ -55,6 +263,14 @@ export function normalizeCodexLine({ runId, sessionId, line }) {
   }
 
   const type = String(parsed.type || '').toLowerCase();
+
+  if (type === 'response_item') {
+    return normalizeResponseItem({ runId, sessionId, payload: parsed.payload });
+  }
+
+  if (type === 'event_msg') {
+    return normalizeEventMsg({ runId, sessionId, payload: parsed.payload });
+  }
 
   if (type === 'thread.started') {
     const providerSessionId = String(parsed.thread_id || '').trim();
@@ -198,6 +414,7 @@ export function startCodexRun({
   stdoutLines.on('line', (line) => {
     try {
       const evt = normalizeCodexLine({ runId, sessionId, line });
+      if (!evt) return;
       onEvent?.(evt);
     } catch (error) {
       onError?.(error);
