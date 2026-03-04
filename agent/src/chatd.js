@@ -294,6 +294,63 @@ function firstString(values) {
   return '';
 }
 
+function isBrowserForceExecutePayload(payload = {}) {
+  const name = String(firstString([
+    payload.name,
+    payload.toolName,
+    payload.tool,
+  ]) || '').trim().toLowerCase();
+
+  if (name === 'browserforce:execute' || name === 'mcp__browserforce__execute') return true;
+  if (name !== 'execute') return false;
+
+  const args = payload?.args && typeof payload.args === 'object' ? payload.args : null;
+  if (args && typeof args.code === 'string') return true;
+  if (typeof payload.code === 'string') return true;
+
+  const rawArgs = String(firstString([payload.arguments, payload.input]) || '').trim();
+  return /"code"\s*:/.test(rawArgs);
+}
+
+function isBrowserForceResetPayload(payload = {}) {
+  const name = String(firstString([
+    payload.name,
+    payload.toolName,
+    payload.tool,
+  ]) || '').trim().toLowerCase();
+
+  if (name === 'browserforce:reset' || name === 'mcp__browserforce__reset') return true;
+  if (name !== 'reset') return false;
+
+  const args = payload?.args && typeof payload.args === 'object' ? payload.args : null;
+  if (args && Object.keys(args).length > 0) return false;
+
+  const rawArgs = String(firstString([payload.arguments, payload.input]) || '').trim();
+  return !rawArgs || rawArgs === '{}' || rawArgs === 'null';
+}
+
+function normalizeToolLabel(label, payload = {}) {
+  const raw = String(label || '').trim();
+  if (!raw) return '';
+  const normalized = raw.toLowerCase();
+
+  if (
+    isBrowserForceExecutePayload(payload)
+    && (normalized === 'execute' || normalized === 'mcp__browserforce__execute' || normalized === 'browserforce:execute')
+  ) {
+    return 'BrowserForce:execute';
+  }
+
+  if (
+    isBrowserForceResetPayload(payload)
+    && (normalized === 'reset' || normalized === 'mcp__browserforce__reset' || normalized === 'browserforce:reset')
+  ) {
+    return 'BrowserForce:reset';
+  }
+
+  return raw;
+}
+
 const SHELL_LC_WRAPPER_RE = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/i;
 
 function unwrapShellLcCommand(value) {
@@ -578,26 +635,21 @@ function syncFinalTextToRunTimeline(run, finalText) {
 
 function stepLabelForToolEvent(evt) {
   const payload = evt?.payload || {};
+  const toolLabel = normalizeToolLabel(firstString([
+    payload.command,
+    payload.title,
+    payload.name,
+    payload.tool,
+    payload.toolName,
+  ]), payload);
   if (evt.event === 'tool.started') {
-    return firstString([
-      payload.command,
-      payload.title,
-      payload.name,
-      payload.tool,
-      payload.toolName,
-    ]) || 'Tool call started';
+    return toolLabel || 'Tool call started';
   }
   if (evt.event === 'tool.final') {
-    return firstString([
-      payload.command,
-      payload.title,
-      payload.name,
-      payload.tool,
-      payload.toolName,
-    ]) || 'Tool call completed';
+    return toolLabel || 'Tool call completed';
   }
   if (evt.event === 'tool.delta') {
-    return firstString([
+    return normalizeToolLabel(firstString([
       payload.text,
       payload.message,
       payload.delta,
@@ -606,7 +658,7 @@ function stepLabelForToolEvent(evt) {
       payload.tool,
       payload.toolName,
       payload.type === 'reasoning' ? 'Reasoning' : '',
-    ]) || 'Working...';
+    ]), payload) || 'Working...';
   }
   return '';
 }
@@ -675,7 +727,7 @@ function stepKindForRunEvent(evt) {
 function stepLabelForRunEvent(evt) {
   const payload = evt?.payload || {};
   const item = payload?.item && typeof payload.item === 'object' ? payload.item : {};
-  return firstString([
+  const label = firstString([
     payload.title,
     payload.message,
     payload.text,
@@ -689,7 +741,20 @@ function stepLabelForRunEvent(evt) {
     item.command,
     item.type ? humanizeToken(item.type) : '',
     payload.type ? humanizeToken(payload.type) : '',
-  ]) || 'Working...';
+  ]);
+
+  const normalized = normalizeToolLabel(label, {
+    ...payload,
+    ...item,
+    name: firstString([item.name, payload.name]),
+    toolName: firstString([item.toolName, payload.toolName]),
+    tool: firstString([item.tool, payload.tool]),
+    args: item.args || payload.args,
+    arguments: firstString([item.arguments, payload.arguments]),
+    input: item.input || payload.input,
+    code: firstString([item.code, payload.code]),
+  });
+  return normalized || 'Working...';
 }
 
 function stepKeyForRunEvent(evt) {

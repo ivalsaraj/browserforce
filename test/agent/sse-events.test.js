@@ -183,6 +183,7 @@ test('execute tool step captures code details for collapsible rendering', () => 
   });
 
   const step = s2.runs.r1.steps.find((item) => /execute/i.test(item?.label || ''));
+  assert.equal(step?.label, 'BrowserForce:execute');
   assert.deepEqual(step?.details, [
     'const rows = await snapshot();',
     'return rows;',
@@ -293,7 +294,7 @@ test('run.event extracts execute code from nested item input for collapsible det
   });
 
   const step = (s2.runs.r1.steps || []).find((item) => item?.key === 'tool:item_2');
-  assert.equal(step?.label, 'execute');
+  assert.equal(step?.label, 'BrowserForce:execute');
   assert.deepEqual(step?.details, [
     'const rows = await snapshot();',
     'return rows;',
