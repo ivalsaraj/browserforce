@@ -25,6 +25,7 @@ const state = {
   eventLoopToken: 0,
   sessionSelectionToken: 0,
   popover: 'none',
+  startupIssue: null,
   status: {
     kind: 'info',
     text: 'Starting...',
@@ -155,6 +156,44 @@ function renderContextUsageChip() {
 function setStatus(kind, text) {
   state.status = { kind, text };
   syncStatusIndicator();
+}
+
+function normalizeStartupError(code = '', fallbackMessage = 'Unable to connect to BrowserForce Agent') {
+  const normalized = String(code || '').trim().toLowerCase();
+  if (normalized === 'agent_not_running') {
+    return {
+      code: 'agent_not_running',
+      statusText: 'Agent not running',
+      title: 'BrowserForce Agent is not running',
+      detail: 'Relay is reachable, but the local agent daemon (chatd) is offline.',
+      command: 'browserforce agent start',
+    };
+  }
+  if (normalized === 'extension_not_connected') {
+    return {
+      code: 'extension_not_connected',
+      statusText: 'Extension not connected',
+      title: 'Extension is not connected to relay',
+      detail: 'Open the BrowserForce extension popup and reconnect it to the relay.',
+      command: null,
+    };
+  }
+  if (normalized === 'relay_unreachable') {
+    return {
+      code: 'relay_unreachable',
+      statusText: 'Relay unreachable',
+      title: 'Relay is not reachable',
+      detail: 'Start relay first, then retry opening this side panel.',
+      command: 'browserforce serve',
+    };
+  }
+  return {
+    code: 'unknown',
+    statusText: 'Connection failed',
+    title: 'Unable to connect to BrowserForce Agent',
+    detail: fallbackMessage || 'Check relay and agent daemon status, then try again.',
+    command: null,
+  };
 }
 
 function setComposerEnabled(enabled) {
@@ -579,6 +618,31 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
   }
 
   if (!chunks.length) {
+    const startupIssue = state.startupIssue;
+    if (startupIssue) {
+      const commandHtml = startupIssue.command
+        ? `<p class="empty-command"><code>${escapeHtml(startupIssue.command)}</code></p>`
+        : '';
+      transcriptEl.innerHTML = `
+        <div class="empty-state error-state">
+          <div class="empty-icon error">!</div>
+          <div>
+            <p class="empty-title">${escapeHtml(startupIssue.title || 'Unable to connect')}</p>
+            <p class="empty-sub">${escapeHtml(startupIssue.detail || '')}</p>
+            ${commandHtml}
+          </div>
+        </div>
+      `;
+      bindTranscriptHandlers();
+      if (Number.isFinite(preserveScrollTop)) {
+        transcriptEl.scrollTop = preserveScrollTop;
+      } else {
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+      syncStatusIndicator();
+      syncComposerState();
+      return;
+    }
     transcriptEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">B</div>
@@ -814,10 +878,33 @@ async function getRelayHttpUrl() {
 async function loadAuth() {
   const relayHttpUrl = await getRelayHttpUrl();
   const extensionId = chrome?.runtime?.id;
-  const res = await fetch(`${relayHttpUrl}/chatd-url`, {
-    headers: extensionId ? { 'x-browserforce-extension-id': extensionId } : {},
-  });
-  if (!res.ok) throw new Error('daemon_unavailable');
+  let res;
+  try {
+    res = await fetch(`${relayHttpUrl}/chatd-url`, {
+      headers: extensionId ? { 'x-browserforce-extension-id': extensionId } : {},
+    });
+  } catch {
+    const error = new Error('relay_unreachable');
+    error.code = 'relay_unreachable';
+    throw error;
+  }
+  if (!res.ok) {
+    const body = await readJsonOrEmpty(res);
+    const relayError = String(body?.error || '').toLowerCase();
+    if (res.status === 404 && relayError.includes('chatd not running')) {
+      const error = new Error('agent_not_running');
+      error.code = 'agent_not_running';
+      throw error;
+    }
+    if (res.status === 503 && relayError.includes('extension not connected')) {
+      const error = new Error('extension_not_connected');
+      error.code = 'extension_not_connected';
+      throw error;
+    }
+    const error = new Error(body?.error || `chatd-url failed (${res.status})`);
+    error.code = 'daemon_unavailable';
+    throw error;
+  }
   const body = await res.json();
   state.auth = {
     baseUrl: `http://127.0.0.1:${body.port}`,
@@ -1188,6 +1275,7 @@ popoverBackdropEl.addEventListener('click', () => {
 
 (async function init() {
   try {
+    state.startupIssue = null;
     setComposerEnabled(false);
     setStatus('info', 'Connecting...');
     render();
@@ -1209,9 +1297,11 @@ popoverBackdropEl.addEventListener('click', () => {
     scheduleTabAttachRefresh(0);
     setStatus('ready', 'Ready');
     render();
-  } catch {
+  } catch (error) {
+    state.startupIssue = normalizeStartupError(error?.code, error?.message);
     setComposerEnabled(false);
     setTabAttachBannerState({ hidden: true });
-    setStatus('error', 'Daemon unavailable');
+    setStatus('error', state.startupIssue.statusText || 'Daemon unavailable');
+    render();
   }
 })();

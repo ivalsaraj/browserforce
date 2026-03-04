@@ -213,6 +213,12 @@ body {
   padding: 40px 20px;
 }
 
+.empty-state.error-state {
+  align-items: flex-start;
+  text-align: left;
+  gap: 10px;
+}
+
 .empty-icon {
   width: 40px;
   height: 40px;
@@ -226,6 +232,10 @@ body {
   font-size: 18px;
 }
 
+.empty-icon.error {
+  background: var(--error);
+}
+
 .empty-title {
   font-size: 14px;
   font-weight: 500;
@@ -236,6 +246,24 @@ body {
   font-size: 12px;
   color: var(--text-subtle);
   line-height: 1.5;
+}
+
+.empty-command {
+  margin-top: 8px;
+}
+
+.empty-command code {
+  display: inline-block;
+  background: var(--linen);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--crail-dark);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  padding: 4px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message {
