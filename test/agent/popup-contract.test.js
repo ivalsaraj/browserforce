@@ -17,6 +17,10 @@ test('logs viewer requests include extension identity header', () => {
 });
 
 test('open agent action opens side panel and closes popup', () => {
+  assert.match(popupJs, /BROWSERFORCE_AGENT_OPEN_REQUEST_KEY/);
+  assert.match(popupJs, /chrome\.storage\.local\.set\(/);
+  assert.match(popupJs, /source:\s*'popup-open-agent'/);
+  assert.match(popupJs, /await chrome\.storage\.local\.set\([\s\S]*await chrome\.sidePanel\.open\(/);
   assert.match(popupJs, /chrome\.sidePanel\.open\(/);
   assert.match(popupJs, /window\.close\(\)/);
 });

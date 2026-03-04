@@ -88,6 +88,22 @@ test('init opens smoothly by starting tab attach asynchronously', () => {
   assert.doesNotMatch(initBlock, /await ensureCurrentTabAttached\(\);/);
 });
 
+test('popup open-agent request can force a fresh session on panel init', () => {
+  assert.match(js, /BROWSERFORCE_AGENT_OPEN_REQUEST_KEY/);
+  assert.match(js, /function normalizeAgentOpenRequest\(/);
+  assert.match(js, /async function consumePendingAgentOpenRequest\(/);
+  assert.match(js, /async function initializePanel\(\)[\s\S]*consumePendingAgentOpenRequest\(\)/);
+  assert.match(js, /if \(shouldStartFreshSession \|\| !state\.value\.activeSessionId\)\s*\{\s*await createSession\(\);/);
+});
+
+test('panel watches open-agent request changes and starts a fresh session when already open', () => {
+  assert.match(js, /function bindAgentOpenRequestWatcher\(/);
+  assert.match(js, /chrome\.storage\.onChanged\.addListener/);
+  assert.match(js, /changes\?\.\[BROWSERFORCE_AGENT_OPEN_REQUEST_KEY\]/);
+  assert.match(js, /startFreshSessionFromOpenRequest\(change\.newValue\)/);
+  assert.match(js, /if \(!state\.auth\)\s*\{[\s\S]*state\.pendingAgentOpenRequest = request;/);
+});
+
 test('tab-attach banner shows progress during initial auto-attach and suppresses not-connected state', () => {
   assert.match(js, /function getTabAttachInProgressState\(\)/);
   assert.match(js, /text:\s*'Currently attaching active tab\.\.\.'/);

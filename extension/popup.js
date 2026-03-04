@@ -1,6 +1,7 @@
 // BrowserForce — Popup UI
 
 const RELAY_URL_DEFAULT = 'ws://127.0.0.1:19222/extension';
+const BROWSERFORCE_AGENT_OPEN_REQUEST_KEY = 'browserforceAgentOpenRequest';
 
 // Auto-generated instruction lines per restriction
 const RESTRICTION_LINES = {
@@ -199,6 +200,14 @@ attachBtn.addEventListener('click', () => {
 openAgentBtn.addEventListener('click', async () => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await chrome.storage.local.set({
+      [BROWSERFORCE_AGENT_OPEN_REQUEST_KEY]: {
+        requestId: (globalThis.crypto?.randomUUID?.() || `bf-open-${Date.now()}`),
+        requestedAt: Date.now(),
+        source: 'popup-open-agent',
+        tabId: Number.isFinite(tab?.id) ? Number(tab.id) : null,
+      },
+    });
     await chrome.sidePanel.open({ windowId: tab?.windowId });
     window.close();
   } catch {
