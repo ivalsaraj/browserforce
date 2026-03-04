@@ -15,6 +15,7 @@ const statusEl = document.getElementById('bf-status');
 const statusTextEl = document.getElementById('bf-status-text');
 const mcpClientsEl = document.getElementById('bf-mcp-clients');
 const autoModeNoteEl = document.getElementById('bf-auto-mode-note');
+const autoModeNoteTextEl = autoModeNoteEl?.querySelector('.auto-mode-note-text') || null;
 const relayUrlInput = document.getElementById('bf-relay-url');
 const saveUrlBtn = document.getElementById('bf-save-url');
 const tabCountEl = document.getElementById('bf-tab-count');
@@ -280,9 +281,37 @@ function setMcpClientCount(count) {
   mcpClientsEl.textContent = `MCP ${safeCount}`;
 }
 
+function fitAutoModeNoteText() {
+  if (!autoModeNoteEl || !autoModeNoteTextEl || autoModeNoteEl.hidden) return;
+  const maxSizePx = 11;
+  const minSizePx = 8;
+  let size = maxSizePx;
+  autoModeNoteTextEl.style.fontSize = `${size}px`;
+  autoModeNoteTextEl.style.letterSpacing = '';
+
+  let safety = 0;
+  while (
+    size > minSizePx
+    && autoModeNoteTextEl.scrollWidth > autoModeNoteTextEl.clientWidth
+    && safety < 24
+  ) {
+    size -= 0.25;
+    autoModeNoteTextEl.style.fontSize = `${size}px`;
+    safety += 1;
+  }
+
+  if (autoModeNoteTextEl.scrollWidth > autoModeNoteTextEl.clientWidth) {
+    autoModeNoteTextEl.style.letterSpacing = '-0.02em';
+  }
+}
+
 function setAutoModeState(mode) {
   if (!autoModeNoteEl) return;
-  autoModeNoteEl.hidden = mode !== 'auto';
+  const showAutoModeNote = mode === 'auto';
+  autoModeNoteEl.hidden = !showAutoModeNote;
+  if (showAutoModeNote) {
+    window.requestAnimationFrame(fitAutoModeNoteText);
+  }
 }
 
 function escapeHtml(str) {
@@ -293,3 +322,6 @@ function escapeHtml(str) {
 
 refreshStatus();
 setInterval(refreshStatus, 1000);
+window.addEventListener('resize', () => {
+  window.requestAnimationFrame(fitAutoModeNoteText);
+});

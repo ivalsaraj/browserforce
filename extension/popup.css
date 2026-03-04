@@ -421,10 +421,10 @@ textarea:focus {
 
 .auto-mode-note-text {
   display: block;
-  max-width: 100%;
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.2;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .auto-mode-note::before,

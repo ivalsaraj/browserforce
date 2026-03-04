@@ -27,8 +27,12 @@ test('auto mode uses bottom note instead of dotted popup border', () => {
   assert.match(html, /NOTE:\s*Auto mode is on\./);
   assert.match(popupCss, /\.auto-mode-note\s*\{/);
   assert.match(popupCss, /\.auto-mode-note-text\s*\{/);
-  assert.match(popupCss, /\.auto-mode-note-text[\s\S]*max-width:\s*100%/);
+  assert.match(popupCss, /\.auto-mode-note-text[\s\S]*width:\s*100%/);
   assert.match(popupCss, /\.auto-mode-note-text[\s\S]*white-space:\s*nowrap/);
+  assert.equal(/\.auto-mode-note-text[\s\S]*text-overflow:\s*ellipsis/.test(popupCss), false);
+  assert.match(popupJs, /function\s+fitAutoModeNoteText\(/);
+  assert.match(popupJs, /scrollWidth\s*>\s*autoModeNoteTextEl\.clientWidth/);
+  assert.match(popupJs, /requestAnimationFrame\(fitAutoModeNoteText\)/);
   assert.match(popupCss, /margin:\s*10px\s+-16px\s+-16px/);
   assert.match(popupCss, /\.auto-mode-note::before[\s\S]*background:\s*var\(--bf-danger-fg\)/);
   assert.match(popupCss, /\.auto-mode-note::after[\s\S]*background:\s*var\(--bf-accent\)/);
