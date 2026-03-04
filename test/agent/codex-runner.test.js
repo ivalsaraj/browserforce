@@ -209,7 +209,7 @@ test('maps response_item function_call/function_call_output into keyed tool life
 
   assert.equal(start.event, 'tool.started');
   assert.equal(start.payload.callId, 'call_123');
-  assert.equal(start.payload.command, "/bin/zsh -lc 'rg --files'");
+  assert.equal(start.payload.command, 'rg --files');
   assert.equal(done.event, 'tool.final');
   assert.equal(done.payload.callId, 'call_123');
   assert.equal(done.payload.stepKey, 'tool:call_123');
