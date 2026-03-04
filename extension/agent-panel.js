@@ -688,7 +688,7 @@ function renderRunTimeline(run, fallbackText = '') {
     if (isLatest) classes.push('latest');
     if (shouldPulse) classes.push('pulse');
     if (!isCollapsible) {
-      return `<div class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span></div>`;
+      return `<div class="${classes.join(' ')}">${renderRunStepIcon(icon)}<span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span></div>`;
     }
     classes.push('collapsible');
     const key = getTimelineEntryKey(entry, index);
@@ -700,7 +700,7 @@ function renderRunTimeline(run, fallbackText = '') {
       .join('');
     return `
       <div class="${classes.join(' ')}">
-        <span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span>
+        ${renderRunStepIcon(icon)}
         <div class="step-body">
           <button type="button" class="step-toggle" data-step-key="${escapeHtml(key)}" aria-expanded="${expanded ? 'true' : 'false'}">
             <span class="step-toggle-main">
@@ -716,6 +716,21 @@ function renderRunTimeline(run, fallbackText = '') {
   }).join('')}
     </div>
   `;
+}
+
+function renderRunStepIcon(icon) {
+  const iconName = String(icon || '').trim().toLowerCase();
+  if (iconName === 'done') {
+    return `
+      <span class="run-step-icon icon-done" aria-hidden="true">
+        <svg class="run-step-icon-done-svg" viewBox="0 0 52 52" aria-hidden="true" focusable="false">
+          <circle class="run-step-icon-done-ring" cx="26" cy="26" r="24" fill="none"></circle>
+          <path class="run-step-icon-done-check" fill="none" d="M14 27.5l8.5 8.5L38.5 19"></path>
+        </svg>
+      </span>
+    `;
+  }
+  return `<span class="run-step-icon icon-${escapeHtml(iconName)}" aria-hidden="true"></span>`;
 }
 
 function renderContent(value) {
