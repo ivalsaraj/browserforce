@@ -8,6 +8,7 @@ const INDEX_FILE = 'index.json';
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const RUN_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const MODEL_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
+const REASONING_EFFORT_VALUES = new Set(['low', 'medium', 'high', 'xhigh']);
 const indexWriteQueues = new Map();
 
 function isObject(value) {
@@ -32,6 +33,10 @@ export function isValidSessionId(sessionId) {
 
 export function isValidModelId(model) {
   return typeof model === 'string' && MODEL_ID_RE.test(model);
+}
+
+export function isValidReasoningEffort(value) {
+  return typeof value === 'string' && REASONING_EFFORT_VALUES.has(value.trim().toLowerCase());
 }
 
 function assertValidSessionId(sessionId, fnName) {
@@ -252,6 +257,16 @@ function normalizeModel(model) {
   return trimmed;
 }
 
+function normalizeReasoningEffort(reasoningEffort) {
+  if (reasoningEffort == null) return null;
+  const trimmed = String(reasoningEffort).trim().toLowerCase();
+  if (!trimmed) return null;
+  if (!isValidReasoningEffort(trimmed)) {
+    throw new Error('reasoningEffort must be one of: low, medium, high, xhigh');
+  }
+  return trimmed;
+}
+
 function normalizeUsageNumber(value, fieldName) {
   if (value == null) return null;
   const parsed = Number(value);
@@ -335,7 +350,7 @@ function sortSessionsNewestFirst(a, b) {
   return bTs - aTs;
 }
 
-export async function createSession({ title = 'New chat', model = null, storageRoot } = {}) {
+export async function createSession({ title = 'New chat', model = null, reasoningEffort = null, storageRoot } = {}) {
   const root = resolveStorageRoot(storageRoot);
   await ensureStorageRoot(root);
 
@@ -345,6 +360,7 @@ export async function createSession({ title = 'New chat', model = null, storageR
     sessionId,
     title,
     model: normalizeModel(model),
+    reasoningEffort: normalizeReasoningEffort(reasoningEffort),
     createdAt: now,
     updatedAt: now,
   };
@@ -398,6 +414,9 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'model')) {
       next.model = normalizeModel(patch.model);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'reasoningEffort')) {
+      next.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort);
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'providerState')) {
       const providerState = normalizeProviderState(patch.providerState, current.providerState);

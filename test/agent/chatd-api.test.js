@@ -155,8 +155,9 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
   const daemon = await startChatd({
     port: 0,
     writeChatdUrl: false,
-    runExecutor: ({ runId, sessionId, model, onEvent, onExit }) => {
-      seenRuns.push({ runId, sessionId, model });
+    defaultReasoningEffort: 'medium',
+    runExecutor: ({ runId, sessionId, model, reasoningEffort, onEvent, onExit }) => {
+      seenRuns.push({ runId, sessionId, model, reasoningEffort });
       setTimeout(() => {
         onEvent({ event: 'chat.delta', runId, sessionId, payload: { delta: 'hel' } });
       }, 10);
@@ -199,6 +200,7 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
 
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.equal(seenRuns.at(-1)?.model, 'gpt-5');
+    assert.equal(seenRuns.at(-1)?.reasoningEffort, 'medium');
 
     const messagesBody = await fetch(
       `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
@@ -206,6 +208,82 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
     ).then((res) => res.json());
     const messages = messagesBody.messages || [];
     assert.equal(messages.at(-1).text, 'hello');
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/runs uses per-session reasoning effort when configured', async () => {
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    defaultReasoningEffort: 'medium',
+    runExecutor: ({ runId, sessionId, reasoningEffort, onEvent, onExit }) => {
+      seenRuns.push({ runId, sessionId, reasoningEffort });
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'ok' } }), 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Effort' }),
+    }).then((res) => res.json());
+
+    const patched = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ reasoningEffort: 'high' }),
+    });
+    assert.equal(patched.status, 200);
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'hi' }),
+    });
+    assert.equal(runRes.status, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(seenRuns.at(-1)?.reasoningEffort, 'high');
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('PATCH /v1/sessions rejects invalid reasoning effort values', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Invalid effort' }),
+    }).then((res) => res.json());
+
+    const patched = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ reasoningEffort: 'turbo' }),
+    });
+    assert.equal(patched.status, 400);
   } finally {
     await daemon.stop();
   }

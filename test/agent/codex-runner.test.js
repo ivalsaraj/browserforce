@@ -44,6 +44,11 @@ test('buildCodexExecArgs includes --model when session model is set', () => {
   assert.deepEqual(args, ['exec', '--json', '--model', 'gpt-5', 'hi']);
 });
 
+test('buildCodexExecArgs includes reasoning effort override when set', () => {
+  const args = buildCodexExecArgs({ prompt: 'hi', reasoningEffort: 'medium' });
+  assert.deepEqual(args, ['exec', '--json', '-c', 'model_reasoning_effort="medium"', 'hi']);
+});
+
 test('buildCodexExecArgs emits resume invocation when codex session id is provided', () => {
   const args = buildCodexExecArgs({
     prompt: 'hi',

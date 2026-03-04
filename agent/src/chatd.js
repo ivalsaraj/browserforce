@@ -14,6 +14,7 @@ import {
   createSession,
   getSession,
   isValidModelId,
+  isValidReasoningEffort,
   isValidSessionId,
   listSessions,
   readMessages,
@@ -24,6 +25,7 @@ const BF_DIR = join(homedir(), '.browserforce');
 const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
 const MODEL_LIST_TIMEOUT_MS = 5000;
+const DEFAULT_REASONING_EFFORT = 'medium';
 
 function parseTopLevelTomlString(raw, key) {
   const lines = String(raw || '').split(/\r?\n/);
@@ -53,6 +55,20 @@ async function resolveConfiguredModel() {
     // no local codex config is fine
   }
   return null;
+}
+
+async function resolveConfiguredReasoningEffort() {
+  const envEffort = String(process.env.BF_CHATD_DEFAULT_REASONING_EFFORT || '').trim().toLowerCase();
+  if (envEffort && isValidReasoningEffort(envEffort)) return envEffort;
+
+  try {
+    const raw = await fs.readFile(CODEX_CONFIG_PATH, 'utf8');
+    const effort = String(parseTopLevelTomlString(raw, 'model_reasoning_effort') || '').trim().toLowerCase();
+    if (effort && isValidReasoningEffort(effort)) return effort;
+  } catch {
+    // no local codex config is fine
+  }
+  return DEFAULT_REASONING_EFFORT;
 }
 
 function dedupeModelRows(rows) {
@@ -212,6 +228,16 @@ async function listModelPresets({ storageRoot, modelFetcher } = {}) {
     : [];
 
   return dedupeModelRows([...liveRows, ...configuredRow, ...sessionRows]);
+}
+
+function resolveEffectiveReasoningEffort(sessionReasoningEffort, fallbackReasoningEffort = DEFAULT_REASONING_EFFORT) {
+  const sessionValue = String(sessionReasoningEffort || '').trim().toLowerCase();
+  if (sessionValue && isValidReasoningEffort(sessionValue)) return sessionValue;
+
+  const fallbackValue = String(fallbackReasoningEffort || '').trim().toLowerCase();
+  if (fallbackValue && isValidReasoningEffort(fallbackValue)) return fallbackValue;
+
+  return DEFAULT_REASONING_EFFORT;
 }
 
 function nowIso() {
@@ -923,11 +949,12 @@ async function clearChatdUrlFile({ writeChatdUrl = true, urlPath = CHATD_URL_PAT
 }
 
 function createDefaultRunExecutor({ codexCwd } = {}) {
-  return ({ runId, sessionId, message, model, resumeSessionId, onEvent, onExit, onError }) => startCodexRun({
+  return ({ runId, sessionId, message, model, reasoningEffort, resumeSessionId, onEvent, onExit, onError }) => startCodexRun({
     runId,
     sessionId,
     prompt: message,
     model,
+    reasoningEffort,
     resumeSessionId,
     cwd: codexCwd,
     onEvent,
@@ -949,6 +976,10 @@ export async function startChatd(opts = {}) {
     command: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
     timeoutMs: Number(process.env.BF_CHATD_MODEL_LIST_TIMEOUT_MS || MODEL_LIST_TIMEOUT_MS),
   }));
+  const configuredReasoningEffort = resolveEffectiveReasoningEffort(
+    opts.defaultReasoningEffort,
+    await resolveConfiguredReasoningEffort(),
+  );
 
   let desiredPort = Number.isFinite(opts.port) ? Number(opts.port) : Number(process.env.BF_CHATD_PORT || 0);
   if (!Number.isInteger(desiredPort) || desiredPort < 0) desiredPort = 0;
@@ -1063,7 +1094,7 @@ export async function startChatd(opts = {}) {
 
       if (url.pathname === '/v1/models' && req.method === 'GET') {
         const models = await listModelPresets({ storageRoot, modelFetcher });
-        json(res, 200, { models });
+        json(res, 200, { models, defaultReasoningEffort: configuredReasoningEffort });
         return;
       }
 
@@ -1079,6 +1110,7 @@ export async function startChatd(opts = {}) {
           const session = await createSession({
             title: body.title || 'New chat',
             model: body.model ?? null,
+            reasoningEffort: body.reasoningEffort ?? null,
             storageRoot,
           });
           json(res, 201, session);
@@ -1125,6 +1157,7 @@ export async function startChatd(opts = {}) {
             patch: {
               ...(Object.prototype.hasOwnProperty.call(body, 'title') ? { title: body.title } : {}),
               ...(Object.prototype.hasOwnProperty.call(body, 'model') ? { model: body.model } : {}),
+              ...(Object.prototype.hasOwnProperty.call(body, 'reasoningEffort') ? { reasoningEffort: body.reasoningEffort } : {}),
             },
             storageRoot,
           });
@@ -1215,6 +1248,10 @@ export async function startChatd(opts = {}) {
         }
         const browserContext = normalizeBrowserContext(body?.browserContext);
         const promptMessage = buildRunPrompt({ message, browserContext });
+        const runReasoningEffort = resolveEffectiveReasoningEffort(
+          session.reasoningEffort,
+          configuredReasoningEffort,
+        );
 
         const runId = randomBytes(12).toString('base64url');
         const run = {
@@ -1232,6 +1269,7 @@ export async function startChatd(opts = {}) {
           resumeSessionId: isValidSessionId(session?.providerState?.codex?.sessionId || '')
             ? session.providerState.codex.sessionId
             : null,
+          reasoningEffort: runReasoningEffort,
         };
 
         const enqueue = (fn) => {
@@ -1247,6 +1285,7 @@ export async function startChatd(opts = {}) {
             sessionId,
             message: promptMessage,
             model: session.model || null,
+            reasoningEffort: runReasoningEffort,
             resumeSessionId,
             onEvent: (evt) => {
               enqueue(async () => {
@@ -1377,7 +1416,12 @@ export async function startChatd(opts = {}) {
             event: 'run.started',
             runId,
             sessionId,
-            payload: { message, model: session.model || null, browserContext },
+            payload: {
+              message,
+              model: session.model || null,
+              reasoningEffort: runReasoningEffort,
+              browserContext,
+            },
           }));
           json(res, 202, { ok: true, runId, sessionId });
         } catch (error) {
