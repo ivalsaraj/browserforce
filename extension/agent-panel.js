@@ -459,6 +459,96 @@ function normalizeRunTimeline(run, fallbackText = '') {
   return timeline;
 }
 
+const EXECUTE_HELPER_EXCLUDE_CALLS = new Set([
+  'if',
+  'for',
+  'while',
+  'switch',
+  'catch',
+  'snapshot',
+  'reftolocator',
+  'waitforpageload',
+  'getlogs',
+  'clearlogs',
+  'screenshotwithaccessibilitylabels',
+  'cleanhtml',
+  'pagemarkdown',
+  'getcdpsession',
+  'plugincatalog',
+  'pluginhelp',
+  'fetch',
+  'settimeout',
+  'cleartimeout',
+  'promise',
+  'array',
+  'object',
+  'number',
+  'string',
+  'boolean',
+  'date',
+  'math',
+  'json',
+  'parseint',
+  'parsefloat',
+  'isnan',
+  'isfinite',
+  'encodeuri',
+  'decodeuri',
+]);
+
+function isBrowserForceExecuteStep(entry) {
+  const label = String(entry?.label || '').trim().toLowerCase();
+  return (
+    label === 'browserforce:execute'
+    || label === 'browserforce execute'
+    || label === 'mcp__browserforce__execute'
+    || label === 'execute'
+  );
+}
+
+function extractExecuteHelperCalls(details) {
+  if (!Array.isArray(details) || details.length === 0) return [];
+  const helperCalls = [];
+  const seen = new Set();
+  const callPattern = /(^|[^.\w$])([A-Za-z_$][\w$]{2,})\s*\(/g;
+
+  for (const line of details) {
+    const text = String(line || '');
+    if (!text) continue;
+    callPattern.lastIndex = 0;
+    for (const match of text.matchAll(callPattern)) {
+      const callName = String(match[2] || '').trim();
+      if (!callName) continue;
+      const normalized = callName.toLowerCase();
+      if (EXECUTE_HELPER_EXCLUDE_CALLS.has(normalized)) continue;
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      helperCalls.push(callName);
+      if (helperCalls.length >= 3) return helperCalls;
+    }
+  }
+
+  return helperCalls;
+}
+
+function renderExecuteHelperTreePreview(entry, expanded) {
+  if (expanded) return '';
+  if (!isBrowserForceExecuteStep(entry)) return '';
+  const details = Array.isArray(entry?.details) ? entry.details : [];
+  const helperCalls = extractExecuteHelperCalls(details);
+  if (!helperCalls.length) return '';
+  const status = String(entry?.status || '').toLowerCase() === 'done' ? 'done' : 'running';
+  return `
+    <ul class="step-branch-preview ${status}">
+      ${helperCalls.map((callName) => `
+        <li class="step-branch-node">
+          <span class="step-branch-call">${escapeHtml(callName)}()</span>
+        </li>
+      `).join('')}
+    </ul>
+  `;
+}
+
 function getLatestInFlightTimelineStepIndex(run, timeline) {
   if (!run || run.done) return -1;
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
@@ -531,6 +621,7 @@ function renderRunTimeline(run, fallbackText = '') {
     const key = getTimelineEntryKey(entry, index);
     const expanded = !!state.expandedTimelineEntries[key];
     if (expanded) classes.push('expanded');
+    const helperTreePreviewHtml = renderExecuteHelperTreePreview(entry, expanded);
     const detailsHtml = details
       .map((line) => `<li>${renderInlineContent(line)}</li>`)
       .join('');
@@ -539,8 +630,11 @@ function renderRunTimeline(run, fallbackText = '') {
         <span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span>
         <div class="step-body">
           <button type="button" class="step-toggle" data-step-key="${escapeHtml(key)}" aria-expanded="${expanded ? 'true' : 'false'}">
-            <span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span>
-            <span class="step-caret" aria-hidden="true"></span>
+            <span class="step-toggle-main">
+              <span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span>
+              <span class="step-caret" aria-hidden="true"></span>
+            </span>
+            ${helperTreePreviewHtml}
           </button>
           ${expanded ? `<ul class="step-details">${detailsHtml}</ul>` : ''}
         </div>

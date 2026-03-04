@@ -147,3 +147,12 @@ test('chatd-url auth bootstrap reports specific failure codes before generic dae
   assert.match(js, /if \(res\.status === 503 && relayError\.includes\('extension not connected'\)\)/);
   assert.match(js, /error\.code = 'daemon_unavailable'/);
 });
+
+test('collapsed BrowserForce execute rows infer helper calls and render branch preview', () => {
+  assert.match(js, /function extractExecuteHelperCalls\(/);
+  assert.match(js, /function renderExecuteHelperTreePreview\(/);
+  assert.match(js, /isBrowserForceExecuteStep/);
+  assert.match(js, /step-branch-preview/);
+  assert.match(js, /class="step-branch-node"/);
+  assert.match(js, /class="step-branch-call"/);
+});

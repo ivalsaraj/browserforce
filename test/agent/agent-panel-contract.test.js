@@ -84,3 +84,10 @@ test('agent panel includes visible startup error empty-state treatment', () => {
   assert.match(css, /\.empty-icon\.error/);
   assert.match(css, /\.empty-command code/);
 });
+
+test('collapsed execute helper preview has tree-like branch styling', () => {
+  assert.match(css, /\.step-branch-preview/);
+  assert.match(css, /\.step-branch-node/);
+  assert.match(css, /\.step-branch-node::before/);
+  assert.match(css, /\.step-branch-call/);
+});
