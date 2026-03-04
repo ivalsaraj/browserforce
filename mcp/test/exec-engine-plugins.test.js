@@ -80,6 +80,60 @@ function createPageMarkdownPage(content = 'Markdown content line', options = {})
   };
 }
 
+function createGoogleSheetsMockPage(cellValues = {}) {
+  let activeRef = 'A1';
+  let editorReadCount = 0;
+
+  const page = {
+    isClosed: () => false,
+    url: () => 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit#gid=1',
+    title: async () => 'Mock Sheet',
+    locator: (selector) => {
+      assert.equal(selector, '#t-name-box');
+      return {
+        click: async () => {},
+        fill: async (value) => {
+          activeRef = String(value || '').toUpperCase();
+        },
+      };
+    },
+    keyboard: {
+      press: async () => {},
+    },
+    waitForTimeout: async () => {},
+    evaluate: async (fn, arg) => {
+      const source = String(fn);
+      if (arg && typeof arg === 'object' && typeof arg.textValue === 'string') {
+        cellValues[activeRef] = arg.textValue;
+        return { after: arg.textValue, lineCount: arg.textValue.split('\n').length };
+      }
+      if (source.includes('createTreeWalker(editor, NodeFilter.SHOW_TEXT)')) {
+        const text = Object.prototype.hasOwnProperty.call(cellValues, activeRef)
+          ? String(cellValues[activeRef])
+          : '';
+        return {
+          text,
+          baseStyle: '',
+          boldRanges: [],
+          lineCount: text.split('\n').length,
+        };
+      }
+      if (source.includes('#waffle-rich-text-editor')) {
+        editorReadCount += 1;
+        return Object.prototype.hasOwnProperty.call(cellValues, activeRef)
+          ? String(cellValues[activeRef])
+          : '';
+      }
+      throw new Error('Unexpected evaluate call in google-sheets mock');
+    },
+  };
+
+  return {
+    page,
+    getEditorReadCount: () => editorReadCount,
+  };
+}
+
 test('plugin helpers are available in execute scope', async () => {
   const pluginHelpers = {
     myHelper: async (page, ctx, state, arg) => `result:${arg}`,
@@ -88,6 +142,33 @@ test('plugin helpers are available in execute scope', async () => {
   assert.equal(typeof ctx.myHelper, 'function');
   const result = await runCode('return await myHelper("hello")', ctx, 5000);
   assert.equal(result, 'result:hello');
+});
+
+test('pluginCatalog and pluginHelp built-ins are available in execute scope', async () => {
+  const pluginSkillRuntime = {
+    catalog: [{
+      name: 'tagger',
+      description: 'Tags elements quickly',
+      helpers: ['tagger'],
+      sections: ['examples'],
+    }],
+    byName: {
+      tagger: {
+        text: 'Use tagger() to tag.',
+        sections: { examples: '- tagger("hero")' },
+      },
+    },
+  };
+
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {}, {}, {}, pluginSkillRuntime);
+  const catalog = await runCode('return pluginCatalog()', ctx, 5000);
+  assert.deepEqual(catalog, pluginSkillRuntime.catalog);
+
+  const defaultHelp = await runCode('return pluginHelp("tagger")', ctx, 5000);
+  assert.equal(defaultHelp, 'Use tagger() to tag.');
+
+  const sectionHelp = await runCode('return pluginHelp("tagger", "examples")', ctx, 5000);
+  assert.equal(sectionHelp, '- tagger("hero")');
 });
 
 test('built-in helpers always win over plugin helpers with same name', async () => {
@@ -102,6 +183,34 @@ test('built-in helpers always win over plugin helpers with same name', async () 
   assert.notEqual(result, 'fake-snapshot-string');
 });
 
+test('plugin helpers cannot override pluginCatalog/pluginHelp built-ins', async () => {
+  const pluginHelpers = {
+    pluginCatalog: async () => ['evil'],
+    pluginHelp: async () => 'evil-help',
+  };
+  const pluginSkillRuntime = {
+    catalog: [{ name: 'safe', helpers: [], sections: [] }],
+    byName: { safe: { text: 'safe-help', sections: {} } },
+  };
+
+  const ctx = buildExecContext(
+    mockPage,
+    mockCtx,
+    {},
+    {},
+    pluginHelpers,
+    {},
+    {},
+    pluginSkillRuntime,
+  );
+
+  const catalog = await runCode('return pluginCatalog()', ctx, 5000);
+  assert.deepEqual(catalog, pluginSkillRuntime.catalog);
+
+  const help = await runCode('return pluginHelp("safe")', ctx, 5000);
+  assert.equal(help, 'safe-help');
+});
+
 test('plugin helper receives null page gracefully when no page open', async () => {
   const pluginHelpers = {
     safeHelper: async (page, ctx, state) => page === null ? 'no-page' : 'has-page',
@@ -111,6 +220,213 @@ test('plugin helper receives null page gracefully when no page open', async () =
   // Calling safeHelper should not throw
   const result = await runCode('return await safeHelper()', ctx, 5000);
   assert.equal(result, 'no-page');
+});
+
+test('gsSummarizeSheet reuses cached rows on repeated calls with same options', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+  });
+  const state = {};
+  const options = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  const first = await summarize(page, null, state, options);
+  const readsAfterFirst = getEditorReadCount();
+  assert.equal(first.scan.usedRowCount, 2);
+  assert.ok(readsAfterFirst > 0);
+
+  const second = await summarize(page, null, state, options);
+  const readsAfterSecond = getEditorReadCount();
+  assert.equal(second.scan.usedRowCount, 2);
+  assert.equal(readsAfterSecond, readsAfterFirst);
+});
+
+test('gsSummarizeSheet forceRefresh bypasses cache', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+  });
+  const state = {};
+  const options = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  await summarize(page, null, state, options);
+  const readsAfterFirst = getEditorReadCount();
+  await summarize(page, null, state, { ...options, forceRefresh: true });
+  const readsAfterForceRefresh = getEditorReadCount();
+  assert.ok(readsAfterForceRefresh > readsAfterFirst);
+});
+
+test('gsSummarizeSheet useCache false bypasses cache reads and writes', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+  });
+  const state = {};
+  const options = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+    useCache: false,
+  };
+
+  await summarize(page, null, state, options);
+  const readsAfterFirst = getEditorReadCount();
+  await summarize(page, null, state, options);
+  const readsAfterSecond = getEditorReadCount();
+  assert.ok(readsAfterSecond > readsAfterFirst);
+});
+
+test('gsSplitBulletsInRange invalidates gsSummarizeSheet cache after real write', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const splitBullets = googleSheetsPlugin.helpers.gsSplitBulletsInRange;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+    D2: 'Alpha - Beta',
+  });
+  const state = {};
+  const summarizeOptions = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterFirst = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterSecond = getEditorReadCount();
+  assert.equal(readsAfterSecond, readsAfterFirst);
+
+  const splitResult = await splitBullets(page, null, state, 'D2:D2', {
+    verify: false,
+    dryRun: false,
+  });
+  assert.equal(splitResult.changed, 1);
+
+  const readsAfterWrite = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterThird = getEditorReadCount();
+  assert.ok(readsAfterThird > readsAfterWrite);
+});
+
+test('gsRebalanceBoldInRange invalidates gsSummarizeSheet cache after real write', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const rebalanceBold = googleSheetsPlugin.helpers.gsRebalanceBoldInRange;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+    D2: 'Alpha Beta',
+  });
+  const state = {};
+  const summarizeOptions = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterFirst = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterSecond = getEditorReadCount();
+  assert.equal(readsAfterSecond, readsAfterFirst);
+
+  const rebalanceResult = await rebalanceBold(page, null, state, 'D2:D2', {
+    verify: false,
+    dryRun: false,
+    preferredPhrases: ['Alpha'],
+  });
+  assert.equal(rebalanceResult.changed, 1);
+
+  const readsAfterWrite = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterThird = getEditorReadCount();
+  assert.ok(readsAfterThird > readsAfterWrite);
+});
+
+test('gsFormatBulletsInRange invalidates gsSummarizeSheet cache after real write', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const formatBullets = googleSheetsPlugin.helpers.gsFormatBulletsInRange;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+    D2: 'Alpha - Beta',
+  });
+  const state = {};
+  const summarizeOptions = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterFirst = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterSecond = getEditorReadCount();
+  assert.equal(readsAfterSecond, readsAfterFirst);
+
+  const formatResult = await formatBullets(page, null, state, 'D2:D2', {
+    verify: false,
+    dryRun: false,
+  });
+  assert.equal(formatResult.changed, 1);
+
+  const readsAfterWrite = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterThird = getEditorReadCount();
+  assert.ok(readsAfterThird > readsAfterWrite);
 });
 
 test('buildExecContext exposes screenshot and content helpers in execute scope', () => {
