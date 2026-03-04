@@ -99,6 +99,13 @@ test('initial tab attach waits 2 seconds before attaching', () => {
   assert.match(fnBlock, /},\s*2000\)/);
 });
 
+test('initial async attach always refreshes banner state after completion', () => {
+  const fnMatch = js.match(/function startInitialTabAttach\(\)[\s\S]*?\n}\n\nasync function getActiveTabContext/);
+  assert.ok(fnMatch, 'startInitialTabAttach function block should be present');
+  const fnBlock = fnMatch[0];
+  assert.match(fnBlock, /\.finally\(\(\)\s*=>\s*\{[\s\S]*scheduleTabAttachRefresh\(0\);[\s\S]*\}\)/);
+});
+
 test('tool-call timeline entries render collapsed toggle rows with click-to-expand details', () => {
   assert.match(js, /data-step-key=/);
   assert.match(js, /class="step-details"/);

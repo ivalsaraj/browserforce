@@ -753,6 +753,7 @@ function startInitialTabAttach() {
       .finally(() => {
         state.initialTabAttachInFlight = false;
         renderContextUsageChip();
+        scheduleTabAttachRefresh(0);
       });
   }, 2000);
 }
