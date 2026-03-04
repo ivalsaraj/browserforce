@@ -410,7 +410,14 @@ Plugins add custom helpers directly into the `execute` tool scope. Install once 
 browserforce plugin install highlight
 ```
 
-That's it. Restart MCP (or Claude Desktop) and `highlight()` is available in every `execute` call.
+That's it. Restart MCP (or Claude Desktop) after every plugin install or update, then `highlight()` is available in every `execute` call.
+
+### Prompt behavior (metadata-first)
+
+Plugin `SKILL.md` content is no longer fully inlined into the default `execute` prompt. BrowserForce now exposes plugin metadata first (name, description, helpers), then loads details on demand:
+
+- Call `pluginCatalog()` to discover installed plugins, helper names, and available sections.
+- Call `pluginHelp(name, section?)` only when you need plugin-specific instructions.
 
 ### Official plugins
 
@@ -442,7 +449,13 @@ browserforce plugin list        # See what's installed
 browserforce plugin remove highlight   # Uninstall
 ```
 
-Plugins are stored at `~/.browserforce/plugins/`. Each one is a folder with an `index.js`.
+Plugins are stored at `~/.browserforce/plugins/<name>/`. Each plugin folder contains an `index.js` and can include a `SKILL.md`.
+
+Repo layout remains:
+- Official plugins: `plugins/official/<name>/SKILL.md`
+- Community plugins: `plugins/community/<name>/SKILL.md`
+
+No migration to `plugin/skills/<name>/` is required.
 
 ### Write your own
 
@@ -463,7 +476,7 @@ export default {
 
 Drop it in `~/.browserforce/plugins/my-plugin/`, restart MCP, and call `await scrollToBottom()` or `await countLinks()` from any `execute` call.
 
-Add a `SKILL.md` file alongside `index.js` and its content is automatically appended to the `execute` tool's description — so your agent knows the helpers exist without you having to explain them every time.
+Add a `SKILL.md` file alongside `index.js` to publish plugin metadata and help text. The default prompt includes only metadata; fetch full or sectioned guidance on demand with `pluginHelp('my-plugin')` or `pluginHelp('my-plugin', 'examples')`.
 
 ### Any Playwright Script
 

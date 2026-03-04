@@ -289,7 +289,7 @@ async function cmdPlugin() {
   try { authToken = readFileSync(tokenFile, 'utf8').trim(); } catch { /* no token file */ }
 
   if (sub === 'list') {
-    const data = await httpGet(`${baseUrl}/plugins`);
+    const data = await httpGet(`${baseUrl}/v1/plugins`);
     if (values.json) {
       output(data, true);
     } else {
@@ -306,7 +306,7 @@ async function cmdPlugin() {
   if (sub === 'install') {
     const name = positionals[2];
     if (!name) { console.error('Usage: browserforce plugin install <name>'); process.exit(1); }
-    const { status, body } = await httpFetch('POST', `${baseUrl}/plugins/install`, { name }, authToken);
+    const { status, body } = await httpFetch('POST', `${baseUrl}/v1/plugins/install`, { name }, authToken);
     if (status >= 400) {
       console.error(`Error: ${body.error || JSON.stringify(body)}`);
       process.exit(1);
@@ -318,7 +318,7 @@ async function cmdPlugin() {
   if (sub === 'remove') {
     const name = positionals[2];
     if (!name) { console.error('Usage: browserforce plugin remove <name>'); process.exit(1); }
-    const { status, body } = await httpFetch('DELETE', `${baseUrl}/plugins/${encodeURIComponent(name)}`, null, authToken);
+    const { status, body } = await httpFetch('DELETE', `${baseUrl}/v1/plugins/${encodeURIComponent(name)}`, null, authToken);
     if (status >= 400) {
       console.error(`Error: ${body.error || JSON.stringify(body)}`);
       process.exit(1);

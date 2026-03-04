@@ -1,3 +1,11 @@
+---
+name: google-sheets
+description: Google Sheets helpers for reading, summarizing, formatting, and issue logging in the active sheet.
+when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Applying bullet splitting and sparse bold formatting across ranges", "Logging extraction or formatting failures for follow-up"]
+helpers: ["gsGetMeta", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
+tools: []
+---
+
 ## google-sheets plugin
 
 Use Google Sheets helpers when work involves reading, summarizing, or structuring sheet content from the active page without guesswork.
@@ -32,6 +40,7 @@ When the user says "summarize this page/sheet", "read this sheet", or equivalent
 - Use `gsReadContiguousRows({ columns: ['A','B'], startRow: 1, maxRows: 30, emptyStreakStop: 2 })`.
 - Always report `scannedRows`, `usedRowCount`, and `stopReason` when summarizing extraction.
 - For summary requests, prefer `gsSummarizeSheet()` over ad-hoc DOM probing loops.
+- `gsSummarizeSheet()` reuses a recent in-session scan by default; set `forceRefresh: true` when the user asks for a guaranteed fresh pull.
 - Prefer `gsFormatBulletsInRange()` for multi-cell content cleanup tasks.
 - Use `dryRun: true` first for formatting helpers when changing many cells.
 - Log every process failure or unexpected behavior with `gsLogIssue(...)`.

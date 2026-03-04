@@ -5,6 +5,9 @@ import { homedir } from 'node:os';
 const DEFAULT_SCAN_MAX_ROWS = 30;
 const DEFAULT_EMPTY_STREAK_STOP = 2;
 const DEFAULT_EDITOR_WAIT_MS = 35;
+const DEFAULT_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
+const SUMMARY_CACHE_MAX_ENTRIES = 24;
+const SUMMARY_CACHE_STATE_KEY = '__gsSummaryCache';
 const DEFAULT_LOG_PATH = join(homedir(), '.browserforce', 'logs', 'google-sheets-issues.jsonl');
 const SHEETS_URL_RE = /^https:\/\/docs\.google\.com\/spreadsheets\//;
 
@@ -511,6 +514,124 @@ async function inferColumnsFromHeaderRow(page, options = {}) {
   return fallback;
 }
 
+function getSummaryScanConfig(options = {}, explicitColumns = null) {
+  const startRow = Number.isInteger(options.startRow) && options.startRow > 0 ? options.startRow : 1;
+  const maxRows = Number.isInteger(options.maxRows) && options.maxRows > 0
+    ? options.maxRows
+    : DEFAULT_SCAN_MAX_ROWS;
+  const emptyStreakStop = Number.isInteger(options.emptyStreakStop) && options.emptyStreakStop > 0
+    ? options.emptyStreakStop
+    : DEFAULT_EMPTY_STREAK_STOP;
+  const trim = options.trim !== false;
+
+  if (explicitColumns) {
+    return {
+      mode: 'explicit',
+      columns: explicitColumns,
+      startRow,
+      maxRows,
+      emptyStreakStop,
+      trim,
+    };
+  }
+
+  const maxColumns = Number.isInteger(options.maxColumns) && options.maxColumns > 0
+    ? options.maxColumns
+    : 8;
+  const emptyColumnStreakStop = Number.isInteger(options.emptyColumnStreakStop) && options.emptyColumnStreakStop > 0
+    ? options.emptyColumnStreakStop
+    : 1;
+  const fallbackColumnsCount = Number.isInteger(options.fallbackColumnsCount) && options.fallbackColumnsCount > 0
+    ? options.fallbackColumnsCount
+    : 2;
+  const startColumn = normalizeColumns([options.startColumn || 'A'])[0];
+
+  return {
+    mode: 'auto',
+    startRow,
+    maxRows,
+    emptyStreakStop,
+    trim,
+    startColumn,
+    maxColumns,
+    emptyColumnStreakStop,
+    fallbackColumnsCount,
+  };
+}
+
+function buildSummaryCacheKey(sheetMeta, options = {}, explicitColumns = null) {
+  const identity = {
+    spreadsheetId: sheetMeta?.spreadsheetId || null,
+    gid: sheetMeta?.gid || null,
+  };
+  const config = getSummaryScanConfig(options, explicitColumns);
+  return JSON.stringify({ identity, config });
+}
+
+function getSummaryCacheMap(state) {
+  if (!state || typeof state !== 'object') return null;
+  if (!(state[SUMMARY_CACHE_STATE_KEY] instanceof Map)) {
+    state[SUMMARY_CACHE_STATE_KEY] = new Map();
+  }
+  return state[SUMMARY_CACHE_STATE_KEY];
+}
+
+function readSummaryCacheEntry(state, cacheKey, ttlMs) {
+  const cache = getSummaryCacheMap(state);
+  if (!cache) return null;
+
+  const entry = cache.get(cacheKey);
+  if (!entry) return null;
+
+  const ageMs = Date.now() - entry.cachedAt;
+  if (ttlMs >= 0 && ageMs > ttlMs) {
+    cache.delete(cacheKey);
+    return null;
+  }
+
+  return entry;
+}
+
+function writeSummaryCacheEntry(state, cacheKey, value) {
+  const cache = getSummaryCacheMap(state);
+  if (!cache) return;
+
+  cache.delete(cacheKey);
+  cache.set(cacheKey, { cachedAt: Date.now(), ...value });
+
+  while (cache.size > SUMMARY_CACHE_MAX_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
+}
+
+function clearSummaryCache(state) {
+  const cache = getSummaryCacheMap(state);
+  if (cache) cache.clear();
+}
+
+function buildSummaryResult(sheet, columns, scanResult, options = {}) {
+  const includeRows = options.includeRows === true;
+  const previewRows = Number.isInteger(options.previewRows) && options.previewRows > 0 ? options.previewRows : 8;
+  const preview = scanResult.rows.slice(0, previewRows).map((entry) => ({ row: entry.row, cells: entry.cells }));
+  const firstDataRow = scanResult.rows[0] || null;
+  const headerCandidate = scanResult.rows.find((entry) => entry.row === scanResult.config.startRow) || null;
+
+  return {
+    sheet,
+    columns,
+    scan: {
+      scannedRows: scanResult.scannedRows,
+      usedRowCount: scanResult.usedRowCount,
+      stopReason: scanResult.stopReason,
+    },
+    firstDataRow: firstDataRow ? { row: firstDataRow.row, cells: firstDataRow.cells } : null,
+    headerCandidate: headerCandidate ? { row: headerCandidate.row, cells: headerCandidate.cells } : null,
+    preview,
+    ...(includeRows ? { rows: scanResult.rows } : {}),
+  };
+}
+
 export default {
   name: 'google-sheets',
   description: 'Google Sheets helpers for reliable row scanning, cell reads, and issue logging',
@@ -543,30 +664,30 @@ export default {
     gsSummarizeSheet: async (page, ctx, state, options = {}) => {
       assertGoogleSheet(page, 'gsSummarizeSheet');
       const title = await page.title();
-      const sheet = { ...parseSheetMeta(page.url()), title };
-      const includeRows = options.includeRows === true;
-      const previewRows = Number.isInteger(options.previewRows) && options.previewRows > 0 ? options.previewRows : 8;
-      const columns = options.columns
-        ? normalizeColumns(options.columns)
-        : await inferColumnsFromHeaderRow(page, options);
-      const scanResult = await scanContiguousRows(page, { ...options, columns });
-      const preview = scanResult.rows.slice(0, previewRows).map((entry) => ({ row: entry.row, cells: entry.cells }));
-      const firstDataRow = scanResult.rows[0] || null;
-      const headerCandidate = scanResult.rows.find((entry) => entry.row === scanResult.config.startRow) || null;
+      const sheetMeta = parseSheetMeta(page.url());
+      const sheet = { ...sheetMeta, title };
+      const explicitColumns = options.columns ? normalizeColumns(options.columns) : null;
+      const forceRefresh = options.forceRefresh === true;
+      const useCache = options.useCache !== false;
+      const cacheTtlMs = Number.isInteger(options.cacheTtlMs) && options.cacheTtlMs >= 0
+        ? options.cacheTtlMs
+        : DEFAULT_SUMMARY_CACHE_TTL_MS;
+      const cacheKey = buildSummaryCacheKey(sheetMeta, options, explicitColumns);
 
-      return {
-        sheet,
-        columns,
-        scan: {
-          scannedRows: scanResult.scannedRows,
-          usedRowCount: scanResult.usedRowCount,
-          stopReason: scanResult.stopReason,
-        },
-        firstDataRow: firstDataRow ? { row: firstDataRow.row, cells: firstDataRow.cells } : null,
-        headerCandidate: headerCandidate ? { row: headerCandidate.row, cells: headerCandidate.cells } : null,
-        preview,
-        ...(includeRows ? { rows: scanResult.rows } : {}),
-      };
+      if (useCache && !forceRefresh) {
+        const cached = readSummaryCacheEntry(state, cacheKey, cacheTtlMs);
+        if (cached) {
+          return buildSummaryResult(sheet, cached.columns, cached.scanResult, options);
+        }
+      }
+
+      const columns = explicitColumns || await inferColumnsFromHeaderRow(page, options);
+      const scanResult = await scanContiguousRows(page, { ...options, columns });
+      if (useCache) {
+        writeSummaryCacheEntry(state, cacheKey, { columns, scanResult });
+      }
+
+      return buildSummaryResult(sheet, columns, scanResult, options);
     },
 
     gsLogIssue: async (page, ctx, state, summary, details = {}, options = {}) => {
@@ -654,13 +775,20 @@ export default {
         }
       }
 
+      const changedCount = results.filter((r) => r.changed).length;
+      const unchangedCount = results.filter((r) => r.status === 'unchanged').length;
+      const okCount = results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length;
+      const failedCount = results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length;
+
+      if (!dryRun && changedCount > 0) clearSummaryCache(state);
+
       return {
         rangeRef: String(rangeRef),
         total: results.length,
-        changed: results.filter((r) => r.changed).length,
-        unchanged: results.filter((r) => r.status === 'unchanged').length,
-        ok: results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length,
-        failed: results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length,
+        changed: changedCount,
+        unchanged: unchangedCount,
+        ok: okCount,
+        failed: failedCount,
         results,
       };
     },
@@ -743,13 +871,20 @@ export default {
         }
       }
 
+      const changedCount = results.filter((r) => r.changed).length;
+      const unchangedCount = results.filter((r) => r.status === 'unchanged').length;
+      const okCount = results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length;
+      const failedCount = results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length;
+
+      if (!dryRun && changedCount > 0) clearSummaryCache(state);
+
       return {
         rangeRef: String(rangeRef),
         total: results.length,
-        changed: results.filter((r) => r.changed).length,
-        unchanged: results.filter((r) => r.status === 'unchanged').length,
-        ok: results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length,
-        failed: results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length,
+        changed: changedCount,
+        unchanged: unchangedCount,
+        ok: okCount,
+        failed: failedCount,
         results,
       };
     },
@@ -843,13 +978,20 @@ export default {
         }
       }
 
+      const changedCount = results.filter((r) => r.changed).length;
+      const unchangedCount = results.filter((r) => r.status === 'unchanged').length;
+      const okCount = results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length;
+      const failedCount = results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length;
+
+      if (!dryRun && changedCount > 0) clearSummaryCache(state);
+
       return {
         rangeRef: String(rangeRef),
         total: results.length,
-        changed: results.filter((r) => r.changed).length,
-        unchanged: results.filter((r) => r.status === 'unchanged').length,
-        ok: results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length,
-        failed: results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length,
+        changed: changedCount,
+        unchanged: unchangedCount,
+        ok: okCount,
+        failed: failedCount,
         results,
       };
     },

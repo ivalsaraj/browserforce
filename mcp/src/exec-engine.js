@@ -554,6 +554,7 @@ export function buildExecContext(
   pluginHelpers = {},
   agentPreferences = {},
   runtimeRestrictions = {},
+  pluginSkillRuntime = {},
 ) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
@@ -669,9 +670,87 @@ export function buildExecContext(
     instructions: typeof runtimeRestrictions?.instructions === 'string' ? runtimeRestrictions.instructions : '',
   };
 
+  const pluginCatalog = () => {
+    const catalog = Array.isArray(pluginSkillRuntime?.catalog) ? pluginSkillRuntime.catalog : [];
+    return catalog.map((entry) => ({
+      ...entry,
+      helpers: Array.isArray(entry?.helpers) ? [...entry.helpers] : [],
+      sections: Array.isArray(entry?.sections) ? [...entry.sections] : [],
+    }));
+  };
+
+  const pluginHelp = (name, section) => {
+    const requestedName = String(name || '').trim().toLowerCase();
+    if (!requestedName) {
+      throw new Error('pluginHelp(name, section?) requires a plugin name');
+    }
+
+    const lookup = pluginSkillRuntime?.byName && typeof pluginSkillRuntime.byName === 'object'
+      ? pluginSkillRuntime.byName
+      : {};
+    const plugin = lookup[requestedName];
+    if (!plugin) {
+      const available = pluginCatalog().map((entry) => entry.name).join(', ') || '(none)';
+      throw new Error(`Unknown plugin "${name}". Available plugins: ${available}`);
+    }
+
+    if (section === undefined || section === null || String(section).trim() === '') {
+      if (plugin.text && plugin.text.trim()) return plugin.text;
+      if (plugin.description && plugin.description.trim()) {
+        return `${plugin.name}: ${plugin.description.trim()}`;
+      }
+      return `${plugin.name} has no SKILL.md help text.`;
+    }
+
+    const normalizedSection = String(section)
+      .toLowerCase()
+      .trim()
+      .replace(/^[\d.)\s-]+/, '')
+      .replace(/[^\p{L}\p{N}\s-]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const sections = plugin.sections && typeof plugin.sections === 'object' ? plugin.sections : {};
+    if (sections[normalizedSection]) return sections[normalizedSection];
+    const availableSections = Object.keys(sections).join(', ') || '(none)';
+    throw new Error(
+      `Unknown section "${section}" for plugin "${plugin.name}". Available sections: ${availableSections}`
+    );
+  };
+
+  const reservedContextNames = new Set([
+    'browserforceSettings',
+    'browserforceRestrictions',
+    'page',
+    'context',
+    'state',
+    'snapshot',
+    'refToLocator',
+    'waitForPageLoad',
+    'getLogs',
+    'clearLogs',
+    'getCDPSession',
+    'screenshotWithAccessibilityLabels',
+    'cleanHTML',
+    'pageMarkdown',
+    'pluginCatalog',
+    'pluginHelp',
+    'fetch',
+    'URL',
+    'URLSearchParams',
+    'Buffer',
+    'setTimeout',
+    'clearTimeout',
+    'TextEncoder',
+    'TextDecoder',
+  ]);
+
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
   const wrappedPluginHelpers = {};
   for (const [name, fn] of Object.entries(pluginHelpers)) {
+    if (reservedContextNames.has(name)) {
+      process.stderr.write(`[bf-plugins] Ignoring helper "${name}" because it conflicts with a built-in\n`);
+      continue;
+    }
     wrappedPluginHelpers[name] = (...args) => {
       let pg = null;
       try { pg = activePage(); } catch { /* no active page */ }
@@ -686,6 +765,7 @@ export function buildExecContext(
     page: defaultPage, context: ctx, state: userState,
     snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
+    pluginCatalog, pluginHelp,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,
   };

@@ -1,3 +1,11 @@
+---
+name: openclaw
+description: BrowserForce tab-attachment policy notes for OpenClaw operating constraints.
+when_to_use: ["Applying OpenClaw tab policy in BrowserForce sessions", "Deciding whether to auto-create a dedicated tab", "Reporting actionable attach/share blockers to the user"]
+helpers: []
+tools: []
+---
+
 ## BrowserForce tab policy (OpenClaw)
 
 - Do not ask the user to click Attach/Share by default.

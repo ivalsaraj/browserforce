@@ -123,6 +123,9 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('getCDPSession({ page })'), 'should mention relay-safe getCDPSession helper usage');
     assert.ok(promptBlock.includes('cleanHTML'), 'should mention cleanHTML helper');
     assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
+    assert.ok(promptBlock.includes('pluginCatalog()'), 'should mention pluginCatalog built-in helper');
+    assert.ok(promptBlock.includes('pluginHelp(name, section?)'), 'should mention pluginHelp built-in helper');
+    assert.ok(promptBlock.includes('metadata-first'), 'should guide plugin usage as metadata-first');
     assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
     // Anti-patterns section
     assert.ok(promptBlock.includes('ANTI-PATTERN') || promptBlock.includes('Don\'t') || promptBlock.includes('✗'), 'should include anti-patterns');
