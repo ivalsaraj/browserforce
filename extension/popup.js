@@ -14,7 +14,7 @@ const RESTRICTION_LINES = {
 const statusEl = document.getElementById('bf-status');
 const statusTextEl = document.getElementById('bf-status-text');
 const mcpClientsEl = document.getElementById('bf-mcp-clients');
-const popupEl = document.querySelector('.bf-popup');
+const autoModeNoteEl = document.getElementById('bf-auto-mode-note');
 const relayUrlInput = document.getElementById('bf-relay-url');
 const saveUrlBtn = document.getElementById('bf-save-url');
 const tabCountEl = document.getElementById('bf-tab-count');
@@ -63,7 +63,7 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
   instructionsEl.value = s.userInstructions || '';
-  setAutoModeBorder(s.mode || 'auto');
+  setAutoModeState(s.mode || 'auto');
 });
 
 // --- Save Handlers ---
@@ -108,7 +108,7 @@ saveUrlBtn.addEventListener('click', () => {
 
 modeSelect.addEventListener('change', () => {
   chrome.storage.local.set({ mode: modeSelect.value });
-  setAutoModeBorder(modeSelect.value);
+  setAutoModeState(modeSelect.value);
 });
 
 executionModeSelect.addEventListener('change', () => {
@@ -199,6 +199,7 @@ openAgentBtn.addEventListener('click', async () => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     await chrome.sidePanel.open({ windowId: tab?.windowId });
+    window.close();
   } catch {
     openAgentBtn.textContent = 'Failed to open';
     setTimeout(() => { openAgentBtn.textContent = 'Open BrowserForce Agent'; }, 1500);
@@ -223,7 +224,7 @@ function refreshStatus() {
     setTabs(response.tabs || []);
     setAutoTimer(response.nextAutoActionSecs);
     setMcpClientCount(response.mcpClientCount);
-    setAutoModeBorder(response.mode || modeSelect.value || 'auto');
+    setAutoModeState(response.mode || modeSelect.value || 'auto');
   });
 }
 
@@ -279,8 +280,9 @@ function setMcpClientCount(count) {
   mcpClientsEl.textContent = `MCP ${safeCount}`;
 }
 
-function setAutoModeBorder(mode) {
-  popupEl.classList.toggle('auto-mode', mode === 'auto');
+function setAutoModeState(mode) {
+  if (!autoModeNoteEl) return;
+  autoModeNoteEl.hidden = mode !== 'auto';
 }
 
 function escapeHtml(str) {
