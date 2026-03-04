@@ -118,15 +118,11 @@ function looksLikeImageUrl(url) {
 function normalizeRenderableUrl(url) {
   const value = String(url || '').trim();
   if (!value) return '';
-
-  if (
-    /^\/(?:tmp|private|var|Users|home|Volumes)\//.test(value)
-    || /^\/var\/folders\//.test(value)
-  ) {
-    return `file://${value}`;
-  }
-
   return value;
+}
+
+function isLocalAbsolutePath(value) {
+  return /^\/(?!\/)/.test(String(value || '').trim());
 }
 
 function isSafeRenderableUrl(url) {
@@ -170,17 +166,28 @@ export function renderInlineContent(value) {
 
   const withImageAndLinks = withCodeTokens.replace(/(!)?\[([^\]]*)\]\(([^)]+)\)/g, (match, imageMark, labelRaw, urlRaw) => {
     const normalizedUrl = normalizeRenderableUrl(urlRaw);
-    if (!isSafeRenderableUrl(normalizedUrl)) return match;
+    const localAbsolutePath = isLocalAbsolutePath(normalizedUrl);
+    if (!localAbsolutePath && !isSafeRenderableUrl(normalizedUrl)) return match;
 
-    const href = escapeHtml(normalizedUrl);
     if (imageMark || looksLikeImageUrl(urlRaw)) {
       const altText = String(labelRaw || '').trim() || 'Screenshot';
       const alt = escapeHtml(altText);
+      if (localAbsolutePath) {
+        const localPath = escapeHtml(normalizedUrl);
+        return store.put(
+          `<span class="inline-image-link local-image" data-local-path="${localPath}"><img class="inline-image inline-local-image" data-local-path="${localPath}" alt="${alt}" loading="lazy"></span>`,
+        );
+      }
+
+      const href = escapeHtml(normalizedUrl);
       return store.put(
         `<a class="inline-image-link" href="${href}" target="_blank" rel="noopener noreferrer"><img class="inline-image" src="${href}" alt="${alt}" loading="lazy"></a>`,
       );
     }
 
+    if (localAbsolutePath) return match;
+
+    const href = escapeHtml(normalizedUrl);
     const label = escapeHtml(String(labelRaw || '').trim() || normalizedUrl);
     return store.put(`<a class="inline-link" href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`);
   });

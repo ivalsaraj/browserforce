@@ -65,9 +65,10 @@ test('renders safe inline markdown for bold and code spans', () => {
 test('renders screenshot markdown links as image previews', () => {
   const rendered = renderInlineContent('- Screenshot saved: [shopify-direct-1772647808095.png](/tmp/shopify-direct-1772647808095.png)');
   assert.match(rendered, /Screenshot saved:/);
-  assert.match(rendered, /class="inline-image-link"/);
-  assert.match(rendered, /class="inline-image"/);
-  assert.match(rendered, /src="file:\/\/\/tmp\/shopify-direct-1772647808095\.png"/);
+  assert.match(rendered, /class="inline-image-link local-image"/);
+  assert.match(rendered, /inline-local-image/);
+  assert.match(rendered, /data-local-path="\/tmp\/shopify-direct-1772647808095\.png"/);
+  assert.doesNotMatch(rendered, /file:\/\/\/tmp\//);
 });
 
 test('renders non-image markdown links as clickable anchors', () => {

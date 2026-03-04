@@ -76,6 +76,16 @@ test('assistant transcript renders message bodies with markdown block renderer',
   assert.match(js, /<div class="bubble-assistant">\$\{renderContent\(entry\.text \|\| ''\)\}<\/div>/);
 });
 
+test('local screenshot markdown images hydrate through authenticated chatd fetch', () => {
+  assert.match(js, /function loadLocalImageBlobUrl\(localPath\)/);
+  assert.match(js, /\/v1\/local-file\?path=/);
+  assert.match(js, /authorization:\s*`Bearer \$\{state\.auth\.token\}`/);
+  assert.match(js, /URL\.createObjectURL\(blob\)/);
+  assert.match(js, /function hydrateLocalImagePreviews\(\)/);
+  assert.match(js, /img\.inline-local-image\[data-local-path\]/);
+  assert.match(js, /hydrateLocalImagePreviews\(\);/);
+});
+
 test('context usage renderer hides element when unavailable and only shows formatted values', () => {
   assert.match(js, /function renderContextUsageChip\(\)/);
   assert.match(js, /latestUsageBySession/);

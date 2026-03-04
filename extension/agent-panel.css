@@ -541,6 +541,10 @@ body {
   background: #fff;
 }
 
+.inline-image-link.local-image {
+  cursor: default;
+}
+
 .inline-image {
   display: block;
   width: 100%;
@@ -548,6 +552,15 @@ body {
   max-height: 280px;
   object-fit: contain;
   background: var(--linen);
+}
+
+.inline-local-image:not([src]) {
+  min-height: 120px;
+  background:
+    linear-gradient(110deg, rgba(0, 0, 0, 0.03) 8%, rgba(0, 0, 0, 0.08) 18%, rgba(0, 0, 0, 0.03) 33%),
+    var(--linen);
+  background-size: 200% 100%, auto;
+  animation: local-image-loading 1.2s linear infinite;
 }
 
 .run-timeline {
@@ -1326,11 +1339,21 @@ body {
   }
 }
 
+@keyframes local-image-loading {
+  0% {
+    background-position: 100% 0, 0 0;
+  }
+  100% {
+    background-position: -100% 0, 0 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .step-item.pulse .run-step-icon,
   .step-label.title-label.shimmer-text,
   .step-label.title-label.title-transition-in,
-  .step-label.title-label.shimmer-text.title-transition-in {
+  .step-label.title-label.shimmer-text.title-transition-in,
+  .inline-local-image:not([src]) {
     animation: none;
   }
 }
