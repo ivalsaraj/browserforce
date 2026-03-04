@@ -85,6 +85,9 @@ function normalizeStepDetails(details, label = '') {
       visit(value.message);
       visit(value.output);
       visit(value.command);
+      visit(value.cmd);
+      visit(value.code);
+      visit(value.arguments);
       visit(value.path);
       visit(value.query);
       visit(value.pattern);
@@ -366,6 +369,9 @@ function stepDetailsForToolEvent(evt, label) {
     payload.message,
     payload.delta,
     payload.command,
+    payload.cmd,
+    payload.code,
+    payload.arguments,
     payload.path,
     payload.query,
     payload.pattern,
@@ -713,7 +719,7 @@ export function applyEvent(state = initialState, evt = {}) {
     const status = evt.event === 'tool.final'
       ? 'done'
       : 'running';
-    const kind = evt.event === 'tool.delta'
+    const kind = (evt.event === 'tool.delta' && String(evt?.payload?.type || '').toLowerCase() === 'reasoning')
       ? 'reasoning'
       : 'tool';
     const label = stepLabelForToolEvent(evt);

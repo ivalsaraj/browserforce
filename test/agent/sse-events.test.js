@@ -103,6 +103,47 @@ test('tool.final replaces matching in-flight tool step at original timeline posi
   assert.equal((s5.runs.r1.steps || []).filter((item) => item?.key === 'tool:call_1').length, 1);
 });
 
+test('stderr tool lifecycle collapses into one keyed step with expandable details', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'tool.started',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { tool: 'stderr', stepKey: 'tool:stderr', title: 'Codex stderr' },
+  });
+  const s3 = applyEvent(s2, {
+    event: 'tool.delta',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      tool: 'stderr',
+      type: 'stderr',
+      stepKey: 'tool:stderr',
+      message: 'Codex stderr (2 lines)',
+      details: ['warn line 1', 'warn line 2'],
+    },
+  });
+  const s4 = applyEvent(s3, {
+    event: 'tool.final',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      tool: 'stderr',
+      stepKey: 'tool:stderr',
+      title: 'Codex stderr (2 lines)',
+      details: ['warn line 1', 'warn line 2'],
+    },
+  });
+
+  const steps = s4.runs.r1.steps || [];
+  const stderrStep = steps.find((item) => item?.key === 'tool:stderr');
+  assert.equal(steps.filter((item) => item?.key === 'tool:stderr').length, 1);
+  assert.equal(stderrStep?.kind, 'tool');
+  assert.equal(stderrStep?.status, 'done');
+  assert.match(stderrStep?.label || '', /2 lines/);
+  assert.deepEqual(stderrStep?.details, ['warn line 1', 'warn line 2']);
+});
+
 test('tool.final with generic label collapses latest in-flight non-keyed tool step', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, {
@@ -125,6 +166,27 @@ test('tool.final with generic label collapses latest in-flight non-keyed tool st
   assert.match(steps[0]?.label || '', /rg --files/);
   assert.equal(timeline.filter((item) => item.type === 'step').length, 1);
   assert.equal(timeline.find((item) => item.type === 'step')?.status, 'done');
+});
+
+test('execute tool step captures code details for collapsible rendering', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'tool.started',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      name: 'execute',
+      args: {
+        code: "const rows = await snapshot();\nreturn rows;",
+      },
+    },
+  });
+
+  const step = s2.runs.r1.steps.find((item) => /execute/i.test(item?.label || ''));
+  assert.deepEqual(step?.details, [
+    'const rows = await snapshot();',
+    'return rows;',
+  ]);
 });
 
 test('chat.commentary text stays inline but does not pollute final assistant message text', () => {
