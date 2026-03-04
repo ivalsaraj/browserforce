@@ -45,11 +45,6 @@ body {
   padding: 16px;
 }
 
-.bf-popup.auto-mode {
-  border: 2px dotted var(--bf-accent);
-  border-radius: 10px;
-}
-
 header {
   display: flex;
   align-items: center;
@@ -411,4 +406,13 @@ textarea {
 
 textarea:focus {
   border-color: var(--bf-accent);
+}
+
+.auto-mode-note {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bf-border-soft);
+  font-size: 11px;
+  color: var(--bf-text-subtle);
+  line-height: 1.35;
 }
