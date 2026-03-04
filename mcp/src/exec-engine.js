@@ -10,13 +10,16 @@ import {
   TEST_ID_ATTRS, createSmartDiff,
   buildSnapshotText, parseSearchPattern, annotateStableAttrs,
 } from './snapshot.js';
-import { screenshotWithLabels } from './a11y-labels.js';
+import { Semaphore, injectA11yClient, showLabels, hideLabels } from './a11y-labels.js';
 import { getCleanHTML } from './clean-html.js';
 import { getPageMarkdown } from './page-markdown.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 19222;
+const LABEL_SCREENSHOT_MAX_DIMENSION = 1568;
+const LABEL_BOX_CONCURRENCY = 16;
+const MAX_LABEL_OVERLAY_REFS = 300;
 export const BF_DIR = join(homedir(), '.browserforce');
 export const CDP_URL_FILE = join(BF_DIR, 'cdp-url');
 const RELAY_SCRIPT = fileURLToPath(new URL('../../relay/src/index.js', import.meta.url));
@@ -569,7 +572,10 @@ export function buildExecContext(
   const snapshot = async ({ selector, search, showDiffSinceLastCall = true } = {}) => {
     const page = activePage();
     const axRoot = await getAccessibilityTree(page, selector);
-    if (!axRoot) return 'No accessibility tree available for this page.';
+    if (!axRoot) {
+      lastRefToLocator.set(page, new Map());
+      return 'No accessibility tree available for this page.';
+    }
     const stableIds = await getStableIds(page, selector);
     annotateStableAttrs(axRoot, stableIds);
     const searchPattern = parseSearchPattern(search);
@@ -615,6 +621,36 @@ export function buildExecContext(
     return fullSnapshot;
   };
 
+  const buildSnapshotData = async ({ selector, search, refAll = false } = {}) => {
+    const page = activePage();
+    const axRoot = await getAccessibilityTree(page, selector);
+    if (!axRoot) {
+      lastRefToLocator.set(page, new Map());
+      return {
+        text: 'No accessibility tree available for this page.',
+        refs: [],
+        page,
+      };
+    }
+
+    const stableIds = await getStableIds(page, selector);
+    annotateStableAttrs(axRoot, stableIds);
+    const searchPattern = parseSearchPattern(search);
+    const { text: snapshotText, refs } = buildSnapshotText(axRoot, null, searchPattern, { refAll });
+    const refMap = new Map(refs.map(({ ref, locator }) => [ref, locator]));
+    lastRefToLocator.set(page, refMap);
+    const title = await page.title().catch(() => '');
+    const pageUrl = page.url();
+    const refTable = refs.length > 0
+      ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
+      : '';
+    return {
+      text: `Page: ${title} (${pageUrl})\nRefs: ${refs.length} labeled elements\n\n${snapshotText}${refTable}`,
+      refs,
+      page,
+    };
+  };
+
   const refToLocator = ({ ref, page: targetPage } = {}) => {
     const p = targetPage || activePage();
     const map = lastRefToLocator.get(p);
@@ -646,12 +682,58 @@ export function buildExecContext(
   };
 
   const screenshotWithAccessibilityLabels = async ({ selector, interactiveOnly = true } = {}) => {
-    const page = activePage();
-    const { screenshot, snapshot: snapText, labelCount } = await screenshotWithLabels(page, {
+    const { text: snapText, refs, page } = await buildSnapshotData({
       selector,
-      interactiveOnly,
+      search: null,
+      refAll: !interactiveOnly,
     });
-    return { _bf_type: 'labeled_screenshot', screenshot, snapshot: snapText, labelCount };
+
+    const sema = new Semaphore(LABEL_BOX_CONCURRENCY);
+    const labelCandidates = refs
+      .map(ref => ({ ref: ref.ref, role: ref.role, locator: ref.locator }))
+      .slice(0, MAX_LABEL_OVERLAY_REFS);
+    const labels = (await Promise.all(labelCandidates.map(async (candidate) => {
+      await sema.acquire();
+      try {
+        const box = await page.locator(candidate.locator).first().boundingBox();
+        if (!box || box.width <= 0 || box.height <= 0) return null;
+        return {
+          ref: candidate.ref,
+          role: candidate.role,
+          box: { x: box.x, y: box.y, width: box.width, height: box.height },
+        };
+      } catch {
+        return null;
+      } finally {
+        sema.release();
+      }
+    }))).filter(Boolean);
+
+    let labelsInjected = false;
+    let labelCount = 0;
+    if (labels.length > 0) {
+      await injectA11yClient(page);
+      labelCount = await showLabels(page, labels);
+      labelsInjected = true;
+    }
+
+    const viewport = await page.evaluate((maxDim) => ({
+      width: Math.min(window.innerWidth, maxDim),
+      height: Math.min(window.innerHeight, maxDim),
+    }), LABEL_SCREENSHOT_MAX_DIMENSION);
+    try {
+      const screenshot = await page.screenshot({
+        type: 'jpeg',
+        quality: 80,
+        scale: 'css',
+        clip: { x: 0, y: 0, ...viewport },
+      });
+      return { _bf_type: 'labeled_screenshot', screenshot, snapshot: snapText, labelCount };
+    } finally {
+      if (labelsInjected) {
+        try { await hideLabels(page); } catch { /* page may have navigated */ }
+      }
+    }
   };
 
   const cleanHTML = (selector, opts) => getCleanHTML(activePage(), selector, opts);

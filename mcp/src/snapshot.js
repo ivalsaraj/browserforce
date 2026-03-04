@@ -86,7 +86,7 @@ export function hasMatchingDescendant(node, pattern) {
  *
  * When multiple nodes resolve to the same ref, a -2, -3 suffix is appended.
  */
-export function buildSnapshotText(axTree, stableIdMap, searchPattern) {
+export function buildSnapshotText(axTree, stableIdMap, searchPattern, { refAll = false } = {}) {
   const lines = [];
   const refs = [];
   let refCounter = 0;
@@ -119,7 +119,7 @@ export function buildSnapshotText(axTree, stableIdMap, searchPattern) {
       lineText += ` "${escapeLocatorName(name)}"`;
     }
 
-    if (isInteractive) {
+    if (isInteractive || (refAll && isContext)) {
       refCounter++;
       const stableEntry = node._stableAttr || null;
       let baseRef = stableEntry ? stableEntry.value : `e${refCounter}`;

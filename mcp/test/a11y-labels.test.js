@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { Semaphore, buildBoxFromQuad, buildSnapshotFromCdpNodes } from '../src/a11y-labels.js';
+import { Semaphore, buildBoxFromQuad, buildSnapshotFromCdpNodes, getLabelBoxes } from '../src/a11y-labels.js';
 
 describe('Semaphore', () => {
   it('allows up to max concurrent acquisitions', async () => {
@@ -175,5 +175,47 @@ describe('buildSnapshotFromCdpNodes', () => {
     const { refs } = buildSnapshotFromCdpNodes(nodes);
     assert.equal(refs.length, 1);
     assert.equal(refs[0].role, 'button');
+  });
+});
+
+describe('getLabelBoxes', () => {
+  it('resolves box models only for interactive refs', async () => {
+    const calledBackendNodeIds = [];
+    const cdp = {
+      send: async (_method, { backendNodeId }) => {
+        calledBackendNodeIds.push(backendNodeId);
+        return { model: { border: [0, 0, 10, 0, 10, 10, 0, 10] } };
+      },
+    };
+    const refs = [
+      { ref: 'e1', role: 'button', backendNodeId: 11 },
+      { ref: 'e2', role: 'heading', backendNodeId: 12 },
+      { ref: 'e3', role: 'link', backendNodeId: 13 },
+      { ref: 'e4', role: 'navigation', backendNodeId: 14 },
+      { ref: 'e5', role: 'textbox' },
+    ];
+
+    const labels = await getLabelBoxes(cdp, refs);
+    assert.deepEqual(calledBackendNodeIds.sort((a, b) => a - b), [11, 13]);
+    assert.deepEqual(labels.map(label => label.ref), ['e1', 'e3']);
+  });
+
+  it('caps box-model lookups to avoid oversized CDP bursts', async () => {
+    let callCount = 0;
+    const cdp = {
+      send: async () => {
+        callCount++;
+        return { model: { border: [0, 0, 10, 0, 10, 10, 0, 10] } };
+      },
+    };
+    const refs = Array.from({ length: 450 }, (_v, i) => ({
+      ref: `e${i + 1}`,
+      role: 'button',
+      backendNodeId: i + 1,
+    }));
+
+    const labels = await getLabelBoxes(cdp, refs);
+    assert.equal(callCount, 400);
+    assert.equal(labels.length, 400);
   });
 });

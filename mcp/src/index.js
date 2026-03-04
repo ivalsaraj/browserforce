@@ -306,7 +306,8 @@ Helpers:
   screenshotWithAccessibilityLabels({ selector?, interactiveOnly? })
                                      Vimium-style labeled screenshot + accessibility snapshot.
                                      Returns image with color-coded element labels (e1, e2...) and
-                                     matching text snapshot. Use when visual layout matters.
+                                     matching text snapshot. Use for explicitly annotated/labeled captures.
+                                     For plain screenshots, prefer state.page.screenshot() and snapshot() as separate calls.
   cleanHTML(selector?, opts?)        Cleaned HTML — strips scripts, styles, decorative elements.
                                      Keeps semantic attrs: href, src, role, aria-*, data-testid.
                                      opts: { maxAttrLen?, maxContentLen? }
@@ -412,7 +413,8 @@ Use snapshot({ showDiffSinceLastCall: false }) when you need full output.
 ═══ SNAPSHOT VS SCREENSHOT ═══
 
 Prefer snapshot() for text/content/verification.
-Use screenshotWithAccessibilityLabels() only when visual layout or spatial relationships matter.
+For plain screenshot requests, use state.page.screenshot() first, then snapshot() if textual verification is needed.
+Use screenshotWithAccessibilityLabels() only when labels/refs on the image are explicitly needed.
 
 snapshot vs cleanHTML vs pageMarkdown:
   - snapshot(): interactive structure, refs, quick verification
