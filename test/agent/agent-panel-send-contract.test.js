@@ -81,8 +81,11 @@ test('context usage renderer hides element when unavailable and only shows forma
 
 test('init opens smoothly by starting tab attach asynchronously', () => {
   assert.match(js, /function startInitialTabAttach\(\)/);
-  assert.match(js, /\(async function init\(\)[\s\S]*startInitialTabAttach\(\);/);
-  assert.doesNotMatch(js, /\(async function init\(\)[\s\S]*await ensureCurrentTabAttached\(\);/);
+  assert.match(js, /async function initializePanel\(\)[\s\S]*startInitialTabAttach\(\);/);
+  const initMatch = js.match(/\(async function init\(\)[\s\S]*?\n}\)\(\);/);
+  assert.ok(initMatch, 'init block should be present');
+  const initBlock = initMatch[0];
+  assert.doesNotMatch(initBlock, /await ensureCurrentTabAttached\(\);/);
 });
 
 test('tab-attach banner shows progress during initial auto-attach and suppresses not-connected state', () => {
@@ -158,4 +161,15 @@ test('collapsed BrowserForce execute rows infer helper calls and render branch p
   assert.match(js, /step-branch-preview/);
   assert.match(js, /class="step-branch-node"/);
   assert.match(js, /class="step-branch-call"/);
+});
+
+test('startup error card supports retry and refresh connection actions', () => {
+  assert.match(js, /function refreshExtensionConnection\(/);
+  assert.match(js, /function retryStartup\(/);
+  assert.match(js, /data-startup-action=/);
+  assert.match(js, /key:\s*'retry'/);
+  assert.match(js, /key:\s*'refresh-connection'/);
+  assert.match(js, /msgAction === 'retry'/);
+  assert.match(js, /msgAction === 'refresh-connection'/);
+  assert.match(js, /runtimeMessage\(\{\s*type:\s*'updateRelayUrl'/);
 });
