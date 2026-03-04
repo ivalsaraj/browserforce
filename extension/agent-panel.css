@@ -377,17 +377,64 @@ body {
   padding: 0;
   color: inherit;
   cursor: pointer;
+  display: block;
+  text-align: left;
+}
+
+.step-toggle-main {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  text-align: left;
 }
 
 .step-item.collapsible .step-label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.step-branch-preview {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 12px;
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.step-branch-node {
+  position: relative;
+  padding-left: 10px;
+}
+
+.step-branch-node::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.step-branch-call {
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.step-branch-preview.done .step-branch-call {
+  color: var(--ok);
+}
+
+.step-item.latest .step-branch-preview.running .step-branch-call {
+  color: var(--crail-dark);
 }
 
 .step-caret::before {
