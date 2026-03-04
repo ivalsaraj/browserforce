@@ -20,6 +20,66 @@ function safeParse(line) {
   }
 }
 
+function braceDelta(text) {
+  const source = String(text || '');
+  let delta = 0;
+  for (const ch of source) {
+    if (ch === '{') delta += 1;
+    else if (ch === '}') delta -= 1;
+  }
+  return delta;
+}
+
+export function shouldSuppressCodexStderrLine(line, state = {}) {
+  const text = String(line || '');
+  if (!text.trim()) return false;
+
+  if (!Number.isInteger(state.authJsonDepth) || state.authJsonDepth < 0) {
+    state.authJsonDepth = 0;
+  }
+
+  if (state.authJsonDepth > 0) {
+    state.authJsonDepth += braceDelta(text);
+    if (state.authJsonDepth < 0) state.authJsonDepth = 0;
+    return true;
+  }
+
+  const lower = text.toLowerCase();
+  const isAuthRefreshLine = lower.includes('codex_core::auth: failed to refresh token');
+  if (!isAuthRefreshLine) return false;
+
+  const startsJsonBlock = lower.includes('401 unauthorized') && text.includes('{');
+  if (startsJsonBlock) {
+    state.authJsonDepth = Math.max(0, braceDelta(text));
+    return true;
+  }
+
+  return (
+    lower.includes('refresh token was already used')
+    || lower.includes('already been used to generate a new access token')
+    || lower.includes('refresh_token_reused')
+  );
+}
+
+export function buildCodexStderrStepPayload({ count, lines } = {}) {
+  const normalizedLines = Array.isArray(lines)
+    ? lines
+      .map((line) => String(line || '').trim())
+      .filter(Boolean)
+      .slice(-8)
+    : [];
+  const numericCount = Number.isInteger(count) && count > 0
+    ? count
+    : normalizedLines.length;
+  const suffix = numericCount === 1 ? 'line' : 'lines';
+  return {
+    stream: 'stderr',
+    type: 'stderr',
+    message: `Codex stderr (${numericCount} ${suffix})`,
+    details: normalizedLines,
+  };
+}
+
 function toCount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;
@@ -424,6 +484,12 @@ export function startCodexRun({
   });
 
   const stderrChunks = [];
+  const stderrFilterState = {};
+  const stderrStepState = {
+    started: false,
+    count: 0,
+    lines: [],
+  };
 
   const stdoutLines = readline.createInterface({ input: child.stdout });
   stdoutLines.on('line', (line) => {
@@ -441,11 +507,40 @@ export function startCodexRun({
     if (!line) return;
     stderrChunks.push(String(line));
     if (stderrChunks.length > 200) stderrChunks.shift();
+    if (shouldSuppressCodexStderrLine(line, stderrFilterState)) return;
+
+    if (!stderrStepState.started) {
+      stderrStepState.started = true;
+      onEvent?.(envelope({
+        event: 'tool.started',
+        runId,
+        sessionId,
+        payload: {
+          stream: 'stderr',
+          tool: 'stderr',
+          stepKey: 'tool:stderr',
+          title: 'Codex stderr',
+        },
+      }));
+    }
+
+    stderrStepState.count += 1;
+    stderrStepState.lines.push(String(line));
+    if (stderrStepState.lines.length > 32) stderrStepState.lines.shift();
+    const payload = buildCodexStderrStepPayload({
+      count: stderrStepState.count,
+      lines: stderrStepState.lines,
+    });
+
     onEvent?.(envelope({
       event: 'tool.delta',
       runId,
       sessionId,
-      payload: { stream: 'stderr', text: line },
+      payload: {
+        ...payload,
+        tool: 'stderr',
+        stepKey: 'tool:stderr',
+      },
     }));
   });
 
@@ -454,6 +549,23 @@ export function startCodexRun({
   });
 
   child.on('close', (code, signal) => {
+    if (stderrStepState.started) {
+      const payload = buildCodexStderrStepPayload({
+        count: stderrStepState.count,
+        lines: stderrStepState.lines,
+      });
+      onEvent?.(envelope({
+        event: 'tool.final',
+        runId,
+        sessionId,
+        payload: {
+          ...payload,
+          tool: 'stderr',
+          stepKey: 'tool:stderr',
+          title: payload.message,
+        },
+      }));
+    }
     onExit?.({ code, signal, stderr: stderrChunks.join('\n') });
   });
 
