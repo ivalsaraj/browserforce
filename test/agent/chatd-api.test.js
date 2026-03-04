@@ -338,6 +338,7 @@ test('POST /v1/runs persists execute tool details for collapsible timeline rows'
     const assistant = (messagesBody.messages || []).at(-1);
     const executeStep = (assistant?.timeline || []).find((item) => item?.type === 'step' && /execute/i.test(item?.label || ''));
 
+    assert.equal(executeStep?.label, 'BrowserForce:execute');
     assert.equal(Array.isArray(executeStep?.details), true);
     assert.equal(executeStep.details.some((line) => /snapshot/.test(line)), true);
   } finally {
