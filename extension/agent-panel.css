@@ -154,15 +154,15 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: var(--card-bg);
-  color: var(--muted);
+  background: var(--linen);
+  color: var(--text-muted);
   font-size: 12px;
 }
 
 .tab-attach-btn {
   border: 1px solid var(--line);
-  background: var(--accent-soft);
-  color: var(--accent-soft-text);
+  background: var(--crail-soft);
+  color: var(--crail-dark);
   border-radius: 8px;
   padding: 4px 8px;
   font-size: 12px;

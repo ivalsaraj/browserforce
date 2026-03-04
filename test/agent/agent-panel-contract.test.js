@@ -38,6 +38,17 @@ test('agent panel keeps horizontal overflow contained in transcript cards', () =
   assert.match(css, /\.bubble-assistant code[\s\S]*overflow-wrap:\s*anywhere/);
 });
 
+test('tab attach banner uses defined light-theme tokens only', () => {
+  assert.match(css, /\.tab-attach[\s\S]*background:\s*var\(--linen\)/);
+  assert.match(css, /\.tab-attach[\s\S]*color:\s*var\(--text-muted\)/);
+  assert.match(css, /\.tab-attach-btn[\s\S]*background:\s*var\(--crail-soft\)/);
+  assert.match(css, /\.tab-attach-btn[\s\S]*color:\s*var\(--crail-dark\)/);
+  assert.doesNotMatch(css, /var\(--card-bg\)/);
+  assert.doesNotMatch(css, /var\(--muted\)/);
+  assert.doesNotMatch(css, /var\(--accent-soft\)/);
+  assert.doesNotMatch(css, /var\(--accent-soft-text\)/);
+});
+
 test('agent panel composer matches compact/expanded shell structure', () => {
   assert.doesNotMatch(html, /id="bf-attach-btn"/);
   assert.doesNotMatch(html, /icon-mic/);
