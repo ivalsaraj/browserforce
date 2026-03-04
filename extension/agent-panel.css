@@ -399,6 +399,45 @@ body {
   white-space: pre-wrap;
 }
 
+.step-label.title-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.step-item:not(.latest) .step-label.title-label {
+  opacity: 0.84;
+}
+
+.step-label.title-label.shimmer-text {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    95deg,
+    rgba(61, 48, 40, 0.45) 0%,
+    rgba(61, 48, 40, 0.45) 35%,
+    rgba(193, 95, 60, 0.96) 50%,
+    rgba(61, 48, 40, 0.45) 65%,
+    rgba(61, 48, 40, 0.45) 100%
+  );
+  background-size: 220% 100%;
+  background-position: 110% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: reasoning-shimmer 2.3s ease-in-out infinite;
+}
+
+.step-label.title-label.title-transition-in {
+  animation: reasoning-title-in 210ms ease-out;
+}
+
+.step-label.title-label.shimmer-text.title-transition-in {
+  animation: reasoning-title-in 210ms ease-out, reasoning-shimmer 2.3s ease-in-out 150ms infinite;
+}
+
 .step-label strong {
   font-weight: 600;
   color: var(--text);
@@ -987,5 +1026,34 @@ body {
   50% {
     transform: scale(1.15);
     opacity: 0.65;
+  }
+}
+
+@keyframes reasoning-shimmer {
+  0% {
+    background-position: 110% 0;
+  }
+  100% {
+    background-position: -110% 0;
+  }
+}
+
+@keyframes reasoning-title-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-item.pulse .run-step-icon,
+  .step-label.title-label.shimmer-text,
+  .step-label.title-label.title-transition-in,
+  .step-label.title-label.shimmer-text.title-transition-in {
+    animation: none;
   }
 }

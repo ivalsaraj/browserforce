@@ -15,6 +15,7 @@ const state = {
   modelPresets: [{ value: null, label: 'Default' }],
   currentRunBySession: {},
   expandedTimelineEntries: {},
+  latestReasoningTitleByRun: {},
   transcriptHandlersBound: false,
   initialTabAttachInFlight: false,
   initialTabAttachStarted: false,
@@ -430,6 +431,21 @@ function getLatestInFlightTimelineStepIndex(run, timeline) {
   return -1;
 }
 
+function shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReasoning }) {
+  if (!isLatest || !isRunningReasoning) return false;
+  const runId = String(run?.runId || '').trim();
+  if (!runId) return false;
+  const signature = `${String(entry?.key || '').trim()}::${String(entry?.label || '').trim()}`;
+  if (!signature || signature === '::') return false;
+  const previous = state.latestReasoningTitleByRun[runId];
+  if (previous === signature) return false;
+  state.latestReasoningTitleByRun = {
+    ...state.latestReasoningTitleByRun,
+    [runId]: signature,
+  };
+  return true;
+}
+
 function renderRunTimeline(run, fallbackText = '') {
   const timeline = normalizeRunTimeline(run, fallbackText);
   if (!timeline.length) return '';
@@ -450,16 +466,27 @@ function renderRunTimeline(run, fallbackText = '') {
       return `<div class="bubble-assistant"><p>${renderContent(entry.text || '')}</p></div>`;
     }
     const status = entry?.status || 'running';
+    const normalizedStatus = String(status || '').toLowerCase();
     const icon = classifyRunStepIcon(entry);
     const isLatest = index === latestStepIndex;
     const shouldPulse = isLatest && status === 'running';
+    const isReasoningTitle = String(entry?.kind || '').toLowerCase() === 'reasoning';
+    const isRunningReasoning = isReasoningTitle && normalizedStatus === 'running';
+    const labelClasses = ['step-label'];
+    if (isReasoningTitle) labelClasses.push('title-label');
+    if (isRunningReasoning && isLatest) {
+      labelClasses.push('shimmer-text');
+      if (shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReasoning })) {
+        labelClasses.push('title-transition-in');
+      }
+    }
     const details = Array.isArray(entry?.details) ? entry.details.filter(Boolean) : [];
     const isCollapsible = details.length > 0;
     const classes = ['step-item', 'timeline-step', escapeHtml(status)];
     if (isLatest) classes.push('latest');
     if (shouldPulse) classes.push('pulse');
     if (!isCollapsible) {
-      return `<div class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="step-label">${renderInlineContent(entry.label || 'Step')}</span></div>`;
+      return `<div class="${classes.join(' ')}"><span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span><span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span></div>`;
     }
     classes.push('collapsible');
     const key = getTimelineEntryKey(entry, index);
@@ -473,7 +500,7 @@ function renderRunTimeline(run, fallbackText = '') {
         <span class="run-step-icon icon-${escapeHtml(icon)}" aria-hidden="true"></span>
         <div class="step-body">
           <button type="button" class="step-toggle" data-step-key="${escapeHtml(key)}" aria-expanded="${expanded ? 'true' : 'false'}">
-            <span class="step-label">${renderInlineContent(entry.label || 'Step')}</span>
+            <span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span>
             <span class="step-caret" aria-hidden="true"></span>
           </button>
           ${expanded ? `<ul class="step-details">${detailsHtml}</ul>` : ''}
