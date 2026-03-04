@@ -409,10 +409,34 @@ textarea:focus {
 }
 
 .auto-mode-note {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--bf-border-soft);
+  margin: 10px -16px -16px;
+  padding: 8px 16px 12px;
   font-size: 11px;
   color: var(--bf-text-subtle);
-  line-height: 1.35;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+  background: var(--bf-surface-soft);
+}
+
+.auto-mode-note::before,
+.auto-mode-note::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.auto-mode-note::before {
+  bottom: 2px;
+  height: 1px;
+  background: var(--bf-danger-fg);
+}
+
+.auto-mode-note::after {
+  bottom: 0;
+  height: 2px;
+  background: var(--bf-accent);
 }
