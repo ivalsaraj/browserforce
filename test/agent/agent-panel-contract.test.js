@@ -14,6 +14,7 @@ test('agent panel has inline model and session selectors with popovers', () => {
   assert.match(html, /id="bf-model-panel"/);
   assert.match(html, /id="bf-session-panel"/);
   assert.match(html, /id="bf-model-list"/);
+  assert.match(html, /id="bf-thinking-list"/);
   assert.match(html, /id="bf-switch-session-list"/);
   assert.match(html, /id="bf-tab-attach-banner"/);
   assert.match(html, /id="bf-tab-attach-text"/);
@@ -90,4 +91,10 @@ test('collapsed execute helper preview has tree-like branch styling', () => {
   assert.match(css, /\.step-branch-node/);
   assert.match(css, /\.step-branch-node::before/);
   assert.match(css, /\.step-branch-call/);
+});
+
+test('startup error card action buttons have dedicated styling hooks', () => {
+  assert.match(css, /\.empty-actions/);
+  assert.match(css, /\.empty-action-btn/);
+  assert.match(css, /\.empty-action-btn\.secondary/);
 });
