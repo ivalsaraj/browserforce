@@ -50,9 +50,26 @@ function normalizeRunId(runId) {
   return normalized;
 }
 
+const SHELL_LC_WRAPPER_RE = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/i;
+
+function unwrapShellLcCommand(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const match = text.match(SHELL_LC_WRAPPER_RE);
+  if (!match) return text;
+  let command = String(match[1] || '').trim();
+  if (!command) return text;
+  if (command.length >= 2 && command.startsWith("'") && command.endsWith("'")) {
+    command = command.slice(1, -1).replace(/'"'"'/g, "'");
+  } else if (command.length >= 2 && command.startsWith('"') && command.endsWith('"')) {
+    command = command.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return command.trim() || text;
+}
+
 function normalizeStep(step) {
   if (!step || typeof step !== 'object') return null;
-  const label = String(step.label || '').trim();
+  const label = unwrapShellLcCommand(step.label);
   if (!label) return null;
   const kind = String(step.kind || '').trim() || 'reasoning';
   const normalizedStatus = String(step.status || '').trim().toLowerCase();
@@ -62,7 +79,7 @@ function normalizeStep(step) {
   const key = String(step.key || '').trim();
   const details = Array.isArray(step.details)
     ? step.details
-      .map((item) => String(item || '').trim())
+      .map((item) => unwrapShellLcCommand(item))
       .filter(Boolean)
       .slice(0, 8)
     : [];

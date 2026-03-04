@@ -145,10 +145,27 @@ function normalizeToolIdentity(payload = {}, fallbackCallId = '') {
   };
 }
 
-function quoteForShell(value) {
-  const source = String(value || '');
-  if (!source) return '';
-  return source.replace(/'/g, `'\"'\"'`);
+const SHELL_LC_WRAPPER_RE = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/i;
+
+function unwrapShellLcCommand(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const match = text.match(SHELL_LC_WRAPPER_RE);
+  if (!match) return text;
+  let command = String(match[1] || '').trim();
+  if (!command) return text;
+  if (command.length >= 2 && command.startsWith("'") && command.endsWith("'")) {
+    command = command.slice(1, -1).replace(/'"'"'/g, "'");
+  } else if (command.length >= 2 && command.startsWith('"') && command.endsWith('"')) {
+    command = command.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return command.trim() || text;
+}
+
+function trimCommandLabel(value) {
+  const command = unwrapShellLcCommand(value);
+  if (!command) return '';
+  return command.length > 160 ? `${command.slice(0, 157)}...` : command;
 }
 
 function toolCommandLabel({ name, parsedArgs, rawArgs }) {
@@ -158,7 +175,7 @@ function toolCommandLabel({ name, parsedArgs, rawArgs }) {
       parsedArgs.command,
     ]);
     if (cmd) {
-      return `/bin/zsh -lc '${quoteForShell(cmd)}'`;
+      return trimCommandLabel(cmd);
     }
   }
 
@@ -166,12 +183,12 @@ function toolCommandLabel({ name, parsedArgs, rawArgs }) {
     const parsed = safeParseJson(rawArgs);
     if (parsed && typeof parsed === 'object') {
       const cmd = firstString([parsed.cmd, parsed.command]);
-      if (cmd) return `/bin/zsh -lc '${quoteForShell(cmd)}'`;
+      if (cmd) return trimCommandLabel(cmd);
     }
   }
 
   if (name === 'exec_command' && typeof rawArgs === 'string' && rawArgs.trim()) {
-    return rawArgs.trim().length > 160 ? `${rawArgs.trim().slice(0, 157)}...` : rawArgs.trim();
+    return trimCommandLabel(rawArgs);
   }
   return '';
 }

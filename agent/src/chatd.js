@@ -294,8 +294,25 @@ function firstString(values) {
   return '';
 }
 
+const SHELL_LC_WRAPPER_RE = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/i;
+
+function unwrapShellLcCommand(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const match = text.match(SHELL_LC_WRAPPER_RE);
+  if (!match) return text;
+  let command = String(match[1] || '').trim();
+  if (!command) return text;
+  if (command.length >= 2 && command.startsWith("'") && command.endsWith("'")) {
+    command = command.slice(1, -1).replace(/'"'"'/g, "'");
+  } else if (command.length >= 2 && command.startsWith('"') && command.endsWith('"')) {
+    command = command.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return command.trim() || text;
+}
+
 function trimStepLabel(label) {
-  const text = String(label || '').trim();
+  const text = unwrapShellLcCommand(label);
   if (!text) return '';
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
@@ -339,7 +356,7 @@ function detailsEqual(a, b) {
 function normalizeStepDetails(details, label = '') {
   const lines = [];
   const pushLine = (value) => {
-    const parts = String(value || '')
+    const parts = unwrapShellLcCommand(value)
       .split('\n')
       .map((part) => part.trim())
       .filter(Boolean);
@@ -368,6 +385,11 @@ function normalizeStepDetails(details, label = '') {
       visit(value.command);
       visit(value.cmd);
       visit(value.code);
+      visit(value.input);
+      visit(value.args);
+      visit(value.parameters);
+      visit(value.params);
+      visit(value.payload);
       visit(value.arguments);
       visit(value.path);
       visit(value.query);
@@ -715,6 +737,8 @@ function stepDetailsForRunEvent(evt, label) {
     item?.pattern,
     item?.args,
     item?.paths,
+    item?.input,
+    item?.arguments,
   ], label);
 }
 

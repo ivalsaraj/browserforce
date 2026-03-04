@@ -272,6 +272,34 @@ test('run.event captures detail lines for collapsible tool-call rendering', () =
   assert.deepEqual(lastTimeline?.details, lastStep?.details);
 });
 
+test('run.event extracts execute code from nested item input for collapsible details', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'run.event',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      type: 'item.completed',
+      item: {
+        id: 'item_2',
+        type: 'custom_tool_call',
+        name: 'execute',
+        status: 'completed',
+        input: {
+          code: "const rows = await snapshot();\nreturn rows;",
+        },
+      },
+    },
+  });
+
+  const step = (s2.runs.r1.steps || []).find((item) => item?.key === 'tool:item_2');
+  assert.equal(step?.label, 'execute');
+  assert.deepEqual(step?.details, [
+    'const rows = await snapshot();',
+    'return rows;',
+  ]);
+});
+
 test('run.usage stores normalized usage for run and session', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, {

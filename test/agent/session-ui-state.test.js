@@ -148,6 +148,38 @@ test('messages.loaded collapses generic terminal tool row onto latest running ro
   assert.match(timeline[0]?.label || '', /cat skills\/browserforce\/SKILL\.md/);
 });
 
+test('messages.loaded strips shell wrapper prefixes from tool labels and details', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'messages.loaded',
+    sessionId: 's1',
+    messages: [{
+      role: 'assistant',
+      text: 'Done',
+      runId: 'run_5',
+      timeline: [{
+        type: 'step',
+        kind: 'tool',
+        status: 'done',
+        label: "/bin/zsh -lc \"sed -n '1,220p' AGENTS.local.md\"",
+        details: [
+          "/bin/zsh -lc 'rg --files'",
+        ],
+      }],
+    }],
+  });
+
+  const step = next.runs.run_5?.timeline?.[0];
+  assert.equal(step?.label, "sed -n '1,220p' AGENTS.local.md");
+  assert.deepEqual(step?.details, ['rg --files']);
+});
+
 test('session.metadata.loaded hydrates persisted codex usage for reopened session', () => {
   const state = {
     activeSessionId: 's1',
