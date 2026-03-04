@@ -9,14 +9,24 @@ import {
   shouldApplySessionSelection,
 } from './agent-panel-runtime.js';
 
+const REASONING_PRESETS = [
+  { value: null, label: 'Default (Config)' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+];
+
 const state = {
   value: initialState,
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
+  defaultReasoningEffort: 'medium',
   currentRunBySession: {},
   expandedTimelineEntries: {},
   latestReasoningTitleByRun: {},
   transcriptHandlersBound: false,
+  tabAttachWatchersBound: false,
   initialTabAttachInFlight: false,
   initialTabAttachStarted: false,
   editingSessionId: null,
@@ -45,6 +55,7 @@ const popoverBackdropEl = document.getElementById('bf-popover-backdrop');
 const modelPanelEl = document.getElementById('bf-model-panel');
 const sessionPanelEl = document.getElementById('bf-session-panel');
 const modelListEl = document.getElementById('bf-model-list');
+const thinkingListEl = document.getElementById('bf-thinking-list');
 const switchSessionListEl = document.getElementById('bf-switch-session-list');
 const transcriptEl = document.getElementById('bf-transcript');
 const chatFormEl = document.getElementById('bf-chat-form');
@@ -194,6 +205,15 @@ function normalizeStartupError(code = '', fallbackMessage = 'Unable to connect t
   };
 }
 
+function startupActionsForIssue(startupIssue) {
+  const code = String(startupIssue?.code || '').trim().toLowerCase();
+  const actions = [{ key: 'retry', label: 'Retry' }];
+  if (code === 'extension_not_connected' || code === 'relay_unreachable') {
+    actions.push({ key: 'refresh-connection', label: 'Refresh connection' });
+  }
+  return actions;
+}
+
 function setComposerEnabled(enabled) {
   chatInputEl.disabled = !enabled;
   autoResizeInput();
@@ -243,6 +263,23 @@ function dispatchEvent(evt) {
 
 function formatModelLabel(model) {
   return model && String(model).trim() ? model : 'Default';
+}
+
+function normalizeReasoningEffort(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') {
+    return normalized;
+  }
+  return null;
+}
+
+function formatReasoningEffortLabel(value) {
+  const normalized = normalizeReasoningEffort(value);
+  if (normalized === 'low') return 'Low';
+  if (normalized === 'medium') return 'Medium';
+  if (normalized === 'high') return 'High';
+  if (normalized === 'xhigh') return 'Extra High';
+  return 'Medium';
 }
 
 function isDefaultSessionTitle(title) {
@@ -302,8 +339,10 @@ function renderSelectors() {
 }
 
 function renderModelList() {
+  if (!modelListEl || !thinkingListEl) return;
   const activeSession = getActiveSession();
   const activeModel = activeSession?.model || null;
+  const activeReasoningEffort = normalizeReasoningEffort(activeSession?.reasoningEffort);
 
   const rows = state.modelPresets.map((preset) => {
     const active = (preset.value || null) === activeModel ? 'active' : '';
@@ -312,6 +351,14 @@ function renderModelList() {
   rows.push('<li><button type="button" data-model-custom="1" class="popover-item custom-item"><span>Custom...</span></button></li>');
 
   modelListEl.innerHTML = rows.join('');
+  thinkingListEl.innerHTML = REASONING_PRESETS.map((preset) => {
+    const active = (preset.value || null) === (activeReasoningEffort || null) ? 'active' : '';
+    let label = preset.label;
+    if (preset.value == null) {
+      label = `Default (Config: ${formatReasoningEffortLabel(state.defaultReasoningEffort)})`;
+    }
+    return `<li><button type="button" data-reasoning-effort="${escapeHtml(preset.value || '')}" class="popover-item ${active}"><span>${escapeHtml(label)}</span></button></li>`;
+  }).join('');
 
   modelListEl.querySelectorAll('button[data-model]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -336,6 +383,16 @@ function renderModelList() {
       }
     });
   }
+
+  thinkingListEl.querySelectorAll('button[data-reasoning-effort]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const value = button.dataset.reasoningEffort || null;
+      const reasoningEffort = normalizeReasoningEffort(value);
+      updateActiveSessionReasoningEffort(reasoningEffort).catch((error) => {
+        setStatus('error', error.message || 'Unable to update thinking level');
+      });
+    });
+  });
 }
 
 function renderSessions() {
@@ -659,7 +716,20 @@ function renderContent(value) {
 
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
-  transcriptEl.addEventListener('click', (event) => {
+  transcriptEl.addEventListener('click', async (event) => {
+    const startupActionBtn = event.target.closest('button[data-startup-action]');
+    if (startupActionBtn && transcriptEl.contains(startupActionBtn)) {
+      event.preventDefault();
+      const msgAction = startupActionBtn.getAttribute('data-startup-action');
+      if (msgAction === 'retry') {
+        await retryStartup();
+        return;
+      }
+      if (msgAction === 'refresh-connection') {
+        await retryStartup({ refreshConnection: true });
+        return;
+      }
+    }
     const toggleBtn = event.target.closest('button[data-step-key]');
     if (!toggleBtn || !transcriptEl.contains(toggleBtn)) return;
     const stepKey = toggleBtn.getAttribute('data-step-key');
@@ -725,6 +795,20 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
       const commandHtml = startupIssue.command
         ? `<p class="empty-command"><code>${escapeHtml(startupIssue.command)}</code></p>`
         : '';
+      const actions = startupActionsForIssue(startupIssue);
+      const actionsHtml = actions.length > 0
+        ? `
+          <div class="empty-actions">
+            ${actions.map((action) => `
+              <button
+                type="button"
+                class="empty-action-btn${action.key === 'refresh-connection' ? ' secondary' : ''}"
+                data-startup-action="${escapeHtml(action.key)}"
+              >${escapeHtml(action.label)}</button>
+            `).join('')}
+          </div>
+        `
+        : '';
       transcriptEl.innerHTML = `
         <div class="empty-state error-state">
           <div class="empty-icon error">!</div>
@@ -732,6 +816,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
             <p class="empty-title">${escapeHtml(startupIssue.title || 'Unable to connect')}</p>
             <p class="empty-sub">${escapeHtml(startupIssue.detail || '')}</p>
             ${commandHtml}
+            ${actionsHtml}
           </div>
         </div>
       `;
@@ -921,6 +1006,8 @@ function scheduleTabAttachRefresh(delayMs = 0) {
 }
 
 function bindTabAttachWatchers() {
+  if (state.tabAttachWatchersBound) return;
+  state.tabAttachWatchersBound = true;
   if (chrome?.tabs?.onActivated?.addListener) {
     chrome.tabs.onActivated.addListener(() => {
       scheduleTabAttachRefresh(40);
@@ -981,6 +1068,13 @@ async function getRelayHttpUrl() {
   if (relayUrl.startsWith('ws://')) return relayUrl.replace('ws://', 'http://').replace('/extension', '');
   if (relayUrl.startsWith('wss://')) return relayUrl.replace('wss://', 'https://').replace('/extension', '');
   return 'http://127.0.0.1:19222';
+}
+
+async function refreshExtensionConnection() {
+  const stored = await chrome.storage.local.get(['relayUrl']);
+  const relayUrl = stored.relayUrl || 'ws://127.0.0.1:19222/extension';
+  const response = await runtimeMessage({ type: 'updateRelayUrl', relayUrl });
+  if (response?.error) throw new Error(response.error);
 }
 
 async function loadAuth() {
@@ -1081,6 +1175,7 @@ async function loadModelPresets() {
   await ensureOk(res, 'Failed to load models');
   const body = await readJsonOrEmpty(res);
   state.modelPresets = normalizeModelRows(body.models);
+  state.defaultReasoningEffort = normalizeReasoningEffort(body.defaultReasoningEffort) || 'medium';
 }
 
 async function loadMessages(sessionId) {
@@ -1209,6 +1304,24 @@ async function updateActiveSessionModel(model) {
   setStatus('ready', 'Ready');
 }
 
+async function updateActiveSessionReasoningEffort(reasoningEffort) {
+  const sessionId = state.value.activeSessionId;
+  if (!sessionId) return;
+
+  const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ reasoningEffort }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Unable to update thinking level');
+  }
+
+  await loadSessions(sessionId);
+  setPopover('none');
+  setStatus('ready', 'Ready');
+}
+
 async function consumeEventStream(body, loopToken) {
   if (!body) return;
   const reader = body.getReader();
@@ -1311,6 +1424,49 @@ async function stopRun() {
   });
 }
 
+async function initializePanel() {
+  state.startupIssue = null;
+  setComposerEnabled(false);
+  setStatus('info', 'Connecting...');
+  render();
+  startInitialTabAttach();
+  await loadAuth();
+  bindTabAttachWatchers();
+  try {
+    await loadModelPresets();
+  } catch {
+    state.modelPresets = [{ value: null, label: 'Default' }];
+    state.defaultReasoningEffort = 'medium';
+  }
+  await loadSessions();
+  if (!state.value.activeSessionId) {
+    await createSession();
+  } else {
+    await selectSession(state.value.activeSessionId);
+  }
+  setComposerEnabled(true);
+  scheduleTabAttachRefresh(0);
+  setStatus('ready', 'Ready');
+  render();
+}
+
+async function retryStartup({ refreshConnection = false } = {}) {
+  try {
+    setStatus('info', refreshConnection ? 'Refreshing connection...' : 'Retrying...');
+    render();
+    if (refreshConnection) {
+      await refreshExtensionConnection();
+    }
+    await initializePanel();
+  } catch (error) {
+    state.startupIssue = normalizeStartupError(error?.code, error?.message);
+    setComposerEnabled(false);
+    setTabAttachBannerState({ hidden: true });
+    setStatus('error', state.startupIssue.statusText || 'Daemon unavailable');
+    render();
+  }
+}
+
 chatFormEl.addEventListener('submit', async (event) => {
   event.preventDefault();
   const text = chatInputEl.value;
@@ -1383,28 +1539,7 @@ popoverBackdropEl.addEventListener('click', () => {
 
 (async function init() {
   try {
-    state.startupIssue = null;
-    setComposerEnabled(false);
-    setStatus('info', 'Connecting...');
-    render();
-    startInitialTabAttach();
-    await loadAuth();
-    bindTabAttachWatchers();
-    try {
-      await loadModelPresets();
-    } catch {
-      state.modelPresets = [{ value: null, label: 'Default' }];
-    }
-    await loadSessions();
-    if (!state.value.activeSessionId) {
-      await createSession();
-    } else {
-      await selectSession(state.value.activeSessionId);
-    }
-    setComposerEnabled(true);
-    scheduleTabAttachRefresh(0);
-    setStatus('ready', 'Ready');
-    render();
+    await initializePanel();
   } catch (error) {
     state.startupIssue = normalizeStartupError(error?.code, error?.message);
     setComposerEnabled(false);
