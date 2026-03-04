@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 
 const html = fs.readFileSync('extension/agent-panel.html', 'utf8');
 const css = fs.readFileSync('extension/agent-panel.css', 'utf8');
+const panelJs = fs.readFileSync('extension/agent-panel.js', 'utf8');
 
 test('agent panel has inline model and session selectors with popovers', () => {
   assert.match(html, /id="bf-model-trigger"/);
@@ -60,4 +61,17 @@ test('agent panel composer matches compact/expanded shell structure', () => {
 
 test('composer action buttons respect hidden attribute for send/stop swapping', () => {
   assert.match(css, /\.composer-actions button\[hidden\][\s\S]*display:\s*none/);
+});
+
+test('reasoning title rows use shimmer and enter transition treatment', () => {
+  assert.match(panelJs, /shouldAnimateLatestReasoningTitle/);
+  assert.match(panelJs, /title-label/);
+  assert.match(panelJs, /shimmer-text/);
+  assert.match(panelJs, /title-transition-in/);
+  assert.match(css, /\.step-label\.title-label/);
+  assert.match(css, /\.step-label\.title-label\.shimmer-text/);
+  assert.match(css, /\.step-label\.title-label\.title-transition-in/);
+  assert.match(css, /@keyframes reasoning-shimmer/);
+  assert.match(css, /@keyframes reasoning-title-in/);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
