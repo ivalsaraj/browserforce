@@ -178,6 +178,40 @@ function normalizeStepDetails(details, label = '') {
   return lines;
 }
 
+function stripInlineMarkdown(text) {
+  return String(text || '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/^>\s*/gm, '')
+    .trim();
+}
+
+function commentaryHeadingFromDelta(delta) {
+  const source = String(delta || '').trim();
+  if (!source) return '';
+  const firstLine = source
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+  if (!firstLine) return '';
+
+  let heading = stripInlineMarkdown(firstLine)
+    .replace(/^[\-*•\d.)\s]+/, '')
+    .replace(/^\s*(?:i['’]?m|i am|i['’]?ll|i will)\s+/i, '')
+    .replace(/^(?:next|now)\s*,?\s+/i, '')
+    .replace(/[.?!:;,\s]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!heading) return '';
+  if (/^(browserforce|recovery action|error[:\s])/i.test(heading)) return '';
+  if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+  return heading.charAt(0).toUpperCase() + heading.slice(1);
+}
+
 function normalizeStep(step) {
   if (!step || typeof step !== 'object') return null;
   const label = trimStepLabel(step.label);
@@ -713,11 +747,25 @@ export function applyEvent(state = initialState, evt = {}) {
   if (evt.event === 'chat.commentary') {
     const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     const delta = evt.payload?.delta || '';
+    const heading = commentaryHeadingFromDelta(delta);
+    const commentaryStep = heading
+      ? {
+        kind: 'reasoning',
+        status: 'running',
+        label: heading,
+      }
+      : null;
+    const timelineWithHeading = commentaryStep
+      ? pushTimelineEntry(run, { type: 'step', ...commentaryStep })
+      : (Array.isArray(run.timeline) ? run.timeline : []);
+    const nextSteps = commentaryStep ? pushStep(run, commentaryStep) : (Array.isArray(run.steps) ? run.steps : []);
+    const timeline = pushTimelineEntry({ timeline: timelineWithHeading }, { type: 'text', text: delta });
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
-        timeline: pushTimelineEntry(run, { type: 'text', text: delta }),
+        steps: nextSteps,
+        timeline,
       }),
     };
   }

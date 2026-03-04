@@ -150,6 +150,12 @@ test('tool-call timeline entries render collapsed toggle rows with click-to-expa
   assert.match(js, /closest\('button\[data-step-key\]'\)/);
 });
 
+test('latest running BrowserForce execute rows are treated as title rows with shimmer', () => {
+  assert.match(js, /const isExecuteTitle = isBrowserForceExecuteStep\(entry\)/);
+  assert.match(js, /const isTitleRow = isReasoningTitle \|\| isExecuteTitle/);
+  assert.match(js, /if \(isRunningTitle && isLatest\) \{/);
+});
+
 test('done tool-call icon renders animated svg check markup', () => {
   assert.match(js, /function renderRunStepIcon\(icon\)/);
   assert.match(js, /run-step-icon-done-svg/);
@@ -165,6 +171,7 @@ test('composer toggles single-line and multiline visual state from textarea heig
 });
 
 test('send and stop buttons are mutually exclusive based on run state', () => {
+  assert.match(js, /composerBoxEl\.classList\.toggle\('is-thinking', enabled && runInProgress\)/);
   assert.match(js, /stopRunBtn\.hidden\s*=\s*!runInProgress/);
   assert.match(js, /sendBtn\.hidden\s*=\s*runInProgress/);
 });

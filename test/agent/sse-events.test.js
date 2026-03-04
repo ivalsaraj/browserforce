@@ -201,7 +201,10 @@ test('chat.commentary text stays inline but does not pollute final assistant mes
   const s3 = applyEvent(s2, { event: 'chat.final', runId: 'r1', sessionId: 's1', payload: { text: 'Final answer.' } });
 
   const timeline = s3.runs.r1.timeline || [];
+  const commentaryStep = (s3.runs.r1.steps || []).find((item) => item?.kind === 'reasoning' && /Inspecting files/.test(item?.label || ''));
   assert.equal(timeline.some((item) => item?.type === 'text' && /Inspecting files/.test(item?.text || '')), true);
+  assert.equal(timeline.some((item) => item?.type === 'step' && item?.kind === 'reasoning' && /Inspecting files/.test(item?.label || '')), true);
+  assert.equal(Boolean(commentaryStep), true);
   assert.equal(timeline.some((item) => item?.type === 'text' && /Final answer/.test(item?.text || '')), true);
   assert.equal(s3.runs.r1.text, 'Final answer.');
   assert.equal(s3.messagesBySession.s1.at(-1)?.text, 'Final answer.');

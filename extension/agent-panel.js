@@ -133,6 +133,7 @@ function syncComposerState() {
   const hasText = chatInputEl.value.trim().length > 0;
   const runInProgress = isActiveRunInProgress();
 
+  composerBoxEl.classList.toggle('is-thinking', enabled && runInProgress);
   stopRunBtn.disabled = !enabled || !runInProgress;
   stopRunBtn.classList.toggle('active', enabled && runInProgress);
   stopRunBtn.hidden = !runInProgress;
@@ -675,12 +676,14 @@ function renderRunTimeline(run, fallbackText = '') {
     const isLatest = index === latestStepIndex;
     const shouldPulse = isLatest && status === 'running';
     const isReasoningTitle = String(entry?.kind || '').toLowerCase() === 'reasoning';
-    const isRunningReasoning = isReasoningTitle && normalizedStatus === 'running';
+    const isExecuteTitle = isBrowserForceExecuteStep(entry);
+    const isTitleRow = isReasoningTitle || isExecuteTitle;
+    const isRunningTitle = isTitleRow && normalizedStatus === 'running';
     const labelClasses = ['step-label'];
-    if (isReasoningTitle) labelClasses.push('title-label');
-    if (isRunningReasoning && isLatest) {
+    if (isTitleRow) labelClasses.push('title-label');
+    if (isRunningTitle && isLatest) {
       labelClasses.push('shimmer-text');
-      if (shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReasoning })) {
+      if (shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReasoning: isRunningTitle })) {
         labelClasses.push('title-transition-in');
       }
     }
