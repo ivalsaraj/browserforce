@@ -336,6 +336,50 @@ function detailsEqual(a, b) {
   return JSON.stringify(a || []) === JSON.stringify(b || []);
 }
 
+function normalizeStepDetails(details, label = '') {
+  const lines = [];
+  const pushLine = (value) => {
+    const parts = String(value || '')
+      .split('\n')
+      .map((part) => part.trim())
+      .filter(Boolean);
+    for (const rawPart of parts) {
+      const part = rawPart.replace(/^[-*]\s+/, '').trim();
+      if (!part) continue;
+      if (part === label) continue;
+      if (lines.includes(part)) continue;
+      lines.push(part.length > 220 ? `${part.slice(0, 217)}...` : part);
+      if (lines.length >= 8) return;
+    }
+  };
+  const visit = (value) => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (lines.length >= 8) return;
+        visit(item);
+      }
+      return;
+    }
+    if (typeof value === 'object') {
+      visit(value.text);
+      visit(value.message);
+      visit(value.output);
+      visit(value.command);
+      visit(value.cmd);
+      visit(value.code);
+      visit(value.arguments);
+      visit(value.path);
+      visit(value.query);
+      visit(value.pattern);
+      return;
+    }
+    pushLine(value);
+  };
+  visit(details);
+  return lines;
+}
+
 function normalizeRunStep(step) {
   if (!step || typeof step !== 'object') return null;
   const label = trimStepLabel(step.label);
@@ -545,6 +589,27 @@ function stepLabelForToolEvent(evt) {
   return '';
 }
 
+function stepDetailsForToolEvent(evt, label) {
+  const payload = evt?.payload || {};
+  return normalizeStepDetails([
+    payload.details,
+    payload.text,
+    payload.message,
+    payload.delta,
+    payload.command,
+    payload.cmd,
+    payload.code,
+    payload.arguments,
+    payload.path,
+    payload.query,
+    payload.pattern,
+    payload.args,
+    payload.paths,
+    payload.items,
+    payload.item,
+  ], label);
+}
+
 function stepKeyForToolEvent(evt) {
   const payload = evt?.payload || {};
   const key = firstString([
@@ -624,15 +689,49 @@ function stepKeyForRunEvent(evt) {
   return key.startsWith('tool:') ? key : `tool:${key}`;
 }
 
+function stepDetailsForRunEvent(evt, label) {
+  const payload = evt?.payload || {};
+  const item = payload?.item && typeof payload.item === 'object' ? payload.item : {};
+  return normalizeStepDetails([
+    payload.details,
+    payload.text,
+    payload.message,
+    payload.delta,
+    payload.command,
+    payload.path,
+    payload.query,
+    payload.pattern,
+    payload.args,
+    payload.paths,
+    payload.items,
+    payload.item,
+    item?.details,
+    item?.text,
+    item?.message,
+    item?.summary,
+    item?.command,
+    item?.path,
+    item?.query,
+    item?.pattern,
+    item?.args,
+    item?.paths,
+  ], label);
+}
+
 function trackRunStep(run, evt) {
   if (!run || !evt?.event) return;
 
   if (evt.event === 'tool.started' || evt.event === 'tool.delta' || evt.event === 'tool.final') {
+    const label = stepLabelForToolEvent(evt);
+    const details = stepDetailsForToolEvent(evt, label);
     const step = {
-      kind: evt.event === 'tool.delta' ? 'reasoning' : 'tool',
+      kind: (evt.event === 'tool.delta' && String(evt?.payload?.type || '').toLowerCase() === 'reasoning')
+        ? 'reasoning'
+        : 'tool',
       status: evt.event === 'tool.final' ? 'done' : 'running',
-      label: stepLabelForToolEvent(evt),
+      label,
       ...(stepKeyForToolEvent(evt) ? { key: stepKeyForToolEvent(evt) } : {}),
+      ...(details.length > 0 ? { details } : {}),
     };
     pushRunStep(run, step);
     pushRunTimelineEntry(run, { type: 'step', ...step });
@@ -640,11 +739,14 @@ function trackRunStep(run, evt) {
   }
 
   if (evt.event === 'run.event') {
+    const label = stepLabelForRunEvent(evt);
+    const details = stepDetailsForRunEvent(evt, label);
     const step = {
       kind: stepKindForRunEvent(evt),
       status: stepStatusForRunEvent(evt),
-      label: stepLabelForRunEvent(evt),
+      label,
       ...(stepKeyForRunEvent(evt) ? { key: stepKeyForRunEvent(evt) } : {}),
+      ...(details.length > 0 ? { details } : {}),
     };
     pushRunStep(run, step);
     pushRunTimelineEntry(run, { type: 'step', ...step });
