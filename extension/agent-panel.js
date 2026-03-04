@@ -33,6 +33,8 @@ const state = {
   agentOpenRequestWatcherBound: false,
   lastHandledAgentOpenRequestId: null,
   pendingAgentOpenRequest: null,
+  localImageBlobUrlByPath: {},
+  localImageLoadsByPath: {},
   initialTabAttachInFlight: false,
   initialTabAttachStarted: false,
   editingSessionId: null,
@@ -720,6 +722,66 @@ function renderContent(value) {
   return renderMarkdownContent(value);
 }
 
+async function loadLocalImageBlobUrl(localPath) {
+  const path = String(localPath || '').trim();
+  if (!path || !state.auth?.baseUrl || !state.auth?.token) return null;
+  if (state.localImageBlobUrlByPath[path]) return state.localImageBlobUrlByPath[path];
+  if (state.localImageLoadsByPath[path]) return state.localImageLoadsByPath[path];
+
+  const loadPromise = (async () => {
+    const url = `${state.auth.baseUrl}/v1/local-file?path=${encodeURIComponent(path)}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${state.auth.token}`,
+      },
+    });
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    state.localImageBlobUrlByPath = {
+      ...(state.localImageBlobUrlByPath || {}),
+      [path]: blobUrl,
+    };
+    return blobUrl;
+  })().finally(() => {
+    const nextLoads = { ...(state.localImageLoadsByPath || {}) };
+    delete nextLoads[path];
+    state.localImageLoadsByPath = nextLoads;
+  });
+
+  state.localImageLoadsByPath = {
+    ...(state.localImageLoadsByPath || {}),
+    [path]: loadPromise,
+  };
+  return loadPromise;
+}
+
+function hydrateLocalImagePreviews() {
+  if (!transcriptEl) return;
+  const imageNodes = transcriptEl.querySelectorAll('img.inline-local-image[data-local-path]');
+  for (const node of imageNodes) {
+    const localPath = String(node.getAttribute('data-local-path') || '').trim();
+    if (!localPath) continue;
+    const cached = state.localImageBlobUrlByPath?.[localPath];
+    if (cached) {
+      if (node.getAttribute('src') !== cached) node.setAttribute('src', cached);
+      continue;
+    }
+    loadLocalImageBlobUrl(localPath)
+      .then((blobUrl) => {
+        if (!blobUrl) return;
+        transcriptEl.querySelectorAll('img.inline-local-image[data-local-path]').forEach((img) => {
+          if (String(img.getAttribute('data-local-path') || '').trim() !== localPath) return;
+          img.setAttribute('src', blobUrl);
+        });
+      })
+      .catch(() => {
+        // best-effort preview only
+      });
+  }
+}
+
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
@@ -850,6 +912,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
   }
 
   bindTranscriptHandlers();
+  hydrateLocalImagePreviews();
   if (Number.isFinite(preserveScrollTop)) {
     transcriptEl.scrollTop = preserveScrollTop;
   } else {

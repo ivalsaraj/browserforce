@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startChatd } from '../../agent/src/chatd.js';
@@ -103,6 +103,43 @@ test('GET /v1/sessions/:id/messages rejects malformed encoded id', async () => {
     assert.equal(res.status, 400);
   } finally {
     await daemon.stop();
+  }
+});
+
+test('GET /v1/local-file serves local image bytes for authenticated requests', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'bf-chatd-local-image-'));
+  const imagePath = join(tempDir, 'preview.png');
+  writeFileSync(imagePath, Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
+
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const response = await fetch(`${daemon.baseUrl}/v1/local-file?path=${encodeURIComponent(imagePath)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+    const body = Buffer.from(await response.arrayBuffer());
+    assert.equal(body.length > 0, true);
+  } finally {
+    await daemon.stop();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('GET /v1/local-file rejects unsupported extensions', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'bf-chatd-local-text-'));
+  const textPath = join(tempDir, 'note.txt');
+  writeFileSync(textPath, 'not-an-image', 'utf8');
+
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const response = await fetch(`${daemon.baseUrl}/v1/local-file?path=${encodeURIComponent(textPath)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(response.status, 415);
+  } finally {
+    await daemon.stop();
+    rmSync(tempDir, { recursive: true, force: true });
   }
 });
 

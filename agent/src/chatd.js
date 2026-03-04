@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { pickChatdPort } from './port-resolver.js';
@@ -26,6 +26,17 @@ const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
 const MODEL_LIST_TIMEOUT_MS = 5000;
 const DEFAULT_REASONING_EFFORT = 'medium';
+const LOCAL_FILE_MAX_BYTES = 15 * 1024 * 1024;
+const LOCAL_IMAGE_CONTENT_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.avif': 'image/avif',
+};
 
 function parseTopLevelTomlString(raw, key) {
   const lines = String(raw || '').split(/\r?\n/);
@@ -256,6 +267,17 @@ function safeDecodeComponent(value) {
   } catch {
     return null;
   }
+}
+
+function normalizeLocalFilePath(value) {
+  const path = String(value || '').trim();
+  if (!path || !path.startsWith('/') || path.startsWith('//') || path.includes('\0')) return null;
+  return path;
+}
+
+function localImageContentTypeForPath(path) {
+  const extension = extname(String(path || '')).toLowerCase();
+  return LOCAL_IMAGE_CONTENT_TYPES[extension] || null;
 }
 
 function sanitizeContextText(value, maxLen = 320) {
@@ -1084,6 +1106,43 @@ export async function startChatd(opts = {}) {
           json(res, 401, { error: 'Unauthorized' });
           return;
         }
+      }
+
+      if (url.pathname === '/v1/local-file' && req.method === 'GET') {
+        const localPath = normalizeLocalFilePath(url.searchParams.get('path'));
+        if (!localPath) {
+          json(res, 400, { error: 'path is required' });
+          return;
+        }
+
+        const contentType = localImageContentTypeForPath(localPath);
+        if (!contentType) {
+          json(res, 415, { error: 'Unsupported file type' });
+          return;
+        }
+
+        let fileStat;
+        try {
+          fileStat = await fs.stat(localPath);
+        } catch {
+          json(res, 404, { error: 'File not found' });
+          return;
+        }
+        if (!fileStat?.isFile?.()) {
+          json(res, 404, { error: 'File not found' });
+          return;
+        }
+        if (fileStat.size > LOCAL_FILE_MAX_BYTES) {
+          json(res, 413, { error: 'File too large' });
+          return;
+        }
+
+        const data = await fs.readFile(localPath);
+        res.statusCode = 200;
+        res.setHeader('content-type', contentType);
+        res.setHeader('cache-control', 'no-store');
+        res.end(data);
+        return;
       }
 
       if (url.pathname === '/v1/sessions' && req.method === 'GET') {
