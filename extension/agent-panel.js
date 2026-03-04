@@ -5,6 +5,7 @@ import {
   clearSessionRunId,
   formatContextUsage,
   getSessionRunId,
+  renderMarkdownContent,
   renderInlineContent,
   shouldApplySessionSelection,
 } from './agent-panel-runtime.js';
@@ -662,7 +663,7 @@ function renderRunTimeline(run, fallbackText = '') {
     <div class="run-timeline">
       ${timeline.map((entry, index) => {
     if (entry.type === 'text') {
-      return `<div class="bubble-assistant"><p>${renderContent(entry.text || '')}</p></div>`;
+      return `<div class="bubble-assistant">${renderContent(entry.text || '')}</div>`;
     }
     const status = entry?.status || 'running';
     const normalizedStatus = String(status || '').toLowerCase();
@@ -716,7 +717,7 @@ function renderRunTimeline(run, fallbackText = '') {
 }
 
 function renderContent(value) {
-  return renderInlineContent(value);
+  return renderMarkdownContent(value);
 }
 
 function bindTranscriptHandlers() {
@@ -769,7 +770,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
 
     const messageRun = msg.runId ? state.value.runs[msg.runId] : null;
     const timelineHtml = renderRunTimeline(messageRun, msg.text || '');
-    const fallbackHtml = `<div class="bubble-assistant"><p>${renderContent(msg.text || '')}</p></div>`;
+    const fallbackHtml = `<div class="bubble-assistant">${renderContent(msg.text || '')}</div>`;
     return `
       <article class="message assistant">
         <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
