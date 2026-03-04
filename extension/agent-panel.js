@@ -16,6 +16,8 @@ const REASONING_PRESETS = [
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Extra High' },
 ];
+const BROWSERFORCE_AGENT_OPEN_REQUEST_KEY = 'browserforceAgentOpenRequest';
+const BROWSERFORCE_AGENT_OPEN_REQUEST_MAX_AGE_MS = 60_000;
 
 const state = {
   value: initialState,
@@ -27,6 +29,9 @@ const state = {
   latestReasoningTitleByRun: {},
   transcriptHandlersBound: false,
   tabAttachWatchersBound: false,
+  agentOpenRequestWatcherBound: false,
+  lastHandledAgentOpenRequestId: null,
+  pendingAgentOpenRequest: null,
   initialTabAttachInFlight: false,
   initialTabAttachStarted: false,
   editingSessionId: null,
@@ -885,6 +890,65 @@ function escapeHtml(value) {
   return div.innerHTML;
 }
 
+function normalizeAgentOpenRequest(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const requestId = String(raw.requestId || '').trim();
+  const requestedAt = Number(raw.requestedAt);
+  if (!requestId || !Number.isFinite(requestedAt)) return null;
+  if ((Date.now() - requestedAt) > BROWSERFORCE_AGENT_OPEN_REQUEST_MAX_AGE_MS) return null;
+  return {
+    requestId,
+    requestedAt,
+    source: String(raw.source || '').trim() || null,
+  };
+}
+
+async function consumePendingAgentOpenRequest() {
+  if (!chrome?.storage?.local?.get || !chrome?.storage?.local?.remove) return null;
+  try {
+    const stored = await chrome.storage.local.get([BROWSERFORCE_AGENT_OPEN_REQUEST_KEY]);
+    const request = normalizeAgentOpenRequest(stored?.[BROWSERFORCE_AGENT_OPEN_REQUEST_KEY]);
+    if (!request) return null;
+    await chrome.storage.local.remove(BROWSERFORCE_AGENT_OPEN_REQUEST_KEY);
+    state.lastHandledAgentOpenRequestId = request.requestId;
+    return request;
+  } catch {
+    return null;
+  }
+}
+
+async function startFreshSessionFromOpenRequest(rawRequest) {
+  const request = normalizeAgentOpenRequest(rawRequest);
+  if (!request) return;
+  if (state.lastHandledAgentOpenRequestId === request.requestId) return;
+  state.lastHandledAgentOpenRequestId = request.requestId;
+  if (!state.auth) {
+    state.pendingAgentOpenRequest = request;
+    return;
+  }
+  try {
+    await chrome.storage.local.remove(BROWSERFORCE_AGENT_OPEN_REQUEST_KEY);
+  } catch {
+    // best-effort cleanup
+  }
+  state.pendingAgentOpenRequest = null;
+  await createSession();
+}
+
+function bindAgentOpenRequestWatcher() {
+  if (state.agentOpenRequestWatcherBound) return;
+  if (!chrome?.storage?.onChanged?.addListener) return;
+  state.agentOpenRequestWatcherBound = true;
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+    const change = changes?.[BROWSERFORCE_AGENT_OPEN_REQUEST_KEY];
+    if (!change?.newValue) return;
+    startFreshSessionFromOpenRequest(change.newValue).catch((error) => {
+      setStatus('error', error?.message || 'Unable to start a new conversation');
+    });
+  });
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1429,6 +1493,15 @@ async function initializePanel() {
   setComposerEnabled(false);
   setStatus('info', 'Connecting...');
   render();
+  bindAgentOpenRequestWatcher();
+  const openRequest = await consumePendingAgentOpenRequest();
+  let shouldStartFreshSession = !!openRequest;
+  if (shouldStartFreshSession) {
+    state.pendingAgentOpenRequest = null;
+  } else if (state.pendingAgentOpenRequest) {
+    shouldStartFreshSession = true;
+    state.pendingAgentOpenRequest = null;
+  }
   startInitialTabAttach();
   await loadAuth();
   bindTabAttachWatchers();
@@ -1439,7 +1512,7 @@ async function initializePanel() {
     state.defaultReasoningEffort = 'medium';
   }
   await loadSessions();
-  if (!state.value.activeSessionId) {
+  if (shouldStartFreshSession || !state.value.activeSessionId) {
     await createSession();
   } else {
     await selectSession(state.value.activeSessionId);
