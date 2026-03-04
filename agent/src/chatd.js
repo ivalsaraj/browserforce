@@ -300,14 +300,43 @@ function trimStepLabel(label) {
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
 
+function trimStepKey(key) {
+  const text = String(key || '').trim();
+  if (!text) return '';
+  return text.length > 220 ? text.slice(0, 220) : text;
+}
+
+function normalizeStepStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return 'running';
+  if (normalized === 'completed' || normalized === 'success' || normalized === 'succeeded') return 'done';
+  return normalized;
+}
+
+function isTerminalStepStatus(status) {
+  const normalized = normalizeStepStatus(status);
+  return normalized === 'done' || normalized === 'failed' || normalized === 'aborted';
+}
+
+function isGenericToolLabel(label) {
+  const normalized = String(label || '').trim().toLowerCase();
+  return normalized === 'tool call started' || normalized === 'tool call completed' || normalized === 'working...';
+}
+
+function detailsEqual(a, b) {
+  return JSON.stringify(a || []) === JSON.stringify(b || []);
+}
+
 function normalizeRunStep(step) {
   if (!step || typeof step !== 'object') return null;
   const label = trimStepLabel(step.label);
   if (!label) return null;
   return {
     kind: String(step?.kind || '').trim() || 'reasoning',
-    status: String(step?.status || '').trim() || 'running',
+    status: normalizeStepStatus(step?.status),
     label,
+    ...(trimStepKey(step.key) ? { key: trimStepKey(step.key) } : {}),
+    ...(Array.isArray(step.details) && step.details.length > 0 ? { details: step.details } : {}),
   };
 }
 
@@ -316,8 +345,61 @@ function pushRunStep(run, step) {
   const steps = Array.isArray(run.steps) ? run.steps : [];
   const normalized = normalizeRunStep(step);
   if (!normalized || !normalized.label) return;
+  const keyedIndex = normalized.key
+    ? (() => {
+      for (let idx = steps.length - 1; idx >= 0; idx -= 1) {
+        if (steps[idx]?.key === normalized.key) return idx;
+      }
+      return -1;
+    })()
+    : -1;
+  if (keyedIndex >= 0) {
+    const existing = steps[keyedIndex];
+    steps[keyedIndex] = {
+      ...existing,
+      ...normalized,
+      label: (isGenericToolLabel(normalized.label) && existing?.label) ? existing.label : normalized.label,
+      details: normalized.details && normalized.details.length > 0 ? normalized.details : existing?.details,
+    };
+    run.steps = steps;
+    return;
+  }
+
+  if (!normalized.key && isTerminalStepStatus(normalized.status)) {
+    let fallbackIndex = -1;
+    for (let idx = steps.length - 1; idx >= 0; idx -= 1) {
+      const entry = steps[idx];
+      if (
+        entry
+        && !entry.key
+        && String(entry.kind || '') === normalized.kind
+        && String(entry.label || '') === normalized.label
+        && !isTerminalStepStatus(entry.status)
+      ) {
+        fallbackIndex = idx;
+        break;
+      }
+    }
+    if (fallbackIndex >= 0) {
+      const existing = steps[fallbackIndex];
+      steps[fallbackIndex] = {
+        ...existing,
+        ...normalized,
+        details: normalized.details && normalized.details.length > 0 ? normalized.details : existing?.details,
+      };
+      run.steps = steps;
+      return;
+    }
+  }
+
   const last = steps[steps.length - 1];
-  if (last && last.label === normalized.label && last.kind === normalized.kind && last.status === normalized.status) {
+  if (
+    last
+    && last.label === normalized.label
+    && last.kind === normalized.kind
+    && last.status === normalized.status
+    && detailsEqual(last.details, normalized.details)
+  ) {
     return;
   }
   steps.push(normalized);
@@ -341,17 +423,64 @@ function pushRunTimelineEntry(run, entry) {
     const normalized = normalizeRunStep(entry);
     if (!normalized) return;
     const next = { type: 'step', ...normalized };
-    const last = timeline[timeline.length - 1];
-    if (
-      last
-      && last.type === 'step'
-      && last.label === next.label
-      && last.kind === next.kind
-      && last.status === next.status
-    ) {
-      return;
+    const keyedIndex = next.key
+      ? (() => {
+        for (let idx = timeline.length - 1; idx >= 0; idx -= 1) {
+          const item = timeline[idx];
+          if (item?.type === 'step' && item.key === next.key) return idx;
+        }
+        return -1;
+      })()
+      : -1;
+    if (keyedIndex >= 0) {
+      const existing = timeline[keyedIndex];
+      timeline[keyedIndex] = {
+        ...existing,
+        ...next,
+        label: (isGenericToolLabel(next.label) && existing?.label) ? existing.label : next.label,
+        details: next.details && next.details.length > 0 ? next.details : existing?.details,
+      };
+    } else {
+      if (!next.key && isTerminalStepStatus(next.status)) {
+        let fallbackIndex = -1;
+        for (let idx = timeline.length - 1; idx >= 0; idx -= 1) {
+          const item = timeline[idx];
+          if (
+            item
+            && item.type === 'step'
+            && !item.key
+            && String(item.kind || '') === next.kind
+            && String(item.label || '') === next.label
+            && !isTerminalStepStatus(item.status)
+          ) {
+            fallbackIndex = idx;
+            break;
+          }
+        }
+        if (fallbackIndex >= 0) {
+          const existing = timeline[fallbackIndex];
+          timeline[fallbackIndex] = {
+            ...existing,
+            ...next,
+            details: next.details && next.details.length > 0 ? next.details : existing?.details,
+          };
+          run.timeline = timeline;
+          return;
+        }
+      }
+      const last = timeline[timeline.length - 1];
+      if (
+        last
+        && last.type === 'step'
+        && last.label === next.label
+        && last.kind === next.kind
+        && last.status === next.status
+        && detailsEqual(last.details, next.details)
+      ) {
+        return;
+      }
+      timeline.push(next);
     }
-    timeline.push(next);
   } else {
     return;
   }
@@ -387,20 +516,20 @@ function stepLabelForToolEvent(evt) {
   const payload = evt?.payload || {};
   if (evt.event === 'tool.started') {
     return firstString([
+      payload.command,
       payload.title,
       payload.name,
       payload.tool,
       payload.toolName,
-      payload.command,
     ]) || 'Tool call started';
   }
   if (evt.event === 'tool.final') {
     return firstString([
+      payload.command,
       payload.title,
       payload.name,
       payload.tool,
       payload.toolName,
-      payload.command,
     ]) || 'Tool call completed';
   }
   if (evt.event === 'tool.delta') {
@@ -416,6 +545,21 @@ function stepLabelForToolEvent(evt) {
     ]) || 'Working...';
   }
   return '';
+}
+
+function stepKeyForToolEvent(evt) {
+  const payload = evt?.payload || {};
+  const key = firstString([
+    payload.stepKey,
+    payload.step_key,
+    payload.callId,
+    payload.call_id,
+    payload.toolCallId,
+    payload.tool_call_id,
+    payload.id,
+  ]);
+  if (!key) return '';
+  return key.startsWith('tool:') ? key : `tool:${key}`;
 }
 
 function humanizeToken(value) {
@@ -463,6 +607,25 @@ function stepLabelForRunEvent(evt) {
   ]) || 'Working...';
 }
 
+function stepKeyForRunEvent(evt) {
+  const payload = evt?.payload || {};
+  const item = payload?.item && typeof payload.item === 'object' ? payload.item : {};
+  const key = firstString([
+    payload.stepKey,
+    payload.step_key,
+    item.stepKey,
+    item.step_key,
+    payload.callId,
+    payload.call_id,
+    item.callId,
+    item.call_id,
+    item.id,
+    payload.id,
+  ]);
+  if (!key) return '';
+  return key.startsWith('tool:') ? key : `tool:${key}`;
+}
+
 function trackRunStep(run, evt) {
   if (!run || !evt?.event) return;
 
@@ -471,6 +634,7 @@ function trackRunStep(run, evt) {
       kind: evt.event === 'tool.delta' ? 'reasoning' : 'tool',
       status: evt.event === 'tool.final' ? 'done' : 'running',
       label: stepLabelForToolEvent(evt),
+      ...(stepKeyForToolEvent(evt) ? { key: stepKeyForToolEvent(evt) } : {}),
     };
     pushRunStep(run, step);
     pushRunTimelineEntry(run, { type: 'step', ...step });
@@ -482,6 +646,7 @@ function trackRunStep(run, evt) {
       kind: stepKindForRunEvent(evt),
       status: stepStatusForRunEvent(evt),
       label: stepLabelForRunEvent(evt),
+      ...(stepKeyForRunEvent(evt) ? { key: stepKeyForRunEvent(evt) } : {}),
     };
     pushRunStep(run, step);
     pushRunTimelineEntry(run, { type: 'step', ...step });
@@ -905,6 +1070,15 @@ export async function startChatd(opts = {}) {
                     active.assistantBuffer += delta;
                     pushRunTimelineEntry(active, { type: 'text', text: delta });
                     broadcast(buildEvent({ event: 'chat.delta', runId, sessionId, payload: { delta } }));
+                  }
+                  return;
+                }
+
+                if (evt.event === 'chat.commentary') {
+                  const delta = evt.payload?.delta || '';
+                  if (delta) {
+                    pushRunTimelineEntry(active, { type: 'text', text: delta });
+                    broadcast(buildEvent({ event: 'chat.commentary', runId, sessionId, payload: { delta } }));
                   }
                   return;
                 }

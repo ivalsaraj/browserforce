@@ -58,6 +58,29 @@ test('messages preserve optional run metadata used for transcript rehydration', 
   ]);
 });
 
+test('messages preserve step key metadata used for lifecycle collapse on reload', async () => {
+  const { sessionId } = await createSession({ title: 'Run step keys', storageRoot });
+  await appendMessage({
+    sessionId,
+    role: 'assistant',
+    text: 'done',
+    runId: 'run_456',
+    steps: [{ kind: 'tool', status: 'done', label: 'Run command', key: 'tool:call_1' }],
+    timeline: [
+      { type: 'step', kind: 'tool', status: 'done', label: 'Run command', key: 'tool:call_1' },
+      { type: 'text', text: 'done' },
+    ],
+    storageRoot,
+  });
+  const rows = await readMessages({ sessionId, limit: 20, storageRoot });
+  const last = rows.at(-1);
+  assert.deepEqual(last.steps, [{ kind: 'tool', status: 'done', label: 'Run command', key: 'tool:call_1' }]);
+  assert.deepEqual(last.timeline, [
+    { type: 'step', kind: 'tool', status: 'done', label: 'Run command', key: 'tool:call_1' },
+    { type: 'text', text: 'done' },
+  ]);
+});
+
 test('rejects unsafe session ids', async () => {
   await assert.rejects(
     appendMessage({ sessionId: '../escape', role: 'user', text: 'x', storageRoot }),

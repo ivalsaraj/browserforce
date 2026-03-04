@@ -89,6 +89,36 @@ test('messages.loaded hydrates stored timeline entries for reopened sessions', (
   assert.equal(next.runs.run_2?.timeline?.[1]?.type, 'text');
 });
 
+test('messages.loaded collapses legacy running+done duplicate tool entries on reload', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'messages.loaded',
+    sessionId: 's1',
+    messages: [{
+      role: 'assistant',
+      text: 'Done',
+      runId: 'run_3',
+      timeline: [
+        { type: 'step', kind: 'tool', status: 'running', label: "/bin/zsh -lc 'rg --files'" },
+        { type: 'step', kind: 'tool', status: 'done', label: "/bin/zsh -lc 'rg --files'" },
+        { type: 'text', text: 'Done' },
+      ],
+    }],
+  });
+
+  const timeline = next.runs.run_3?.timeline || [];
+  assert.equal(timeline.length, 2);
+  assert.equal(timeline[0]?.type, 'step');
+  assert.equal(timeline[0]?.status, 'done');
+  assert.equal(timeline[1]?.type, 'text');
+});
+
 test('session.metadata.loaded hydrates persisted codex usage for reopened session', () => {
   const state = {
     activeSessionId: 's1',

@@ -57,9 +57,10 @@ test('tool and reasoning events are tracked as steps', () => {
   const s4 = applyEvent(s3, { event: 'tool.final', runId: 'r1', sessionId: 's1', payload: { tool: 'fetch' } });
 
   assert.equal(Array.isArray(s4.runs.r1.steps), true);
-  assert.equal(s4.runs.r1.steps.length, 3);
-  assert.match(s4.runs.r1.steps[0].label, /fetch/i);
-  assert.match(s4.runs.r1.steps[1].label, /Planning/);
+  assert.equal(s4.runs.r1.steps.length, 2);
+  assert.equal(s4.runs.r1.steps.filter((step) => /fetch/i.test(step?.label || '')).length, 1);
+  assert.equal(s4.runs.r1.steps.some((step) => /Planning/.test(step?.label || '')), true);
+  assert.equal(s4.runs.r1.steps.find((step) => /fetch/i.test(step?.label || ''))?.status, 'done');
 });
 
 test('chat and tool events preserve inline timeline order', () => {
@@ -76,6 +77,47 @@ test('chat and tool events preserve inline timeline order', () => {
   assert.equal(timeline[0]?.text, 'First chunk. ');
   assert.match(timeline[1]?.label || '', /execute/i);
   assert.equal(timeline[2]?.text, 'Second chunk.');
+});
+
+test('tool.final replaces matching in-flight tool step at original timeline position', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, { event: 'chat.delta', runId: 'r1', sessionId: 's1', payload: { delta: 'Before. ' } });
+  const s3 = applyEvent(s2, {
+    event: 'tool.started',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { tool: 'execute', callId: 'call_1', stepKey: 'tool:call_1' },
+  });
+  const s4 = applyEvent(s3, { event: 'chat.delta', runId: 'r1', sessionId: 's1', payload: { delta: 'After.' } });
+  const s5 = applyEvent(s4, {
+    event: 'tool.final',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { callId: 'call_1', stepKey: 'tool:call_1' },
+  });
+
+  const timeline = s5.runs.r1.timeline || [];
+  assert.deepEqual(timeline.map((item) => item.type), ['text', 'step', 'text']);
+  assert.equal(timeline[1]?.status, 'done');
+  assert.equal(timeline[1]?.key, 'tool:call_1');
+  assert.equal((s5.runs.r1.steps || []).filter((item) => item?.key === 'tool:call_1').length, 1);
+});
+
+test('chat.commentary text stays inline but does not pollute final assistant message text', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'chat.commentary',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { delta: 'Inspecting files...' },
+  });
+  const s3 = applyEvent(s2, { event: 'chat.final', runId: 'r1', sessionId: 's1', payload: { text: 'Final answer.' } });
+
+  const timeline = s3.runs.r1.timeline || [];
+  assert.equal(timeline.some((item) => item?.type === 'text' && /Inspecting files/.test(item?.text || '')), true);
+  assert.equal(timeline.some((item) => item?.type === 'text' && /Final answer/.test(item?.text || '')), true);
+  assert.equal(s3.runs.r1.text, 'Final answer.');
+  assert.equal(s3.messagesBySession.s1.at(-1)?.text, 'Final answer.');
 });
 
 test('chat.final stores timeline with assistant transcript message', () => {

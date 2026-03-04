@@ -55,11 +55,23 @@ function normalizeStep(step) {
   const label = String(step.label || '').trim();
   if (!label) return null;
   const kind = String(step.kind || '').trim() || 'reasoning';
-  const status = String(step.status || '').trim() || 'running';
+  const normalizedStatus = String(step.status || '').trim().toLowerCase();
+  const status = normalizedStatus === 'completed' || normalizedStatus === 'success' || normalizedStatus === 'succeeded'
+    ? 'done'
+    : (normalizedStatus || 'running');
+  const key = String(step.key || '').trim();
+  const details = Array.isArray(step.details)
+    ? step.details
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 8)
+    : [];
   return {
     kind,
     status,
     label: label.length > 160 ? `${label.slice(0, 157)}...` : label,
+    ...(key ? { key: key.length > 220 ? key.slice(0, 220) : key } : {}),
+    ...(details.length > 0 ? { details } : {}),
   };
 }
 
@@ -86,6 +98,11 @@ function normalizeTimelineEntry(entry) {
 function normalizeTimeline(timeline) {
   if (!Array.isArray(timeline)) return [];
   const entries = [];
+  const isTerminal = (status) => ['done', 'failed', 'aborted'].includes(String(status || '').toLowerCase());
+  const isGenericLabel = (label) => {
+    const normalized = String(label || '').trim().toLowerCase();
+    return normalized === 'tool call started' || normalized === 'tool call completed' || normalized === 'working...';
+  };
   for (const item of timeline.slice(-200)) {
     const normalized = normalizeTimelineEntry(item);
     if (!normalized) continue;
@@ -94,12 +111,63 @@ function normalizeTimeline(timeline) {
       last.text = `${last.text || ''}${normalized.text || ''}`;
       continue;
     }
+    if (normalized.type === 'step' && normalized.key) {
+      const index = (() => {
+        for (let idx = entries.length - 1; idx >= 0; idx -= 1) {
+          const entry = entries[idx];
+          if (entry?.type === 'step' && entry.key === normalized.key) return idx;
+        }
+        return -1;
+      })();
+      if (index >= 0) {
+        const existing = entries[index];
+        entries[index] = {
+          ...existing,
+          ...normalized,
+          label: (isGenericLabel(normalized.label) && existing?.label) ? existing.label : normalized.label,
+          details: normalized.details && normalized.details.length > 0 ? normalized.details : existing?.details,
+        };
+        continue;
+      }
+    }
+    if (
+      normalized.type === 'step'
+      && !normalized.key
+      && isTerminal(normalized.status)
+    ) {
+      const index = (() => {
+        for (let idx = entries.length - 1; idx >= 0; idx -= 1) {
+          const entry = entries[idx];
+          if (
+            entry
+            && entry.type === 'step'
+            && !entry.key
+            && entry.kind === normalized.kind
+            && entry.label === normalized.label
+            && !isTerminal(entry.status)
+          ) {
+            return idx;
+          }
+        }
+        return -1;
+      })();
+      if (index >= 0) {
+        const existing = entries[index];
+        entries[index] = {
+          ...existing,
+          ...normalized,
+          details: normalized.details && normalized.details.length > 0 ? normalized.details : existing?.details,
+        };
+        continue;
+      }
+    }
     if (
       normalized.type === 'step'
       && last?.type === 'step'
       && last.label === normalized.label
       && last.kind === normalized.kind
       && last.status === normalized.status
+      && last.key === normalized.key
     ) {
       continue;
     }

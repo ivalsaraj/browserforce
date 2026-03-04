@@ -436,6 +436,8 @@ function renderRunTimeline(run, fallbackText = '') {
   const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
   const getTimelineEntryKey = (entry, index) => {
     const runId = String(run?.runId || 'run');
+    const stableKey = String(entry?.key || '').trim();
+    if (stableKey) return `${runId}:${stableKey}`;
     const kind = String(entry?.kind || '');
     const status = String(entry?.status || '');
     const label = String(entry?.label || '');
