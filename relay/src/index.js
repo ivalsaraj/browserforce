@@ -409,7 +409,8 @@ class RelayServer {
 
     // ─── Plugin Routes ───────────────────────────────────────────────────────
 
-    if (url.pathname === '/plugins' && req.method === 'GET') {
+    const isPluginsListPath = url.pathname === '/plugins' || url.pathname === '/v1/plugins';
+    if (isPluginsListPath && req.method === 'GET') {
       try {
         const entries = fs.existsSync(this.pluginsDir)
           ? fs.readdirSync(this.pluginsDir, { withFileTypes: true })
@@ -424,7 +425,8 @@ class RelayServer {
       return;
     }
 
-    if (url.pathname === '/plugins/install' && req.method === 'POST') {
+    const isPluginsInstallPath = url.pathname === '/plugins/install' || url.pathname === '/v1/plugins/install';
+    if (isPluginsInstallPath && req.method === 'POST') {
       if (!this._requireAuth(req, res)) return;
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -447,7 +449,7 @@ class RelayServer {
       return;
     }
 
-    const deleteMatch = url.pathname.match(/^\/plugins\/([a-z0-9_-]+)$/);
+    const deleteMatch = url.pathname.match(/^\/(?:v1\/)?plugins\/([a-z0-9_-]+)$/);
     if (deleteMatch && req.method === 'DELETE') {
       if (!this._requireAuth(req, res)) return;
       const name = deleteMatch[1];

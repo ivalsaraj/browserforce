@@ -11,7 +11,12 @@ import {
   ensureRelay, connectOverCdpWithBusyRetry,
   CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
 } from './exec-engine.js';
-import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from './plugin-loader.js';
+import {
+  loadPlugins,
+  buildPluginHelpers,
+  buildPluginSkillAppendix,
+  buildPluginSkillRuntime,
+} from './plugin-loader.js';
 import { checkForUpdate } from './update-check.js';
 
 // ─── Console Log Capture ─────────────────────────────────────────────────────
@@ -261,6 +266,7 @@ async function getBrowserforceRestrictionsForSession() {
 
 let plugins = [];
 let pluginHelpers = {};
+let pluginSkillRuntime = { catalog: [], byName: {} };
 
 // ─── Update State ────────────────────────────────────────────────────────────
 // Checked once at startup; notice injected into first execute response only.
@@ -309,8 +315,15 @@ Helpers:
                                      Falls back to raw body text for non-article pages.
   getCDPSession({ page })            Create a relay-safe raw CDP session for a page.
                                      Use this instead of page.context().newCDPSession(page).
+  pluginCatalog()                    Returns installed plugin metadata (metadata-first discovery).
+  pluginHelp(name, section?)         Returns on-demand SKILL help for one plugin from in-memory cache.
 
 Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEncoder, TextDecoder
+
+Plugin workflow (metadata-first):
+  1) Call pluginCatalog() to discover plugin names, helper names, and available sections.
+  2) Call pluginHelp(name, section?) only when you need plugin-specific instructions.
+  3) Avoid calling pluginHelp blindly for every plugin.
 
 ═══ FIRST CALL — PAGE SETUP ═══
 
@@ -491,7 +504,7 @@ function registerExecuteTool(skillAppendix = '') {
       if (page) setupConsoleCapture(page);
       const execCtx = buildExecContext(page, ctx, userState, {
         consoleLogs, setupConsoleCapture,
-      }, pluginHelpers, agentPreferences, browserforceRestrictions);
+      }, pluginHelpers, agentPreferences, browserforceRestrictions, pluginSkillRuntime);
       try {
         const result = await runCode(code, execCtx, timeout);
         const formatted = formatResult(result);
@@ -550,6 +563,7 @@ async function initPlugins() {
   try {
     plugins = await loadPlugins();
     pluginHelpers = buildPluginHelpers(plugins);
+    pluginSkillRuntime = buildPluginSkillRuntime(plugins);
     if (plugins.length > 0) {
       process.stderr.write(`[bf-mcp] Loaded ${plugins.length} plugin(s): ${plugins.map(p => p.name).join(', ')}\n`);
     }

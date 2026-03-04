@@ -6,7 +6,12 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildExecContext, runCode } from '../src/exec-engine.js';
-import { loadPlugins, buildPluginHelpers, buildPluginSkillAppendix } from '../src/plugin-loader.js';
+import {
+  loadPlugins,
+  buildPluginHelpers,
+  buildPluginSkillAppendix,
+  buildPluginSkillRuntime,
+} from '../src/plugin-loader.js';
 
 test('plugin helper is callable in execute scope after loadPlugins', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bf-mcp-test-'));
@@ -33,18 +38,52 @@ test('plugin helper is callable in execute scope after loadPlugins', async () =>
   await rm(dir, { recursive: true });
 });
 
-test('plugin SKILL.md content is included in plugin appendix', async () => {
+test('plugin appendix is metadata-only and runtime help remains available', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bf-mcp-test-'));
   const pluginDir = join(dir, 'tagger');
   await mkdir(pluginDir);
-  await writeFile(join(pluginDir, 'index.js'), `export default { name: 'tagger', helpers: {} };`);
-  await writeFile(join(pluginDir, 'SKILL.md'), 'Use tagger() to tag elements.');
+  await writeFile(join(pluginDir, 'index.js'), `
+    export default {
+      name: 'tagger',
+      helpers: { tagger: () => 'ok' },
+    };
+  `);
+  await writeFile(join(pluginDir, 'SKILL.md'), `---
+name: tagger
+description: Tags elements with labels.
+---
+Use tagger() to tag elements.
+
+## examples
+- tagger('hero')`);
 
   const plugins = await loadPlugins(dir);
   const appendix = buildPluginSkillAppendix(plugins);
+  const pluginSkillRuntime = buildPluginSkillRuntime(plugins);
+  const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => '' };
+
+  const ctx = buildExecContext(
+    mockPage,
+    { pages: () => [mockPage] },
+    {},
+    {},
+    buildPluginHelpers(plugins),
+    {},
+    {},
+    pluginSkillRuntime,
+  );
 
   assert.ok(appendix.includes('PLUGIN: tagger'));
-  assert.ok(appendix.includes('Use tagger() to tag elements.'));
+  assert.ok(appendix.includes('Tags elements with labels.'));
+  assert.ok(!appendix.includes('Use tagger() to tag elements.'));
+
+  const catalog = await runCode('return pluginCatalog()', ctx, 5000);
+  assert.equal(Array.isArray(catalog), true);
+  assert.equal(catalog[0].name, 'tagger');
+  assert.equal(catalog[0].description, 'Tags elements with labels.');
+
+  const help = await runCode('return pluginHelp("tagger", "examples")', ctx, 5000);
+  assert.ok(help.includes("tagger('hero')"));
 
   await rm(dir, { recursive: true });
 });
