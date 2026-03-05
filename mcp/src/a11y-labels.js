@@ -356,6 +356,7 @@ export const A11Y_CLIENT_CODE = `
 const MAX_CONCURRENCY = 24;
 const BOX_MODEL_TIMEOUT_MS = 5000;
 const MAX_SCREENSHOT_DIMENSION = 1568;
+const MAX_LABEL_BOXES = 400;
 
 export async function resolveScopeBackendNodeId(cdp, selector) {
   if (!selector) return null;
@@ -371,10 +372,12 @@ export async function resolveScopeBackendNodeId(cdp, selector) {
 }
 
 export async function getLabelBoxes(cdp, refs) {
+  const labelRefs = refs
+    .filter(ref => ref.backendNodeId && INTERACTIVE_ROLES.has(ref.role))
+    .slice(0, MAX_LABEL_BOXES);
   const sema = new Semaphore(MAX_CONCURRENCY);
   const results = await Promise.all(
-    refs.map(async (ref) => {
-      if (!ref.backendNodeId) return null;
+    labelRefs.map(async (ref) => {
       await sema.acquire();
       try {
         const response = await Promise.race([
