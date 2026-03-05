@@ -566,18 +566,33 @@ body {
 .run-timeline {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 6px;
 }
 
 .timeline-step {
+  position: relative;
   padding-left: 0;
+}
+
+.timeline-step::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 18px;
+  bottom: -10px;
+  width: 1px;
+  background: var(--line);
+}
+
+.run-timeline .timeline-step:last-of-type::before {
+  display: none;
 }
 
 .step-item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
 }
 
 .step-body {
@@ -601,6 +616,52 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+}
+
+.reasoning-step {
+  align-items: flex-start;
+}
+
+.reasoning-step .step-body {
+  padding-bottom: 1px;
+}
+
+.reasoning-step-icon {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #8f877b;
+  flex-shrink: 0;
+}
+
+.reasoning-step-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.reasoning-step-icon.icon-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: currentColor;
+  margin-top: 3px;
+}
+
+.reasoning-step-icon.active,
+.reasoning-step-icon.running {
+  color: var(--crail);
+}
+
+.reasoning-step-icon.failed {
+  color: var(--error);
+}
+
+.reasoning-toggle .step-toggle-main {
+  align-items: center;
 }
 
 .step-item.collapsible .step-label {
@@ -664,6 +725,10 @@ body {
   transform: rotate(90deg);
 }
 
+.reasoning-step.expanded .step-caret::before {
+  transform: rotate(90deg);
+}
+
 .step-details {
   list-style: none;
   margin: 6px 0 0;
@@ -700,6 +765,68 @@ body {
 
 .step-item:not(.latest) .step-label.title-label {
   opacity: 0.84;
+}
+
+.reasoning-title-label {
+  font-size: 13.2px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+
+.reasoning-body {
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 11px;
+  border: 1px solid var(--line-soft);
+  background: #fff;
+  max-height: 74px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+.reasoning-body::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 8px;
+  pointer-events: none;
+  background: linear-gradient(to top, #fff 0%, rgba(255, 255, 255, 0) 100%);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.reasoning-body.show-bottom-fade::after {
+  opacity: 1;
+}
+
+.reasoning-body.streaming {
+  border-color: rgba(193, 95, 60, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(193, 95, 60, 0.12);
+}
+
+.reasoning-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.reasoning-body::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+}
+
+.reasoning-body-text {
+  font-size: 11px;
+  line-height: 1.34;
+  color: #8f8a82;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tool-step .step-label {
+  font-size: 11.4px;
+  color: var(--text-muted);
 }
 
 .step-label.title-label.shimmer-text {
@@ -922,6 +1049,24 @@ body {
 .thinking-bubble span {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.thinking-label {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    94deg,
+    rgba(107, 99, 88, 0.46) 0%,
+    rgba(107, 99, 88, 0.46) 36%,
+    rgba(193, 95, 60, 0.96) 50%,
+    rgba(107, 99, 88, 0.46) 64%,
+    rgba(107, 99, 88, 0.46) 100%
+  );
+  background-size: 220% 100%;
+  background-position: 110% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: reasoning-shimmer 1.9s ease-in-out infinite;
 }
 
 .spinner {
@@ -1422,6 +1567,7 @@ body {
   .composer-box.is-thinking::before,
   .step-item.pulse .run-step-icon,
   .step-label.title-label.shimmer-text,
+  .thinking-label,
   .step-label.title-label.title-transition-in,
   .step-label.title-label.shimmer-text.title-transition-in,
   .inline-local-image:not([src]) {

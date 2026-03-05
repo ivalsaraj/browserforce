@@ -79,6 +79,17 @@ test('reasoning title rows use shimmer and enter transition treatment', () => {
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
 
+test('reasoning timeline uses icon-led blocks with fixed-height commentary body', () => {
+  assert.match(css, /\.reasoning-step-icon/);
+  assert.match(css, /\.reasoning-title-label/);
+  assert.match(css, /\.reasoning-body/);
+  assert.match(css, /padding:\s*2px 8px/);
+  assert.match(css, /max-height:\s*74px/);
+  assert.match(css, /\.reasoning-body\.streaming/);
+  assert.match(css, /\.reasoning-body\.show-bottom-fade::after/);
+  assert.match(css, /\.reasoning-body-text[\s\S]*color:\s*#8f8a82/);
+});
+
 test('done step icon uses branded animated svg check treatment', () => {
   assert.match(css, /\.run-step-icon\.icon-done/);
   assert.match(css, /\.run-step-icon-done-svg/);

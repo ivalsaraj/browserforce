@@ -7,6 +7,7 @@ import {
   getSessionRunId,
   renderMarkdownContent,
   renderInlineContent,
+  shouldShowBottomScrollFade,
   shouldApplySessionSelection,
 } from './agent-panel-runtime.js';
 
@@ -1197,6 +1198,27 @@ function pinStreamingReasoningBodiesToLatest() {
   });
 }
 
+function syncReasoningBodyFade(node) {
+  if (!(node instanceof HTMLElement)) return;
+  const shouldShowFade = shouldShowBottomScrollFade({
+    scrollTop: node.scrollTop,
+    scrollHeight: node.scrollHeight,
+    clientHeight: node.clientHeight,
+  });
+  node.classList.toggle('show-bottom-fade', shouldShowFade);
+}
+
+function refreshReasoningBodyFades() {
+  if (!transcriptEl) return;
+  transcriptEl.querySelectorAll('.reasoning-body').forEach((node) => {
+    if (!node.dataset.fadeBound) {
+      node.addEventListener('scroll', () => syncReasoningBodyFade(node), { passive: true });
+      node.dataset.fadeBound = 'true';
+    }
+    syncReasoningBodyFade(node);
+  });
+}
+
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
@@ -1329,6 +1351,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
   bindTranscriptHandlers();
   hydrateLocalImagePreviews();
   pinStreamingReasoningBodiesToLatest();
+  refreshReasoningBodyFades();
   if (Number.isFinite(preserveScrollTop)) {
     transcriptEl.scrollTop = preserveScrollTop;
   } else {

@@ -9,6 +9,7 @@ import {
   getSessionRunId,
   renderMarkdownContent,
   renderInlineContent,
+  shouldShowBottomScrollFade,
   shouldApplySessionSelection,
 } from '../../extension/agent-panel-runtime.js';
 
@@ -147,4 +148,23 @@ test('returns null for context usage formatting when values are incomplete', () 
   assert.equal(formatContextUsage({ totalTokens: 12345 }), null);
   assert.equal(formatContextUsage({ modelContextWindow: 258400 }), null);
   assert.equal(formatContextUsage({ totalTokens: 0, modelContextWindow: 258400 }), null);
+});
+
+test('shows bottom fade only when content is scrollable and not yet at bottom', () => {
+  assert.equal(
+    shouldShowBottomScrollFade({ scrollTop: 0, scrollHeight: 120, clientHeight: 74 }),
+    true,
+  );
+  assert.equal(
+    shouldShowBottomScrollFade({ scrollTop: 46, scrollHeight: 120, clientHeight: 74 }),
+    false,
+  );
+  assert.equal(
+    shouldShowBottomScrollFade({ scrollTop: 0, scrollHeight: 74, clientHeight: 74 }),
+    false,
+  );
+  assert.equal(
+    shouldShowBottomScrollFade({ scrollTop: 45.5, scrollHeight: 120, clientHeight: 74 }),
+    false,
+  );
 });

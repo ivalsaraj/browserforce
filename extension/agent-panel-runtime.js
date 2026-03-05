@@ -431,6 +431,18 @@ function normalizeUsageValue(value) {
   return Math.round(parsed);
 }
 
+export function shouldShowBottomScrollFade({ scrollTop, scrollHeight, clientHeight, tolerancePx = 1 } = {}) {
+  const top = Number(scrollTop);
+  const height = Number(scrollHeight);
+  const viewport = Number(clientHeight);
+  const tolerance = Number(tolerancePx);
+  const safeTolerance = Number.isFinite(tolerance) && tolerance >= 0 ? tolerance : 1;
+
+  if (!Number.isFinite(top) || !Number.isFinite(height) || !Number.isFinite(viewport)) return false;
+  if ((height - viewport) <= safeTolerance) return false;
+  return (top + viewport) < (height - safeTolerance);
+}
+
 export function formatContextUsage({ totalTokens, modelContextWindow } = {}) {
   const total = normalizeUsageValue(totalTokens);
   const windowSize = normalizeUsageValue(modelContextWindow);
