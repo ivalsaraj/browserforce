@@ -126,6 +126,10 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
     assert.ok(promptBlock.includes('pluginCatalog()'), 'should mention pluginCatalog built-in helper');
     assert.ok(promptBlock.includes('pluginHelp(name, section?)'), 'should mention pluginHelp built-in helper');
+    assert.ok(
+      promptBlock.includes('clearly matches a plugin capability'),
+      'should instruct pluginHelp call when request matches plugin capability'
+    );
     assert.ok(promptBlock.includes('metadata-first'), 'should guide plugin usage as metadata-first');
     assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
     // Anti-patterns section

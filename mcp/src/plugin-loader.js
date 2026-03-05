@@ -291,6 +291,7 @@ export function buildPluginSkillAppendix(plugins) {
   const lines = [];
   lines.push('\n\n═══ PLUGINS (METADATA-ONLY) ═══');
   lines.push('Use pluginCatalog() for plugin metadata, then pluginHelp(name, section?) for details on demand.');
+  lines.push('If the user request clearly matches a plugin capability, call pluginHelp(name, section?) for that plugin before using its helpers.');
 
   let included = 0;
   for (const plugin of plugins) {
