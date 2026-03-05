@@ -8,6 +8,7 @@ const INDEX_FILE = 'index.json';
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const RUN_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const MODEL_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
+const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
 const REASONING_EFFORT_VALUES = new Set(['low', 'medium', 'high', 'xhigh']);
 const indexWriteQueues = new Map();
 
@@ -267,6 +268,27 @@ function normalizeReasoningEffort(reasoningEffort) {
   return trimmed;
 }
 
+function normalizeEnabledPlugins(enabledPlugins) {
+  if (enabledPlugins == null) return null;
+  if (!Array.isArray(enabledPlugins)) {
+    throw new Error('enabledPlugins must be an array of plugin ids');
+  }
+
+  const seen = new Set();
+  const normalized = [];
+  for (const rawValue of enabledPlugins) {
+    const value = String(rawValue || '').trim().toLowerCase();
+    if (!value) continue;
+    if (!PLUGIN_ID_RE.test(value)) {
+      throw new Error('enabledPlugins must use safe plugin ids');
+    }
+    if (seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
 function normalizeUsageNumber(value, fieldName) {
   if (value == null) return null;
   const parsed = Number(value);
@@ -417,6 +439,11 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'reasoningEffort')) {
       next.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'enabledPlugins')) {
+      const enabledPlugins = normalizeEnabledPlugins(patch.enabledPlugins);
+      if (enabledPlugins == null) delete next.enabledPlugins;
+      else next.enabledPlugins = enabledPlugins;
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'providerState')) {
       const providerState = normalizeProviderState(patch.providerState, current.providerState);
