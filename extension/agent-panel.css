@@ -1081,6 +1081,97 @@ body {
   gap: 3px;
 }
 
+.queued-row {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 5px 6px 5px 8px;
+  background: linear-gradient(180deg, #fbfaf7 0%, #f7f4ef 100%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queued-row-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-subtle);
+  flex-shrink: 0;
+}
+
+.queued-row-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.queued-row-text {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queued-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.queued-steer-btn {
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: rgba(30, 41, 38, 0.08);
+  color: var(--header);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.queued-steer-btn:hover:not(:disabled) {
+  background: rgba(30, 41, 38, 0.13);
+}
+
+.queued-delete-btn {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.queued-delete-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.queued-delete-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+
+.queued-steer-btn:disabled,
+.queued-delete-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .composer-box {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1208,6 +1299,8 @@ body {
 }
 
 .btn-stop {
+  width: 30px;
+  height: 30px;
   background: rgba(178, 83, 52, 0.14);
   cursor: pointer;
   color: var(--error);
@@ -1228,8 +1321,8 @@ body {
 }
 
 .btn-stop svg {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
 }
 
 .btn-send {

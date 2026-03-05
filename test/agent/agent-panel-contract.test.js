@@ -54,8 +54,16 @@ test('tab attach banner uses defined light-theme tokens only', () => {
 test('agent panel composer matches compact/expanded shell structure', () => {
   assert.doesNotMatch(html, /id="bf-attach-btn"/);
   assert.doesNotMatch(html, /icon-mic/);
+  assert.match(html, /id="bf-queued-row"/);
+  assert.match(html, /id="bf-queued-text"/);
+  assert.match(html, /id="bf-queued-steer"/);
+  assert.match(html, /id="bf-queued-delete"/);
   assert.match(html, /id="bf-stop-run"[\s\S]*icon-stop/);
   assert.match(html, /id="bf-send-btn"/);
+  assert.match(css, /\.queued-row/);
+  assert.match(css, /\.queued-row-text/);
+  assert.match(css, /\.queued-steer-btn/);
+  assert.match(css, /\.queued-delete-btn/);
   assert.match(css, /\.composer-box\.is-multiline/);
   assert.match(css, /\.composer-box\.is-thinking::before/);
   assert.match(css, /\.composer-box\.is-thinking \.composer-textarea/);

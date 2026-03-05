@@ -48,6 +48,8 @@ const state = {
   eventLoopToken: 0,
   streamEventQueue: [],
   streamEventTimer: null,
+  queuedMessageBySession: {},
+  queuedSendInFlightBySession: {},
   sessionSelectionToken: 0,
   popover: 'none',
   startupIssue: null,
@@ -74,6 +76,10 @@ const thinkingListEl = document.getElementById('bf-thinking-list');
 const switchSessionListEl = document.getElementById('bf-switch-session-list');
 const transcriptEl = document.getElementById('bf-transcript');
 const chatFormEl = document.getElementById('bf-chat-form');
+const queuedRowEl = document.getElementById('bf-queued-row');
+const queuedTextEl = document.getElementById('bf-queued-text');
+const queuedSteerBtn = document.getElementById('bf-queued-steer');
+const queuedDeleteBtn = document.getElementById('bf-queued-delete');
 const composerBoxEl = chatFormEl.querySelector('.composer-box');
 const chatInputEl = document.getElementById('bf-chat-input');
 const stopRunBtn = document.getElementById('bf-stop-run');
@@ -103,6 +109,87 @@ function getActiveRun() {
 function isActiveRunInProgress() {
   const run = getActiveRun();
   return !!(run && !run.done);
+}
+
+function getQueuedMessage(sessionId = state.value.activeSessionId) {
+  if (!sessionId) return '';
+  return String(state.queuedMessageBySession?.[sessionId] || '');
+}
+
+function setQueuedMessage(sessionId, text) {
+  if (!sessionId) return;
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    clearQueuedMessage(sessionId);
+    return;
+  }
+  state.queuedMessageBySession = {
+    ...(state.queuedMessageBySession || {}),
+    [sessionId]: normalized,
+  };
+}
+
+function clearQueuedMessage(sessionId) {
+  if (!sessionId) return;
+  const next = { ...(state.queuedMessageBySession || {}) };
+  delete next[sessionId];
+  state.queuedMessageBySession = next;
+}
+
+function isQueuedSendInFlight(sessionId = state.value.activeSessionId) {
+  if (!sessionId) return false;
+  return !!state.queuedSendInFlightBySession?.[sessionId];
+}
+
+function setQueuedSendInFlight(sessionId, inFlight) {
+  if (!sessionId) return;
+  const next = { ...(state.queuedSendInFlightBySession || {}) };
+  if (inFlight) next[sessionId] = true;
+  else delete next[sessionId];
+  state.queuedSendInFlightBySession = next;
+}
+
+function syncQueuedMessageRow() {
+  if (!queuedRowEl || !queuedTextEl || !queuedSteerBtn || !queuedDeleteBtn) return;
+  const sessionId = state.value.activeSessionId;
+  const queuedText = getQueuedMessage(sessionId);
+  const visible = !!sessionId && !!queuedText;
+  queuedRowEl.hidden = !visible;
+  if (!visible) {
+    queuedTextEl.textContent = '';
+    queuedSteerBtn.disabled = true;
+    queuedDeleteBtn.disabled = true;
+    return;
+  }
+  queuedTextEl.textContent = queuedText;
+  const inFlight = isQueuedSendInFlight(sessionId);
+  queuedSteerBtn.disabled = inFlight;
+  queuedDeleteBtn.disabled = inFlight;
+}
+
+async function sendQueuedMessageNow({ sessionId = state.value.activeSessionId, abortActiveRun = false } = {}) {
+  if (!sessionId || sessionId !== state.value.activeSessionId) return false;
+  const queuedText = getQueuedMessage(sessionId);
+  if (!queuedText || isQueuedSendInFlight(sessionId)) return false;
+
+  setQueuedSendInFlight(sessionId, true);
+  clearQueuedMessage(sessionId);
+  syncQueuedMessageRow();
+
+  try {
+    if (abortActiveRun && isActiveRunInProgress()) {
+      await stopRun().catch(() => {});
+    }
+    await sendMessage(queuedText);
+    return true;
+  } catch (error) {
+    setQueuedMessage(sessionId, queuedText);
+    setStatus('error', error?.message || 'Failed to send queued follow-up');
+    throw error;
+  } finally {
+    setQueuedSendInFlight(sessionId, false);
+    syncQueuedMessageRow();
+  }
 }
 
 function reconcileSessionRunState(sessionId) {
@@ -237,6 +324,7 @@ function setComposerEnabled(enabled) {
   autoResizeInput();
   syncComposerLayoutState();
   syncComposerState();
+  syncQueuedMessageRow();
 }
 
 function setTabAttachBannerState({
@@ -271,6 +359,11 @@ function dispatch(action) {
 function applyIncomingEvent(evt) {
   state.value = applyEvent(state.value, evt);
   const isActiveSessionEvent = evt?.sessionId && evt.sessionId === state.value.activeSessionId;
+  const isTerminalRunEvent = (
+    !!evt?.sessionId
+    && !!evt?.runId
+    && (evt.event === 'chat.final' || evt.event === 'run.error' || evt.event === 'run.aborted')
+  );
   if (isActiveSessionEvent && evt?.event === 'run.started') {
     setStatus('ready', 'Ready');
   }
@@ -284,8 +377,16 @@ function applyIncomingEvent(evt) {
   if (evt?.event === 'run.started' && evt.sessionId && evt.runId) {
     state.currentRunBySession = assignSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
   }
-  if (evt?.sessionId && evt?.runId && (evt.event === 'chat.final' || evt.event === 'run.error' || evt.event === 'run.aborted')) {
+  if (isTerminalRunEvent) {
     state.currentRunBySession = clearSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
+  }
+  if (
+    isActiveSessionEvent
+    && isTerminalRunEvent
+    && getQueuedMessage(evt.sessionId)
+    && !isQueuedSendInFlight(evt.sessionId)
+  ) {
+    sendQueuedMessageNow({ sessionId: evt.sessionId }).catch(() => {});
   }
   render();
 }
@@ -1391,6 +1492,7 @@ function renderPopovers() {
 function render() {
   renderSelectors();
   renderContextUsageChip();
+  syncQueuedMessageRow();
   renderModelList();
   renderSessions();
   renderTranscript();
@@ -1783,6 +1885,7 @@ async function selectSession(sessionId) {
   state.sessionSelectionToken += 1;
   const selectionToken = state.sessionSelectionToken;
   dispatch({ type: 'session.selected', sessionId });
+  syncQueuedMessageRow();
   await loadMessages(sessionId);
   await loadSessionMetadata(sessionId);
   if (!shouldApplySessionSelection({
@@ -1794,6 +1897,7 @@ async function selectSession(sessionId) {
     return;
   }
   connectEvents(sessionId);
+  syncQueuedMessageRow();
 }
 
 async function createSession() {
@@ -2107,17 +2211,41 @@ async function retryStartup({ refreshConnection = false } = {}) {
 chatFormEl.addEventListener('submit', async (event) => {
   event.preventDefault();
   const text = chatInputEl.value;
+  const trimmed = text.trim();
+  if (!trimmed) {
+    autoResizeInput();
+    syncComposerLayoutState();
+    syncComposerState();
+    syncQueuedMessageRow();
+    return;
+  }
+
+  if (isActiveRunInProgress()) {
+    const sessionId = state.value.activeSessionId;
+    if (sessionId) {
+      setQueuedMessage(sessionId, trimmed);
+    }
+    chatInputEl.value = '';
+    autoResizeInput();
+    syncComposerLayoutState();
+    syncComposerState();
+    syncQueuedMessageRow();
+    return;
+  }
+
   try {
     await sendMessage(text);
     chatInputEl.value = '';
     autoResizeInput();
     syncComposerLayoutState();
     syncComposerState();
+    syncQueuedMessageRow();
   } catch (error) {
     chatInputEl.value = text;
     autoResizeInput();
     syncComposerLayoutState();
     syncComposerState();
+    syncQueuedMessageRow();
     setStatus('error', error?.message || 'Failed to send message');
   }
 });
@@ -2126,7 +2254,11 @@ chatInputEl.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' || event.shiftKey) return;
   if (event.isComposing) return;
   event.preventDefault();
-  if (sendBtn.disabled) return;
+  if (chatInputEl.disabled) return;
+  const hasText = chatInputEl.value.trim().length > 0;
+  if (!hasText) return;
+  const runInProgress = isActiveRunInProgress();
+  if (!runInProgress && sendBtn.disabled) return;
   chatFormEl.requestSubmit();
 });
 
@@ -2151,6 +2283,23 @@ chatInputEl.addEventListener('input', () => {
   syncComposerLayoutState();
   syncComposerState();
 });
+
+if (queuedSteerBtn) {
+  queuedSteerBtn.addEventListener('click', () => {
+    const sessionId = state.value.activeSessionId;
+    if (!sessionId) return;
+    sendQueuedMessageNow({ sessionId, abortActiveRun: true }).catch(() => {});
+  });
+}
+
+if (queuedDeleteBtn) {
+  queuedDeleteBtn.addEventListener('click', () => {
+    const sessionId = state.value.activeSessionId;
+    if (!sessionId) return;
+    clearQueuedMessage(sessionId);
+    syncQueuedMessageRow();
+  });
+}
 
 newSessionBtn.addEventListener('click', () => {
   createSession()

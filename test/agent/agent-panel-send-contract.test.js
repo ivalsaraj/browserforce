@@ -204,6 +204,35 @@ test('send and stop buttons are mutually exclusive based on run state', () => {
   assert.match(js, /sendBtn\.hidden\s*=\s*runInProgress/);
 });
 
+test('queued follow-up state is tracked per session and rendered from sync helper', () => {
+  assert.match(js, /queuedMessageBySession:\s*\{\}/);
+  assert.match(js, /queuedSendInFlightBySession:\s*\{\}/);
+  assert.match(js, /function getQueuedMessage\(sessionId = state\.value\.activeSessionId\)/);
+  assert.match(js, /function syncQueuedMessageRow\(\)/);
+  assert.match(js, /function render\(\)[\s\S]*syncQueuedMessageRow\(\)/);
+  assert.match(js, /async function selectSession\(sessionId\)[\s\S]*syncQueuedMessageRow\(\);/);
+});
+
+test('submit and keydown handlers allow enter-to-queue while run is active', () => {
+  assert.match(js, /chatFormEl\.addEventListener\('submit', async \(event\) => \{/);
+  assert.match(js, /if \(isActiveRunInProgress\(\)\)\s*\{[\s\S]*setQueuedMessage\(sessionId, trimmed\)/);
+  assert.match(js, /const runInProgress = isActiveRunInProgress\(\);/);
+  assert.match(js, /if \(!runInProgress && sendBtn\.disabled\) return;/);
+});
+
+test('terminal run events trigger queued follow-up auto-send once', () => {
+  assert.match(js, /const isTerminalRunEvent = \(/);
+  assert.match(js, /isTerminalRunEvent[\s\S]*getQueuedMessage\(evt\.sessionId\)[\s\S]*!isQueuedSendInFlight\(evt\.sessionId\)/);
+  assert.match(js, /sendQueuedMessageNow\(\{ sessionId: evt\.sessionId \}\)\.catch/);
+});
+
+test('queued row actions support steer-now and delete', () => {
+  assert.match(js, /queuedSteerBtn\.addEventListener\('click'/);
+  assert.match(js, /sendQueuedMessageNow\(\{ sessionId, abortActiveRun: true \}\)\.catch/);
+  assert.match(js, /queuedDeleteBtn\.addEventListener\('click'/);
+  assert.match(js, /clearQueuedMessage\(sessionId\)/);
+});
+
 test('stale run pointer is reconciled from loaded messages so stop does not stay visible forever', () => {
   assert.match(js, /function reconcileSessionRunState\(sessionId\)/);
   assert.match(js, /if \(!run \|\| run\.done\)/);
