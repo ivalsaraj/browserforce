@@ -150,6 +150,15 @@ test('tool-call timeline entries render collapsed toggle rows with click-to-expa
   assert.match(js, /closest\('button\[data-step-key\]'\)/);
 });
 
+test('text deltas are chunked into paced stream updates for visible incremental rendering', () => {
+  assert.match(js, /STREAM_CHUNK_TARGET_CHARS/);
+  assert.match(js, /STREAM_CHUNK_INTERVAL_MS/);
+  assert.match(js, /function splitDeltaForDisplayStreaming\(delta\)/);
+  assert.match(js, /state\.streamEventQueue/);
+  assert.match(js, /flushStreamEventsForRun\(evt\.sessionId, evt\.runId\)/);
+  assert.match(js, /scheduleStreamEventPump\(\)/);
+});
+
 test('latest running BrowserForce execute rows are treated as title rows with shimmer', () => {
   assert.match(js, /const isExecuteTitle = isBrowserForceExecuteStep\(entry\)/);
   assert.match(js, /const isTitleRow = isReasoningTitle \|\| isExecuteTitle/);
