@@ -1282,9 +1282,22 @@ function renderRunTimeline(run, fallbackText = '') {
     const expanded = !!state.expandedTimelineEntries[key];
     if (expanded) classes.push('expanded');
     const helperTreePreviewHtml = renderExecuteHelperTreePreview(entry, expanded);
+    const isExecuteStep = isBrowserForceExecuteStep(entry);
     const detailsHtml = details
       .map((line) => `<li>${renderInlineContent(line)}</li>`)
       .join('');
+    const executeDetailsText = details.map((line) => String(line || '')).join('\n');
+    const expandedBodyHtml = expanded
+      ? (
+        isExecuteStep
+          ? `
+            <div class="reasoning-body execute-details-body">
+              <div class="reasoning-body-text execute-details-text">${escapeHtml(executeDetailsText)}</div>
+            </div>
+          `
+          : `<ul class="step-details">${detailsHtml}</ul>`
+      )
+      : '';
     htmlParts.push(`
       <div class="${classes.join(' ')}">
         ${renderRunStepIcon(icon)}
@@ -1296,7 +1309,7 @@ function renderRunTimeline(run, fallbackText = '') {
             </span>
             ${helperTreePreviewHtml}
           </button>
-          ${expanded ? `<ul class="step-details">${detailsHtml}</ul>` : ''}
+          ${expandedBodyHtml}
         </div>
       </div>
     `);

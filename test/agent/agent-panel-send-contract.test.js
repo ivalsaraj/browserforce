@@ -188,6 +188,12 @@ test('reasoning titles render strategy icon and fixed-height commentary body blo
   assert.match(js, /data-reasoning-streaming=/);
 });
 
+test('expanded BrowserForce execute rows reuse reasoning scroll-body container for scripts', () => {
+  assert.match(js, /const isExecuteStep = isBrowserForceExecuteStep\(entry\);/);
+  assert.match(js, /class="reasoning-body execute-details-body"/);
+  assert.match(js, /class="reasoning-body-text execute-details-text"/);
+});
+
 test('timeline normalization skips derived commentary heading when a reasoning step already exists above the text', () => {
   assert.match(js, /const previousSource = source\[index - 1\]/);
   assert.match(js, /previousSource\?\.type === 'step'/);

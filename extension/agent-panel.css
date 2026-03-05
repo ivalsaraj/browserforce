@@ -816,6 +816,12 @@ body {
   overflow-wrap: anywhere;
 }
 
+.execute-details-text {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
 .tool-step .step-label {
   font-size: 11.4px;
   color: var(--text-muted);
