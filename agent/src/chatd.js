@@ -1,5 +1,4 @@
 import http from 'node:http';
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -8,12 +7,19 @@ import { fileURLToPath } from 'node:url';
 
 import { pickChatdPort } from './port-resolver.js';
 import { isAllowedOrigin, verifyBearer } from './auth.js';
-import { startCodexRun } from './codex-runner.js';
+import {
+  createProviderRegistry,
+  DEFAULT_PROVIDER,
+  isAllowedProvider,
+  normalizeProvider,
+  resolveSessionProvider,
+} from './providers/index.js';
 import {
   appendMessage,
   createSession,
   getSession,
   isValidModelId,
+  isValidProviderSessionId,
   isValidReasoningEffort,
   isValidSessionId,
   listSessions,
@@ -24,7 +30,6 @@ import {
 const BF_DIR = join(homedir(), '.browserforce');
 const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
-const MODEL_LIST_TIMEOUT_MS = 5000;
 const DEFAULT_REASONING_EFFORT = 'medium';
 const LOCAL_FILE_MAX_BYTES = 15 * 1024 * 1024;
 const LOCAL_IMAGE_CONTENT_TYPES = {
@@ -95,141 +100,20 @@ function dedupeModelRows(rows) {
   return out;
 }
 
-function safeParseJsonLine(line) {
-  if (typeof line !== 'string') return null;
-  try {
-    return JSON.parse(line);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeModelCatalogRows(models) {
-  return (Array.isArray(models) ? models : [])
-    .filter((row) => row && typeof row === 'object' && !row.hidden)
-    .map((row) => {
-      const value = String(row.model || row.id || '').trim();
-      const label = String(row.displayName || row.model || row.id || '').trim();
-      if (!value || !isValidModelId(value)) return null;
-      return { value, label: label || value };
-    })
-    .filter(Boolean);
-}
-
-async function fetchCodexModelCatalog({
-  command = process.env.BF_CHATD_CODEX_COMMAND || 'codex',
-  timeoutMs = MODEL_LIST_TIMEOUT_MS,
-} = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, ['app-server', '--listen', 'stdio://'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
-    });
-
-    let settled = false;
-    let stderrText = '';
-    let stdoutBuffer = '';
-
-    const finish = (error, models = []) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { child.kill('SIGTERM'); } catch {}
-      if (error) reject(error);
-      else resolve(models);
-    };
-
-    const timer = setTimeout(() => {
-      finish(new Error('Timed out while loading Codex models'));
-    }, timeoutMs);
-
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk) => {
-      stderrText += String(chunk || '');
-    });
-
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      stdoutBuffer += String(chunk || '');
-      let idx = stdoutBuffer.indexOf('\n');
-      while (idx !== -1) {
-        const line = stdoutBuffer.slice(0, idx).trim();
-        stdoutBuffer = stdoutBuffer.slice(idx + 1);
-        idx = stdoutBuffer.indexOf('\n');
-        if (!line) continue;
-
-        const msg = safeParseJsonLine(line);
-        if (!msg || typeof msg !== 'object') continue;
-
-        if (msg.id === 1 && msg.error) {
-          finish(new Error(msg.error?.message || 'Codex initialize failed'));
-          return;
-        }
-        if (msg.id === 1 && msg.result) {
-          try {
-            child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'initialized' })}\n`);
-            child.stdin.write(`${JSON.stringify({
-              jsonrpc: '2.0',
-              id: 2,
-              method: 'model/list',
-              params: { includeHidden: false, limit: 100 },
-            })}\n`);
-          } catch {
-            finish(new Error('Failed to request Codex model list'));
-          }
-          continue;
-        }
-
-        if (msg.id === 2 && msg.error) {
-          finish(new Error(msg.error?.message || 'Codex model/list failed'));
-          return;
-        }
-
-        if (msg.id === 2 && msg.result) {
-          finish(null, msg.result?.data || []);
-        }
-      }
-    });
-
-    child.on('error', (error) => {
-      finish(error);
-    });
-
-    child.on('exit', (code) => {
-      if (settled) return;
-      finish(new Error(`Codex app-server exited before model/list (${code ?? 'unknown'}) ${stderrText}`.trim()));
-    });
-
-    try {
-      child.stdin.write(`${JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          clientInfo: { name: 'browserforce-chatd', version: '1.0.0' },
-          capabilities: { experimentalApi: false },
-        },
-      })}\n`);
-    } catch {
-      finish(new Error('Failed to initialize Codex app-server'));
-    }
-  });
-}
-
-async function listModelPresets({ storageRoot, modelFetcher } = {}) {
+async function listModelPresets({ storageRoot, providerId, provider } = {}) {
   let liveRows = [];
-  if (typeof modelFetcher === 'function') {
+  if (provider && typeof provider.listModels === 'function') {
     try {
-      const liveModels = await modelFetcher();
-      liveRows = normalizeModelCatalogRows(liveModels);
+      liveRows = await provider.listModels();
     } catch {
       liveRows = [];
     }
   }
 
-  const configuredModel = await resolveConfiguredModel();
+  const configuredModel = providerId === 'codex' ? await resolveConfiguredModel() : null;
   const sessions = await listSessions({ limit: 200, storageRoot });
   const sessionRows = sessions
+    .filter((session) => resolveSessionProvider(session) === providerId)
     .map((session) => String(session?.model || '').trim())
     .filter(Boolean)
     .map((value) => ({ value, label: value }));
@@ -1073,21 +957,6 @@ async function clearChatdUrlFile({ writeChatdUrl = true, urlPath = CHATD_URL_PAT
   }
 }
 
-function createDefaultRunExecutor({ codexCwd } = {}) {
-  return ({ runId, sessionId, message, model, reasoningEffort, resumeSessionId, onEvent, onExit, onError }) => startCodexRun({
-    runId,
-    sessionId,
-    prompt: message,
-    model,
-    reasoningEffort,
-    resumeSessionId,
-    cwd: codexCwd,
-    onEvent,
-    onExit,
-    onError,
-  });
-}
-
 export async function startChatd(opts = {}) {
   const writeChatdUrl = opts.writeChatdUrl !== false;
   const ephemeralStorageRoot = (!opts.storageRoot && !writeChatdUrl)
@@ -1098,13 +967,18 @@ export async function startChatd(opts = {}) {
   const chatdUrlPath = opts.chatdUrlPath || process.env.BF_CHATD_URL_PATH || CHATD_URL_PATH;
   const envCodexCwd = String(process.env.BF_CHATD_CODEX_CWD || '').trim();
   const codexCwd = opts.codexCwd || envCodexCwd || process.cwd();
-  const runExecutor = opts.runExecutor || createDefaultRunExecutor({
+  const providerRegistry = opts.providerRegistry || createProviderRegistry({
     codexCwd,
+    runExecutor: opts.runExecutor,
+    modelFetcher: opts.modelFetcher,
+    codexCommand: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
+    claudeCommand: opts.claudeCommand || process.env.BF_CHATD_CLAUDE_COMMAND || 'claude',
+    codexRunExecutor: opts.codexRunExecutor,
+    claudeRunExecutor: opts.claudeRunExecutor,
+    codexModelFetcher: opts.codexModelFetcher,
+    claudeModelFetcher: opts.claudeModelFetcher,
+    providerOverrides: opts.providerOverrides,
   });
-  const modelFetcher = opts.modelFetcher || (() => fetchCodexModelCatalog({
-    command: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
-    timeoutMs: Number(process.env.BF_CHATD_MODEL_LIST_TIMEOUT_MS || MODEL_LIST_TIMEOUT_MS),
-  }));
   const configuredReasoningEffort = resolveEffectiveReasoningEffort(
     opts.defaultReasoningEffort,
     await resolveConfiguredReasoningEffort(),
@@ -1258,9 +1132,36 @@ export async function startChatd(opts = {}) {
         return;
       }
 
+      if (url.pathname === '/v1/providers' && req.method === 'GET') {
+        json(res, 200, {
+          defaultProvider: DEFAULT_PROVIDER,
+          providers: providerRegistry.listProviders(),
+        });
+        return;
+      }
+
       if (url.pathname === '/v1/models' && req.method === 'GET') {
-        const models = await listModelPresets({ storageRoot, modelFetcher });
-        json(res, 200, { models, defaultReasoningEffort: configuredReasoningEffort });
+        const providerParam = url.searchParams.get('provider');
+        const providerId = providerParam == null || providerParam === ''
+          ? DEFAULT_PROVIDER
+          : normalizeProvider(providerParam, null);
+        if (!providerId || !isAllowedProvider(providerId)) {
+          json(res, 400, { error: 'provider is invalid' });
+          return;
+        }
+        const provider = providerRegistry.getProvider(providerId);
+        if (!provider) {
+          json(res, 400, { error: `provider is unavailable: ${providerId}` });
+          return;
+        }
+        const models = await listModelPresets({ storageRoot, providerId, provider });
+        json(res, 200, {
+          provider: providerId,
+          defaultProvider: DEFAULT_PROVIDER,
+          providers: providerRegistry.listProviders(),
+          models,
+          defaultReasoningEffort: configuredReasoningEffort,
+        });
         return;
       }
 
@@ -1276,6 +1177,7 @@ export async function startChatd(opts = {}) {
           const session = await createSession({
             title: body.title || 'New chat',
             model: body.model ?? null,
+            provider: body.provider ?? null,
             reasoningEffort: body.reasoningEffort ?? null,
             storageRoot,
           });
@@ -1323,6 +1225,7 @@ export async function startChatd(opts = {}) {
             patch: {
               ...(Object.prototype.hasOwnProperty.call(body, 'title') ? { title: body.title } : {}),
               ...(Object.prototype.hasOwnProperty.call(body, 'model') ? { model: body.model } : {}),
+              ...(Object.prototype.hasOwnProperty.call(body, 'provider') ? { provider: body.provider } : {}),
               ...(Object.prototype.hasOwnProperty.call(body, 'reasoningEffort') ? { reasoningEffort: body.reasoningEffort } : {}),
             },
             storageRoot,
@@ -1412,9 +1315,20 @@ export async function startChatd(opts = {}) {
           json(res, 404, { error: 'Session not found' });
           return;
         }
+        const providerId = resolveSessionProvider(session);
+        const provider = providerRegistry.getProvider(providerId);
+        if (!provider) {
+          json(res, 400, { error: `provider is unavailable: ${providerId}` });
+          return;
+        }
         const browserContext = normalizeBrowserContext(body?.browserContext);
-        const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
-          ? session.providerState.codex.sessionId
+        const providerSessionId = String(session?.providerState?.[providerId]?.sessionId || '').trim();
+        const resumeSessionId = (
+          providerId === 'codex'
+            ? isValidSessionId(providerSessionId)
+            : isValidProviderSessionId(providerSessionId)
+        )
+          ? providerSessionId
           : null;
         const promptMessage = resumeSessionId
           ? buildPromptWithAgentsReminder({ message, browserContext })
@@ -1432,6 +1346,7 @@ export async function startChatd(opts = {}) {
         const run = {
           runId,
           sessionId,
+          provider: providerId,
           status: 'running',
           abort: null,
           assistantBuffer: '',
@@ -1453,7 +1368,7 @@ export async function startChatd(opts = {}) {
           await appendMessage({ sessionId, role: 'user', text: message, storageRoot });
           runs.set(runId, run);
 
-          const startAttempt = (resumeSessionId) => runExecutor({
+          const startAttempt = (resumeSessionId) => provider.startRun({
             runId,
             sessionId,
             message: promptMessage,
@@ -1491,18 +1406,33 @@ export async function startChatd(opts = {}) {
                 }
 
                 if (evt.event === 'run.provider_session') {
-                  const provider = String(evt.payload?.provider || '').trim().toLowerCase();
+                  const eventProvider = normalizeProvider(evt.payload?.provider, active.provider);
                   const providerSessionId = String(evt.payload?.sessionId || '').trim();
-                  if (provider === 'codex' && isValidSessionId(providerSessionId)) {
+                  const validProviderSessionId = eventProvider
+                    ? (
+                      eventProvider === 'codex'
+                        ? isValidSessionId(providerSessionId)
+                        : isValidProviderSessionId(providerSessionId)
+                    )
+                    : false;
+                  if (eventProvider && validProviderSessionId) {
                     await updateSession({
                       sessionId,
                       patch: {
-                        providerState: { codex: { sessionId: providerSessionId } },
+                        providerState: { [eventProvider]: { sessionId: providerSessionId } },
                       },
                       storageRoot,
                     });
                   }
-                  broadcast(buildEvent({ event: 'run.provider_session', runId, sessionId, payload: evt.payload }));
+                  broadcast(buildEvent({
+                    event: 'run.provider_session',
+                    runId,
+                    sessionId,
+                    payload: {
+                      ...(evt.payload || {}),
+                      provider: eventProvider || active.provider,
+                    },
+                  }));
                   return;
                 }
 
@@ -1512,7 +1442,7 @@ export async function startChatd(opts = {}) {
                     await updateSession({
                       sessionId,
                       patch: {
-                        providerState: { codex: { latestUsage: usage } },
+                        providerState: { [active.provider]: { latestUsage: usage } },
                       },
                       storageRoot,
                     });
@@ -1524,7 +1454,7 @@ export async function startChatd(opts = {}) {
                 if (evt.event === 'run.error') {
                   trackRunStep(active, evt);
                   active.lastError = evt.payload?.error || 'Run failed';
-                  if (!active.resumeSessionId || active.resumeRetryAttempted) {
+                  if (active.provider !== 'codex' || !active.resumeSessionId || active.resumeRetryAttempted) {
                     failRun(active, active.lastError);
                   }
                   return;
@@ -1546,7 +1476,8 @@ export async function startChatd(opts = {}) {
                 if (signal === 'SIGTERM' || active.status === 'aborted') return;
 
                 if (
-                  active.resumeSessionId
+                  active.provider === 'codex'
+                  && active.resumeSessionId
                   && !active.resumeRetryAttempted
                   && isResumeSessionInvalidFailure({ code, error: active.lastError, stderr })
                 ) {
@@ -1572,13 +1503,13 @@ export async function startChatd(opts = {}) {
                   return;
                 }
 
-                failRun(active, active.lastError || `codex exited with code ${code ?? 'unknown'}`);
+                failRun(active, active.lastError || `${active.provider} exited with code ${code ?? 'unknown'}`);
               });
             },
             onError: (error) => {
               enqueue(() => {
                 const active = runs.get(runId);
-                failRun(active, error?.message || 'Failed to start codex');
+                failRun(active, error?.message || `Failed to start ${provider.id}`);
               });
             },
           });
@@ -1592,6 +1523,7 @@ export async function startChatd(opts = {}) {
             payload: {
               message,
               model: session.model || null,
+              provider: provider.id,
               reasoningEffort: runReasoningEffort,
               browserContext,
             },

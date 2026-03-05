@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"claude-session-start-001","model":"claude-sonnet-4-5-20250929"}
+{"type":"assistant","message":{"id":"msg_start_1","type":"message","role":"assistant","content":[{"type":"text","text":"I will inspect the active page now."}]}}
+{"type":"assistant","message":{"id":"msg_start_2","type":"message","role":"assistant","content":[{"type":"text","text":"The page heading is BrowserForce."}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"claude-session-start-001","result":"The page heading is BrowserForce.","usage":{"input_tokens":410,"output_tokens":57,"cache_read_input_tokens":200}}

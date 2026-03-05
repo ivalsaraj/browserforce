@@ -18,6 +18,29 @@ async function fetchWithRetry(url, init, attempts = 3) {
   throw lastError;
 }
 
+async function waitForProviderSessionId({
+  daemon,
+  sessionId,
+  provider,
+  timeoutMs = 2000,
+}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    if (res.ok) {
+      const body = await res.json();
+      const providerSessionId = body?.providerState?.[provider]?.sessionId;
+      if (typeof providerSessionId === 'string' && providerSessionId.trim()) {
+        return providerSessionId;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return null;
+}
+
 test('GET /health returns daemon metadata', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
@@ -77,6 +100,66 @@ test('GET /v1/models falls back to configured model when model fetcher fails', a
   }
 });
 
+test('GET /v1/providers lists codex and claude provider allowlist', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/providers`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.defaultProvider, 'codex');
+    assert.deepEqual(
+      (body.providers || []).map((row) => row.id),
+      ['codex', 'claude'],
+    );
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('GET /v1/models scopes rows by provider query', async () => {
+  const providerRegistry = {
+    listProviders() {
+      return [
+        {
+          id: 'codex',
+          label: 'Codex',
+          listModels: async () => [{ value: 'gpt-5', label: 'GPT-5' }],
+          startRun() { return { abort() {} }; },
+        },
+        {
+          id: 'claude',
+          label: 'Claude',
+          listModels: async () => [{ value: 'claude-3-7-sonnet', label: 'Claude 3.7 Sonnet' }],
+          startRun() { return { abort() {} }; },
+        },
+      ];
+    },
+    getProvider(id) {
+      return this.listProviders().find((provider) => provider.id === id) || null;
+    },
+  };
+
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false, providerRegistry });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/models?provider=claude`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.provider, 'claude');
+    assert.equal(Array.isArray(body.providers), true);
+    assert.equal(body.providers.some((row) => row.id === 'codex'), true);
+    assert.equal(body.providers.some((row) => row.id === 'claude'), true);
+    assert.deepEqual(body.models[0], { value: null, label: 'Default' });
+    assert.deepEqual(body.models[1], { value: 'claude-3-7-sonnet', label: 'Claude 3.7 Sonnet' });
+    assert.equal(body.models.some((row) => row.value === 'gpt-5'), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs requires explicit sessionId', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
@@ -89,6 +172,47 @@ test('POST /v1/runs requires explicit sessionId', async () => {
       body: JSON.stringify({ message: 'hello' }),
     });
     assert.equal(res.status, 400);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('provider allowlist rejects unsupported provider ids in models and session APIs', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const modelsRes = await fetch(`${daemon.baseUrl}/v1/models?provider=openai`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(modelsRes.status, 400);
+
+    const createRes = await fetch(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'bad provider', provider: 'openai' }),
+    });
+    assert.equal(createRes.status, 400);
+
+    const created = await fetch(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'good provider', provider: 'codex' }),
+    }).then((res) => res.json());
+
+    const patchRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ provider: 'openai' }),
+    });
+    assert.equal(patchRes.status, 400);
   } finally {
     await daemon.stop();
   }
@@ -193,8 +317,8 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
     port: 0,
     writeChatdUrl: false,
     defaultReasoningEffort: 'medium',
-    runExecutor: ({ runId, sessionId, model, reasoningEffort, onEvent, onExit }) => {
-      seenRuns.push({ runId, sessionId, model, reasoningEffort });
+    runExecutor: ({ runId, sessionId, provider, model, reasoningEffort, onEvent, onExit }) => {
+      seenRuns.push({ runId, sessionId, provider, model, reasoningEffort });
       setTimeout(() => {
         onEvent({ event: 'chat.delta', runId, sessionId, payload: { delta: 'hel' } });
       }, 10);
@@ -236,6 +360,7 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
     assert.equal(runRes.status, 202);
 
     await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(seenRuns.at(-1)?.provider, 'codex');
     assert.equal(seenRuns.at(-1)?.model, 'gpt-5');
     assert.equal(seenRuns.at(-1)?.reasoningEffort, 'medium');
 
@@ -245,6 +370,105 @@ test('POST /v1/runs uses injected run executor and persists assistant output', a
     ).then((res) => res.json());
     const messages = messagesBody.messages || [];
     assert.equal(messages.at(-1).text, 'hello');
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/runs uses selected session provider for runtime and continuity', async () => {
+  const observed = [];
+  const providerRegistry = {
+    listProviders() {
+      return [
+        {
+          id: 'codex',
+          label: 'Codex',
+          listModels: async () => [],
+          startRun: ({ runId, sessionId, onEvent, onExit }) => {
+            setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'codex' } }), 5);
+            setTimeout(() => onExit({ code: 0 }), 10);
+            return { abort() {} };
+          },
+        },
+        {
+          id: 'claude',
+          label: 'Claude',
+          listModels: async () => [],
+          startRun: ({ runId, sessionId, resumeSessionId, onEvent, onExit }) => {
+            observed.push({ runId, sessionId, resumeSessionId: resumeSessionId || null });
+            setTimeout(() => {
+              onEvent({
+                event: 'run.provider_session',
+                runId,
+                sessionId,
+                payload: { provider: 'claude', sessionId: 'claude-session-002' },
+              });
+            }, 5);
+            setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'claude' } }), 10);
+            setTimeout(() => onExit({ code: 0 }), 15);
+            return { abort() {} };
+          },
+        },
+      ];
+    },
+    getProvider(id) {
+      return this.listProviders().find((provider) => provider.id === id) || null;
+    },
+  };
+
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    providerRegistry,
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Claude run', provider: 'claude' }),
+    }).then((res) => res.json());
+
+    const runOne = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'first' }),
+    });
+    assert.equal(runOne.status, 202);
+    await waitForProviderSessionId({
+      daemon,
+      sessionId: created.sessionId,
+      provider: 'claude',
+    });
+
+    const runTwo = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'second' }),
+    });
+    assert.equal(runTwo.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+
+    assert.equal(observed.length >= 2, true);
+    assert.equal(observed[0].resumeSessionId, null);
+    assert.equal(observed[1].resumeSessionId, 'claude-session-002');
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.provider, 'claude');
+    assert.equal(sessionBody.providerState?.claude?.sessionId, 'claude-session-002');
   } finally {
     await daemon.stop();
   }
@@ -715,7 +939,11 @@ test('POST /v1/runs uses one-line AGENTS reminder on resume runs', async () => {
       body: JSON.stringify({ sessionId: created.sessionId, message: 'first' }),
     });
     assert.equal(runOneRes.status, 202);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await waitForProviderSessionId({
+      daemon,
+      sessionId: created.sessionId,
+      provider: 'codex',
+    });
 
     const runTwoRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
       method: 'POST',
@@ -785,7 +1013,11 @@ test('POST /v1/runs reuses codex provider session id on second turn', async () =
       body: JSON.stringify({ sessionId: created.sessionId, message: 'first' }),
     });
     assert.equal(runOneRes.status, 202);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await waitForProviderSessionId({
+      daemon,
+      sessionId: created.sessionId,
+      provider: 'codex',
+    });
 
     const runTwoRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
       method: 'POST',
@@ -872,7 +1104,11 @@ test('stale resume failures retry once as fresh run when failure signature match
       body: JSON.stringify({ sessionId: created.sessionId, message: 'seed' }),
     });
     assert.equal(seedRes.status, 202);
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await waitForProviderSessionId({
+      daemon,
+      sessionId: created.sessionId,
+      provider: 'codex',
+    });
 
     const retryRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
       method: 'POST',

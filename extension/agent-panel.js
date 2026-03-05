@@ -26,6 +26,8 @@ const STREAM_CHUNK_INTERVAL_MS = 26;
 const state = {
   value: initialState,
   auth: null,
+  providerPresets: [{ value: 'codex', label: 'Codex' }],
+  defaultProvider: 'codex',
   modelPresets: [{ value: null, label: 'Default' }],
   defaultReasoningEffort: 'medium',
   currentRunBySession: {},
@@ -67,6 +69,7 @@ const newSessionBtn = document.getElementById('bf-new-session');
 const popoverBackdropEl = document.getElementById('bf-popover-backdrop');
 const modelPanelEl = document.getElementById('bf-model-panel');
 const sessionPanelEl = document.getElementById('bf-session-panel');
+const providerListEl = document.getElementById('bf-provider-list');
 const modelListEl = document.getElementById('bf-model-list');
 const thinkingListEl = document.getElementById('bf-thinking-list');
 const switchSessionListEl = document.getElementById('bf-switch-session-list');
@@ -398,6 +401,27 @@ function formatModelLabel(model) {
   return model && String(model).trim() ? model : 'Default';
 }
 
+function normalizeProvider(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || null;
+}
+
+function formatProviderLabel(provider) {
+  const normalized = normalizeProvider(provider);
+  if (!normalized) return 'Provider';
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function getSessionProvider(session) {
+  const explicit = normalizeProvider(session?.provider);
+  if (explicit) return explicit;
+  const configured = normalizeProvider(state.defaultProvider);
+  if (configured) return configured;
+  const firstPreset = normalizeProvider(state.providerPresets?.[0]?.value);
+  if (firstPreset) return firstPreset;
+  return 'codex';
+}
+
 function normalizeReasoningEffort(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') {
@@ -474,8 +498,35 @@ function renderSelectors() {
 function renderModelList() {
   if (!modelListEl || !thinkingListEl) return;
   const activeSession = getActiveSession();
+  const activeProvider = getSessionProvider(activeSession);
   const activeModel = activeSession?.model || null;
   const activeReasoningEffort = normalizeReasoningEffort(activeSession?.reasoningEffort);
+  const providerRows = state.providerPresets.length > 0
+    ? state.providerPresets
+    : [{ value: activeProvider, label: formatProviderLabel(activeProvider) }];
+
+  if (providerListEl) {
+    providerListEl.innerHTML = providerRows.map((preset) => {
+      const providerValue = normalizeProvider(preset.value);
+      const active = providerValue === activeProvider ? 'active' : '';
+      return `
+        <li>
+          <button type="button" data-provider="${escapeHtml(providerValue || '')}" class="popover-item ${active}">
+            <span>${escapeHtml(preset.label)}</span>
+          </button>
+        </li>
+      `;
+    }).join('');
+
+    providerListEl.querySelectorAll('button[data-provider]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const provider = button.dataset.provider || null;
+        updateActiveSessionProvider(provider).catch((error) => {
+          setStatus('error', error.message || 'Unable to update provider');
+        });
+      });
+    });
+  }
 
   const rows = state.modelPresets.map((preset) => {
     const active = (preset.value || null) === activeModel ? 'active' : '';
@@ -1669,11 +1720,64 @@ function normalizeModelRows(input) {
   return rows;
 }
 
-async function loadModelPresets() {
-  const res = await api('/v1/models', { method: 'GET', headers: {} });
+function normalizeProviderRows(input) {
+  const source = Array.isArray(input) ? input : [];
+  const seen = new Set();
+  const rows = [];
+  for (const row of source) {
+    if (!row) continue;
+    const rawValue = typeof row === 'string'
+      ? row
+      : (row.value ?? row.id);
+    const value = normalizeProvider(rawValue);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    const label = (typeof row === 'object' && row.label && String(row.label).trim())
+      ? String(row.label).trim()
+      : formatProviderLabel(value);
+    rows.push({ value, label });
+  }
+  return rows;
+}
+
+function resolveModelCatalog(body, preferredProvider = null) {
+  const payload = (body && typeof body === 'object') ? body : {};
+  const modelsByProvider = payload.modelsByProvider && typeof payload.modelsByProvider === 'object'
+    ? payload.modelsByProvider
+    : null;
+  const providerRows = normalizeProviderRows(
+    payload.providers || payload.providerPresets || payload.availableProviders
+      || (modelsByProvider ? Object.keys(modelsByProvider) : []),
+  );
+  const defaultProvider = normalizeProvider(payload.defaultProvider || payload.provider)
+    || normalizeProvider(providerRows[0]?.value)
+    || 'codex';
+  const selectedProvider = normalizeProvider(preferredProvider)
+    || defaultProvider;
+  const scopedModels = (modelsByProvider && selectedProvider && Array.isArray(modelsByProvider[selectedProvider]))
+    ? modelsByProvider[selectedProvider]
+    : payload.models;
+  return {
+    providerRows: providerRows.length > 0
+      ? providerRows
+      : [{ value: selectedProvider, label: formatProviderLabel(selectedProvider) }],
+    defaultProvider,
+    models: normalizeModelRows(scopedModels),
+  };
+}
+
+async function loadModelPresets(provider = null) {
+  const scopedProvider = normalizeProvider(provider);
+  const path = scopedProvider
+    ? `/v1/models?provider=${encodeURIComponent(scopedProvider)}`
+    : '/v1/models';
+  const res = await api(path, { method: 'GET', headers: {} });
   await ensureOk(res, 'Failed to load models');
   const body = await readJsonOrEmpty(res);
-  state.modelPresets = normalizeModelRows(body.models);
+  const catalog = resolveModelCatalog(body, scopedProvider);
+  state.providerPresets = catalog.providerRows;
+  state.defaultProvider = catalog.defaultProvider;
+  state.modelPresets = catalog.models;
   state.defaultReasoningEffort = normalizeReasoningEffort(body.defaultReasoningEffort) || 'medium';
 }
 
@@ -1707,6 +1811,15 @@ async function selectSession(sessionId) {
   dispatch({ type: 'session.selected', sessionId });
   await loadMessages(sessionId);
   await loadSessionMetadata(sessionId);
+  if (!shouldApplySessionSelection({
+    requestToken: selectionToken,
+    latestRequestToken: state.sessionSelectionToken,
+    requestedSessionId: sessionId,
+    activeSessionId: state.value.activeSessionId,
+  })) {
+    return;
+  }
+  await loadModelPresets(getSessionProvider(getActiveSession())).catch(() => {});
   if (!shouldApplySessionSelection({
     requestToken: selectionToken,
     latestRequestToken: state.sessionSelectionToken,
@@ -1798,8 +1911,28 @@ async function updateActiveSessionModel(model) {
     throw new Error(body.error || 'Unable to update model');
   }
 
-  await loadModelPresets().catch(() => {});
   await loadSessions(sessionId);
+  await loadModelPresets(getSessionProvider(getActiveSession())).catch(() => {});
+  setPopover('none');
+  setStatus('ready', 'Ready');
+}
+
+async function updateActiveSessionProvider(provider) {
+  const sessionId = state.value.activeSessionId;
+  const nextProvider = normalizeProvider(provider);
+  if (!sessionId || !nextProvider) return;
+
+  const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ provider: nextProvider }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Unable to update provider');
+  }
+
+  await loadSessions(sessionId);
+  await loadModelPresets(getSessionProvider(getActiveSession())).catch(() => {});
   setPopover('none');
   setStatus('ready', 'Ready');
 }
@@ -1942,13 +2075,15 @@ async function initializePanel() {
   startInitialTabAttach();
   await loadAuth();
   bindTabAttachWatchers();
+  await loadSessions();
   try {
-    await loadModelPresets();
+    await loadModelPresets(getSessionProvider(getActiveSession()));
   } catch {
+    state.providerPresets = [{ value: 'codex', label: 'Codex' }];
+    state.defaultProvider = 'codex';
     state.modelPresets = [{ value: null, label: 'Default' }];
     state.defaultReasoningEffort = 'medium';
   }
-  await loadSessions();
   if (shouldStartFreshSession || !state.value.activeSessionId) {
     await createSession();
   } else {

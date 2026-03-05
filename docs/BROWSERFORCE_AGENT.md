@@ -1,7 +1,7 @@
 # BrowserForce Agent
 
 BrowserForce Agent is the local chat daemon (`chatd`) plus the Chrome extension side-panel UI.
-It gives you resumable, multi-session chat backed by Codex, while keeping data local on loopback.
+It gives you resumable, multi-session chat backed by provider adapters (Codex by default, Claude optional), while keeping data local on loopback.
 
 ## What This Covers
 
@@ -47,10 +47,11 @@ browserforce agent stop
 
 - Session IDs are explicit and user-selectable. There is no fixed/hardcoded chat session.
 - Sessions persist under `~/.browserforce/agent/sessions/`.
-- BrowserForce stores Codex continuity under `providerState.codex.sessionId`.
-- New runs attempt `codex exec resume <sessionId> --json` when mapping exists.
-- If resume fails with an invalid-session signature, chatd retries once with a fresh run.
-- Usage telemetry from `run.usage` is persisted at `providerState.codex.latestUsage` and used to hydrate the context usage chip.
+- Session metadata stores provider identity in `session.provider` (defaults to `codex` when omitted).
+- Continuity and usage are provider-scoped under `providerState.<providerId>`.
+- Codex runs attempt `codex exec resume <sessionId> --json` when mapping exists.
+- If Codex resume fails with an invalid-session signature, chatd retries once with a fresh run.
+- Usage telemetry from `run.usage` is persisted at `providerState.<providerId>.latestUsage` and used to hydrate the context usage chip.
 
 ## API Surface
 
@@ -62,19 +63,23 @@ All `/v1/*` endpoints require `Authorization: Bearer <token>`.
 - `GET /v1/sessions`
   - List sessions.
 - `POST /v1/sessions`
-  - Create session (`title`, optional `model`, optional `reasoningEffort`).
+  - Create session (`title`, optional `provider`, optional `model`, optional `reasoningEffort`).
 - `GET /v1/sessions/:sessionId`
   - Fetch session metadata (includes `providerState` when present).
 - `PATCH /v1/sessions/:sessionId`
-  - Update session `title`, `model`, or `reasoningEffort`.
+  - Update session `title`, `provider`, `model`, or `reasoningEffort`.
+- `GET /v1/providers`
+  - Returns available provider adapters and default provider.
 - `GET /v1/sessions/:sessionId/messages?limit=200`
   - Read transcript messages.
 - `GET /v1/models`
-  - Returns available model presets and default reasoning effort.
+  - Returns provider-scoped model presets.
+  - Optional query: `?provider=codex|claude`.
 - `GET /v1/events?sessionId=<id>`
   - SSE stream (`chat.delta`, `chat.final`, `run.provider_session`, `run.usage`, etc.).
 - `POST /v1/runs`
   - Start run for `{ sessionId, message, browserContext? }`.
+  - `reasoningEffort` settings are currently applied to Codex runs. Claude runs ignore `reasoningEffort`.
 - `POST /v1/runs/:runId/abort` or `DELETE /v1/runs/:runId/abort`
   - Abort active run.
 
@@ -115,6 +120,8 @@ Optional external config:
   - `agent start` syncs a managed BrowserForce `AGENTS.md` into this directory (unless a custom unmanaged `AGENTS.md` is already present).
 - `BF_CHATD_CODEX_COMMAND`
   - Codex binary/command used by chatd (default `codex`).
+- `BF_CHATD_CLAUDE_COMMAND`
+  - Claude binary/command used by chatd when provider is `claude` (default `claude`).
 - `BF_CHATD_MODEL_LIST_TIMEOUT_MS`
   - Timeout when querying model catalog from Codex app-server.
 - `BF_CHATD_DEFAULT_MODEL`

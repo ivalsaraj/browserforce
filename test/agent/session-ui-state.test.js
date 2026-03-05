@@ -208,3 +208,69 @@ test('session.metadata.loaded hydrates persisted codex usage for reopened sessio
   assert.equal(next.latestUsageBySession.s1.modelContextWindow, 258400);
   assert.equal(next.latestUsageBySession.s1.totalTokens, 1120);
 });
+
+test('session.metadata.loaded hydrates usage from the active provider key', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+    latestUsageBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'session.metadata.loaded',
+    sessionId: 's1',
+    session: {
+      sessionId: 's1',
+      provider: 'openai',
+      providerState: {
+        openai: {
+          latestUsage: {
+            modelContextWindow: 200000,
+            totalTokens: 3210,
+          },
+        },
+        codex: {
+          latestUsage: {
+            modelContextWindow: 258400,
+            totalTokens: 999,
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(next.latestUsageBySession.s1.modelContextWindow, 200000);
+  assert.equal(next.latestUsageBySession.s1.totalTokens, 3210);
+});
+
+test('session.metadata.loaded falls back to codex usage when active provider usage is unavailable', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+    latestUsageBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'session.metadata.loaded',
+    sessionId: 's1',
+    session: {
+      sessionId: 's1',
+      provider: 'openai',
+      providerState: {
+        codex: {
+          latestUsage: {
+            modelContextWindow: 258400,
+            totalTokens: 1120,
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(next.latestUsageBySession.s1.modelContextWindow, 258400);
+  assert.equal(next.latestUsageBySession.s1.totalTokens, 1120);
+});
