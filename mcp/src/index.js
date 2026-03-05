@@ -325,8 +325,9 @@ Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEnco
 
 Plugin workflow (metadata-first):
   1) Call pluginCatalog() to discover plugin names, helper names, and available sections.
-  2) Call pluginHelp(name, section?) only when you need plugin-specific instructions.
-  3) Avoid calling pluginHelp blindly for every plugin.
+  2) If the user request clearly matches a plugin capability, call pluginHelp(name, section?) for that plugin before using its helpers.
+  3) Otherwise, call pluginHelp(name, section?) only when you need plugin-specific instructions.
+  4) Avoid calling pluginHelp blindly for every plugin.
 
 ═══ FIRST CALL — PAGE SETUP ═══
 

@@ -77,6 +77,31 @@ test('GET /v1/models falls back to configured model when model fetcher fails', a
   }
 });
 
+test('GET /v1/plugins returns plugin catalog', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    pluginFetcher: async () => ([
+      { name: 'highlight', installed: true },
+    ]),
+  });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/plugins`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(Array.isArray(body.plugins), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(body, 'requiredPlugins'), false);
+
+    const byName = Object.fromEntries((body.plugins || []).map((row) => [row.name, row]));
+    assert.equal(byName.highlight?.installed, true);
+    assert.equal(typeof byName.highlight?.required, 'undefined');
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs requires explicit sessionId', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
@@ -355,6 +380,102 @@ test('PATCH /v1/sessions rejects invalid reasoning effort values', async () => {
       body: JSON.stringify({ reasoningEffort: 'turbo' }),
     });
     assert.equal(patched.status, 400);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('PATCH /v1/sessions persists selected enabled plugins', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Plugins enforced' }),
+    }).then((res) => res.json());
+
+    const patched = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ enabledPlugins: ['highlight'] }),
+    });
+    assert.equal(patched.status, 200);
+    const body = await patched.json();
+    assert.deepEqual(body.enabledPlugins, ['highlight']);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('PATCH /v1/sessions rejects invalid enabled plugin ids', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Plugins invalid' }),
+    }).then((res) => res.json());
+
+    const patched = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ enabledPlugins: ['highlight', 'bad/id'] }),
+    });
+    assert.equal(patched.status, 400);
+    const body = await patched.json();
+    assert.equal(body.error, 'enabledPlugins must use safe plugin ids');
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/runs does not inject plugin context when no plugins are enabled', async () => {
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, message, onEvent, onExit }) => {
+      seenRuns.push({ runId, sessionId, message });
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'ok' } }), 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'No plugins enabled' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'hello' }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const prompt = seenRuns.at(-1)?.message || '';
+    assert.doesNotMatch(prompt, /Enabled BrowserForce plugins:/);
   } finally {
     await daemon.stop();
   }
@@ -816,6 +937,16 @@ test('POST /v1/runs uses one-line AGENTS reminder on resume runs', async () => {
       body: JSON.stringify({ title: 'agents-reminder' }),
     }).then((res) => res.json());
 
+    const pluginPatchRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ enabledPlugins: ['highlight'] }),
+    });
+    assert.equal(pluginPatchRes.status, 200);
+
     const runOneRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
       method: 'POST',
       headers: {
@@ -842,9 +973,21 @@ test('POST /v1/runs uses one-line AGENTS reminder on resume runs', async () => {
     assert.equal(seenRuns[0].resumeSessionId, null);
     assert.match(seenRuns[0].message || '', /System instructions from AGENTS\.md/);
     assert.match(seenRuns[0].message || '', /Always be explicit\./);
+    assert.match(seenRuns[0].message || '', /Enabled BrowserForce plugins:/);
+    assert.match(seenRuns[0].message || '', /highlight/);
+    assert.match(
+      seenRuns[0].message || '',
+      /If this request appears to match one of these plugins, call pluginHelp\(name, section\?\) for that plugin before using its helpers\./
+    );
     assert.equal(seenRuns[1].resumeSessionId, providerSessionId);
     assert.match(seenRuns[1].message || '', /System reminder: follow the previously established system instructions for this thread\./);
     assert.doesNotMatch(seenRuns[1].message || '', /Always be explicit\./);
+    assert.match(seenRuns[1].message || '', /Enabled BrowserForce plugins:/);
+    assert.match(seenRuns[1].message || '', /highlight/);
+    assert.match(
+      seenRuns[1].message || '',
+      /If this request appears to match one of these plugins, call pluginHelp\(name, section\?\) for that plugin before using its helpers\./
+    );
   } finally {
     await daemon.stop();
     rmSync(codexCwd, { recursive: true, force: true });

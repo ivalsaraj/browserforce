@@ -130,6 +130,32 @@ test('updateSession supports clearing reasoning effort back to config default', 
   assert.equal(updated?.reasoningEffort, null);
 });
 
+test('updateSession persists normalized enabled plugins', async () => {
+  const created = await createSession({ title: 'Plugins', storageRoot });
+  const updated = await updateSession({
+    sessionId: created.sessionId,
+    patch: { enabledPlugins: ['google-sheets', 'HIGHLIGHT', 'google-sheets'] },
+    storageRoot,
+  });
+  assert.deepEqual(updated?.enabledPlugins, ['google-sheets', 'highlight']);
+
+  const rows = await listSessions({ limit: 10, storageRoot });
+  const row = rows.find((item) => item.sessionId === created.sessionId);
+  assert.deepEqual(row?.enabledPlugins, ['google-sheets', 'highlight']);
+});
+
+test('updateSession rejects invalid enabled plugin ids', async () => {
+  const created = await createSession({ title: 'Plugins invalid', storageRoot });
+  await assert.rejects(
+    updateSession({
+      sessionId: created.sessionId,
+      patch: { enabledPlugins: ['google-sheets', 'bad/plugin'] },
+      storageRoot,
+    }),
+    /enabledPlugins/i,
+  );
+});
+
 test('deleteSession removes session metadata and transcript log', async () => {
   const created = await createSession({ title: 'Disposable', storageRoot });
   await appendMessage({

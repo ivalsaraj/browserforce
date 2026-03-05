@@ -54,6 +54,16 @@ test('session popover supports inline rename and saves via session patch endpoin
   assert.match(js, /JSON\.stringify\(\{\s*title\s*:\s*title/);
 });
 
+test('plugin popover loads catalog and patches per-session enabledPlugins', () => {
+  assert.match(js, /const pluginTriggerBtn = document\.getElementById\('bf-plugin-trigger'\)/);
+  assert.match(js, /const pluginPanelEl = document\.getElementById\('bf-plugin-panel'\)/);
+  assert.match(js, /const pluginListEl = document\.getElementById\('bf-plugin-list'\)/);
+  assert.match(js, /async function loadPluginCatalog\(\)/);
+  assert.match(js, /async function updateActiveSessionPlugins\(/);
+  assert.match(js, /\/v1\/plugins/);
+  assert.match(js, /JSON\.stringify\(\{\s*enabledPlugins\s*\}\)/);
+});
+
 test('session popover renders per-session timestamp metadata', () => {
   assert.match(js, /function formatSessionTimestamp/);
   assert.match(js, /updatedAt|createdAt/);

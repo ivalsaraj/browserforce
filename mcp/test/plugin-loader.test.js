@@ -218,6 +218,7 @@ test('buildPluginSkillAppendix skips plugins with empty skill', async () => {
 
   assert.ok(appendix.includes('pluginCatalog()'));
   assert.ok(appendix.includes('pluginHelp(name, section?)'));
+  assert.ok(appendix.includes('clearly matches a plugin capability'));
   assert.ok(appendix.includes('PLUGIN: a'));
   assert.ok(appendix.includes('Helper for X'));
   assert.ok(appendix.includes('foo'));

@@ -1443,6 +1443,40 @@ body {
   color: rgba(255, 255, 255, 0.45);
 }
 
+.plugin-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.plugin-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plugin-item-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-item-meta {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.plugin-item.active .plugin-item-meta {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.plugin-item:disabled {
+  opacity: 0.75;
+  cursor: default;
+}
+
 .session-row {
   display: flex;
   align-items: center;

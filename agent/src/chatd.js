@@ -23,10 +23,12 @@ import {
 } from './session-store.js';
 
 const BF_DIR = join(homedir(), '.browserforce');
+const BF_PLUGINS_DIR = join(BF_DIR, 'plugins');
 const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
 const MODEL_LIST_TIMEOUT_MS = 5000;
 const DEFAULT_REASONING_EFFORT = 'medium';
+const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
 const LOCAL_FILE_MAX_BYTES = 15 * 1024 * 1024;
 const LOCAL_IMAGE_CONTENT_TYPES = {
   '.png': 'image/png',
@@ -242,6 +244,39 @@ async function listModelPresets({ storageRoot, modelFetcher } = {}) {
   return dedupeModelRows([...liveRows, ...configuredRow, ...sessionRows]);
 }
 
+async function listInstalledPlugins({ pluginsDir = BF_PLUGINS_DIR } = {}) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(pluginsDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry?.isDirectory?.())
+    .map((entry) => normalizePluginId(entry.name))
+    .filter(Boolean)
+    .map((name) => ({ name, installed: true }));
+}
+
+function normalizePluginCatalogRows(rows) {
+  const source = Array.isArray(rows) ? rows : [];
+  const byName = new Map();
+
+  for (const row of source) {
+    if (!row || typeof row !== 'object') continue;
+    const name = normalizePluginId(row.name || row.id);
+    if (!name) continue;
+    const installed = row.installed !== false;
+    byName.set(name, {
+      name,
+      installed,
+    });
+  }
+
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function resolveEffectiveReasoningEffort(sessionReasoningEffort, fallbackReasoningEffort = DEFAULT_REASONING_EFFORT) {
   const sessionValue = String(sessionReasoningEffort || '').trim().toLowerCase();
   if (sessionValue && isValidReasoningEffort(sessionValue)) return sessionValue;
@@ -250,6 +285,48 @@ function resolveEffectiveReasoningEffort(sessionReasoningEffort, fallbackReasoni
   if (fallbackValue && isValidReasoningEffort(fallbackValue)) return fallbackValue;
 
   return DEFAULT_REASONING_EFFORT;
+}
+
+function normalizePluginId(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (!PLUGIN_ID_RE.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeEnabledPluginsList(input) {
+  const source = Array.isArray(input) ? input : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const rawValue of source) {
+    const value = normalizePluginId(rawValue);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function hasInvalidEnabledPluginIds(input) {
+  if (input == null) return false;
+  if (!Array.isArray(input)) return true;
+  for (const rawValue of input) {
+    const rawText = String(rawValue || '').trim();
+    if (!rawText) continue;
+    if (!PLUGIN_ID_RE.test(rawText.toLowerCase())) return true;
+  }
+  return false;
+}
+
+function buildPluginPromptContext(enabledPlugins) {
+  const normalized = normalizeEnabledPluginsList(enabledPlugins);
+  if (!normalized.length) return '';
+  const lines = [
+    'Enabled BrowserForce plugins:',
+    ...normalized.map((pluginName) => `- ${pluginName}`),
+    'If this request appears to match one of these plugins, call pluginHelp(name, section?) for that plugin before using its helpers.',
+  ];
+  return lines.join('\n');
 }
 
 function nowIso() {
@@ -1074,10 +1151,36 @@ async function loadAgentsInstructions(codexCwd) {
   }
 }
 
-function buildPromptWithAgents({ message, browserContext, agentsInstructions }) {
+function buildPromptWithAgents({
+  message,
+  browserContext,
+  agentsInstructions,
+  enabledPlugins = [],
+}) {
   const prompt = buildRunPrompt({ message, browserContext });
   const agents = String(agentsInstructions || '').trim();
-  if (!agents) return prompt;
+  const pluginContext = buildPluginPromptContext(enabledPlugins);
+  if (!agents && !pluginContext) return prompt;
+  if (!agents) {
+    return [
+      pluginContext,
+      '',
+      '---',
+      '',
+      prompt,
+    ].join('\n');
+  }
+  if (!pluginContext) {
+    return [
+      'System instructions from AGENTS.md (highest priority):',
+      '',
+      agents,
+      '',
+      '---',
+      '',
+      prompt,
+    ].join('\n');
+  }
   return [
     'System instructions from AGENTS.md (highest priority):',
     '',
@@ -1085,14 +1188,30 @@ function buildPromptWithAgents({ message, browserContext, agentsInstructions }) 
     '',
     '---',
     '',
+    pluginContext,
+    '',
+    '---',
+    '',
     prompt,
   ].join('\n');
 }
 
-function buildPromptWithAgentsReminder({ message, browserContext }) {
+function buildPromptWithAgentsReminder({ message, browserContext, enabledPlugins = [] }) {
   const prompt = buildRunPrompt({ message, browserContext });
+  const pluginContext = buildPluginPromptContext(enabledPlugins);
+  if (!pluginContext) {
+    return [
+      'System reminder: follow the previously established system instructions for this thread.',
+      '',
+      prompt,
+    ].join('\n');
+  }
   return [
     'System reminder: follow the previously established system instructions for this thread.',
+    '',
+    pluginContext,
+    '',
+    '---',
     '',
     prompt,
   ].join('\n');
@@ -1164,6 +1283,7 @@ export async function startChatd(opts = {}) {
     command: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
     timeoutMs: Number(process.env.BF_CHATD_MODEL_LIST_TIMEOUT_MS || MODEL_LIST_TIMEOUT_MS),
   }));
+  const pluginFetcher = opts.pluginFetcher || (() => listInstalledPlugins({ pluginsDir: opts.pluginsDir || BF_PLUGINS_DIR }));
   const configuredReasoningEffort = resolveEffectiveReasoningEffort(
     opts.defaultReasoningEffort,
     await resolveConfiguredReasoningEffort(),
@@ -1323,6 +1443,12 @@ export async function startChatd(opts = {}) {
         return;
       }
 
+      if (url.pathname === '/v1/plugins' && req.method === 'GET') {
+        const plugins = normalizePluginCatalogRows(await pluginFetcher());
+        json(res, 200, { plugins });
+        return;
+      }
+
       if (url.pathname === '/v1/sessions' && req.method === 'POST') {
         let body = {};
         try {
@@ -1377,13 +1503,24 @@ export async function startChatd(opts = {}) {
         }
 
         try {
+          if (
+            Object.prototype.hasOwnProperty.call(body, 'enabledPlugins')
+            && hasInvalidEnabledPluginIds(body.enabledPlugins)
+          ) {
+            json(res, 400, { error: 'enabledPlugins must use safe plugin ids' });
+            return;
+          }
+          const patch = {
+            ...(Object.prototype.hasOwnProperty.call(body, 'title') ? { title: body.title } : {}),
+            ...(Object.prototype.hasOwnProperty.call(body, 'model') ? { model: body.model } : {}),
+            ...(Object.prototype.hasOwnProperty.call(body, 'reasoningEffort') ? { reasoningEffort: body.reasoningEffort } : {}),
+            ...(Object.prototype.hasOwnProperty.call(body, 'enabledPlugins')
+              ? { enabledPlugins: normalizeEnabledPluginsList(body.enabledPlugins) }
+              : {}),
+          };
           const updated = await updateSession({
             sessionId: decodedSessionId,
-            patch: {
-              ...(Object.prototype.hasOwnProperty.call(body, 'title') ? { title: body.title } : {}),
-              ...(Object.prototype.hasOwnProperty.call(body, 'model') ? { model: body.model } : {}),
-              ...(Object.prototype.hasOwnProperty.call(body, 'reasoningEffort') ? { reasoningEffort: body.reasoningEffort } : {}),
-            },
+            patch,
             storageRoot,
           });
           if (!updated) {
@@ -1490,15 +1627,17 @@ export async function startChatd(opts = {}) {
           return;
         }
         const browserContext = normalizeBrowserContext(body?.browserContext);
+        const enabledPlugins = normalizeEnabledPluginsList(session.enabledPlugins);
         const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
           ? session.providerState.codex.sessionId
           : null;
         const promptMessage = resumeSessionId
-          ? buildPromptWithAgentsReminder({ message, browserContext })
+          ? buildPromptWithAgentsReminder({ message, browserContext, enabledPlugins })
           : buildPromptWithAgents({
             message,
             browserContext,
             agentsInstructions: await loadAgentsInstructions(codexCwd),
+            enabledPlugins,
           });
         const runReasoningEffort = resolveEffectiveReasoningEffort(
           session.reasoningEffort,
