@@ -24,6 +24,13 @@
           </svg>
         </button>
 
+        <button id="bf-plugin-trigger" type="button" class="pill-btn" aria-expanded="false" aria-haspopup="listbox">
+          <span id="bf-plugin-label">Plugins</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+
         <button id="bf-new-session" type="button" class="round-btn" aria-label="New Session" title="New Session">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"></path>
@@ -76,6 +83,11 @@
     <section id="bf-session-panel" class="popover-panel hidden" role="listbox" aria-label="Sessions">
       <p class="popover-label">Sessions</p>
       <ul id="bf-switch-session-list" class="popover-list"></ul>
+    </section>
+
+    <section id="bf-plugin-panel" class="popover-panel hidden" role="listbox" aria-label="Plugins">
+      <p class="popover-label">Plugins</p>
+      <ul id="bf-plugin-list" class="popover-list"></ul>
     </section>
   </main>
 

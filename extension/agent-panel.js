@@ -29,6 +29,8 @@ const state = {
   value: initialState,
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
+  pluginCatalog: [],
+  requiredPlugins: ['google-sheets'],
   defaultReasoningEffort: 'medium',
   currentRunBySession: {},
   expandedTimelineEntries: {},
@@ -65,13 +67,17 @@ const modelTriggerBtn = document.getElementById('bf-model-trigger');
 const modelLabelEl = document.getElementById('bf-model-label');
 const sessionTriggerBtn = document.getElementById('bf-session-trigger');
 const sessionLabelEl = document.getElementById('bf-session-label');
+const pluginTriggerBtn = document.getElementById('bf-plugin-trigger');
+const pluginLabelEl = document.getElementById('bf-plugin-label');
 const newSessionBtn = document.getElementById('bf-new-session');
 const popoverBackdropEl = document.getElementById('bf-popover-backdrop');
 const modelPanelEl = document.getElementById('bf-model-panel');
 const sessionPanelEl = document.getElementById('bf-session-panel');
+const pluginPanelEl = document.getElementById('bf-plugin-panel');
 const modelListEl = document.getElementById('bf-model-list');
 const thinkingListEl = document.getElementById('bf-thinking-list');
 const switchSessionListEl = document.getElementById('bf-switch-session-list');
+const pluginListEl = document.getElementById('bf-plugin-list');
 const transcriptEl = document.getElementById('bf-transcript');
 const chatFormEl = document.getElementById('bf-chat-form');
 const composerBoxEl = chatFormEl.querySelector('.composer-box');
@@ -455,10 +461,52 @@ function formatSessionTimestamp(session) {
   });
 }
 
+function normalizeEnabledPlugins(input) {
+  const source = Array.isArray(input) ? input : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const rawValue of source) {
+    const value = String(rawValue || '').trim().toLowerCase();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function activeSessionEnabledPlugins() {
+  return normalizeEnabledPlugins(getActiveSession()?.enabledPlugins);
+}
+
+function formatPluginTriggerLabel(activeSession) {
+  const count = normalizeEnabledPlugins(activeSession?.enabledPlugins).length;
+  if (count <= 0) return 'Plugins';
+  return count === 1 ? 'Plugins: 1 enabled' : `Plugins: ${count} enabled`;
+}
+
+function normalizePluginCatalogRows(input) {
+  const source = Array.isArray(input) ? input : [];
+  const rows = [];
+  const seen = new Set();
+  for (const row of source) {
+    if (!row || typeof row !== 'object') continue;
+    const name = String(row.name || '').trim().toLowerCase();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    rows.push({
+      name,
+      installed: row.installed !== false,
+      required: !!row.required,
+    });
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function renderSelectors() {
   const activeSession = getActiveSession();
   const modelLabel = `Model: ${formatModelLabel(activeSession?.model)}`;
   const sessionLabel = formatSessionLabel(activeSession);
+  const pluginLabel = formatPluginTriggerLabel(activeSession);
 
   if (modelLabelEl) {
     modelLabelEl.textContent = modelLabel;
@@ -470,6 +518,12 @@ function renderSelectors() {
     sessionLabelEl.textContent = sessionLabel;
   } else {
     sessionTriggerBtn.textContent = sessionLabel;
+  }
+
+  if (pluginLabelEl) {
+    pluginLabelEl.textContent = pluginLabel;
+  } else if (pluginTriggerBtn) {
+    pluginTriggerBtn.textContent = pluginLabel;
   }
 }
 
@@ -647,6 +701,55 @@ function renderSessions() {
       event.preventDefault();
       const sessionId = input.getAttribute('data-session-edit-input') || '';
       cancelSessionEdit(sessionId);
+    });
+  });
+}
+
+function renderPluginList() {
+  if (!pluginListEl) return;
+  const plugins = Array.isArray(state.pluginCatalog) ? state.pluginCatalog : [];
+  if (!plugins.length) {
+    pluginListEl.innerHTML = '<li class="empty-item">No plugins found</li>';
+    return;
+  }
+
+  const enabled = new Set(activeSessionEnabledPlugins());
+  const required = new Set(normalizeEnabledPlugins(state.requiredPlugins));
+  pluginListEl.innerHTML = plugins.map((plugin) => {
+    const isRequired = !!plugin.required || required.has(plugin.name);
+    const isEnabled = enabled.has(plugin.name) || isRequired;
+    const isInstalled = plugin.installed !== false;
+    const activeClass = isEnabled ? 'active' : '';
+    const requiredClass = isRequired ? 'required' : '';
+    const disabled = isRequired || !isInstalled;
+    const disabledAttr = disabled ? 'disabled' : '';
+    const statusLabel = isInstalled ? (isEnabled ? 'Enabled' : 'Disabled') : 'Not installed';
+    const requiredTag = isRequired ? '<span class="plugin-required-tag">Required</span>' : '';
+    return `
+      <li>
+        <button type="button" data-plugin-name="${escapeHtml(plugin.name)}" class="popover-item plugin-item ${requiredClass} ${activeClass}" ${disabledAttr}>
+          <span class="plugin-item-main">
+            <span class="plugin-item-name">${escapeHtml(plugin.name)}</span>
+            <span class="plugin-item-meta">${escapeHtml(statusLabel)}</span>
+          </span>
+          ${requiredTag}
+        </button>
+      </li>
+    `;
+  }).join('');
+
+  pluginListEl.querySelectorAll('button[data-plugin-name]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const pluginName = String(button.getAttribute('data-plugin-name') || '').trim().toLowerCase();
+      if (!pluginName || button.disabled) return;
+      const current = new Set(activeSessionEnabledPlugins());
+      if (current.has(pluginName)) current.delete(pluginName);
+      else current.add(pluginName);
+      try {
+        await updateActiveSessionPlugins(Array.from(current));
+      } catch (error) {
+        setStatus('error', error?.message || 'Unable to update plugins');
+      }
     });
   });
 }
@@ -1379,13 +1482,16 @@ function setPopover(popover) {
 function renderPopovers() {
   const modelOpen = state.popover === 'model';
   const sessionOpen = state.popover === 'session';
-  const anyOpen = modelOpen || sessionOpen;
+  const pluginOpen = state.popover === 'plugin';
+  const anyOpen = modelOpen || sessionOpen || pluginOpen;
 
   modelTriggerBtn.setAttribute('aria-expanded', modelOpen ? 'true' : 'false');
   sessionTriggerBtn.setAttribute('aria-expanded', sessionOpen ? 'true' : 'false');
+  if (pluginTriggerBtn) pluginTriggerBtn.setAttribute('aria-expanded', pluginOpen ? 'true' : 'false');
   popoverBackdropEl.classList.toggle('hidden', !anyOpen);
   modelPanelEl.classList.toggle('hidden', !modelOpen);
   sessionPanelEl.classList.toggle('hidden', !sessionOpen);
+  if (pluginPanelEl) pluginPanelEl.classList.toggle('hidden', !pluginOpen);
 }
 
 function render() {
@@ -1393,6 +1499,7 @@ function render() {
   renderContextUsageChip();
   renderModelList();
   renderSessions();
+  renderPluginList();
   renderTranscript();
   renderPopovers();
 }
@@ -1755,6 +1862,21 @@ async function loadModelPresets() {
   state.defaultReasoningEffort = normalizeReasoningEffort(body.defaultReasoningEffort) || 'medium';
 }
 
+async function loadPluginCatalog() {
+  const res = await api('/v1/plugins', { method: 'GET', headers: {} });
+  await ensureOk(res, 'Failed to load plugins');
+  const body = await readJsonOrEmpty(res);
+  state.requiredPlugins = normalizeEnabledPlugins(body.requiredPlugins);
+  const catalogRows = normalizePluginCatalogRows(body.plugins);
+  const seen = new Set(catalogRows.map((row) => row.name));
+  for (const name of state.requiredPlugins) {
+    if (seen.has(name)) continue;
+    catalogRows.push({ name, installed: false, required: true });
+    seen.add(name);
+  }
+  state.pluginCatalog = catalogRows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 async function loadMessages(sessionId) {
   const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`, {
     method: 'GET',
@@ -1945,6 +2067,25 @@ async function updateActiveSessionReasoningEffort(reasoningEffort) {
   setStatus('ready', 'Ready');
 }
 
+async function updateActiveSessionPlugins(enabledPlugins) {
+  const sessionId = state.value.activeSessionId;
+  if (!sessionId) return;
+
+  const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabledPlugins }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Unable to update plugins');
+  }
+
+  await loadSessions(sessionId);
+  await loadSessionMetadata(sessionId);
+  setPopover('none');
+  setStatus('ready', 'Ready');
+}
+
 async function consumeEventStream(body, loopToken) {
   if (!body) return;
   const reader = body.getReader();
@@ -2075,6 +2216,11 @@ async function initializePanel() {
     state.modelPresets = [{ value: null, label: 'Default' }];
     state.defaultReasoningEffort = 'medium';
   }
+  try {
+    await loadPluginCatalog();
+  } catch {
+    state.pluginCatalog = [];
+  }
   await loadSessions();
   if (shouldStartFreshSession || !state.value.activeSessionId) {
     await createSession();
@@ -2169,6 +2315,12 @@ modelTriggerBtn.addEventListener('click', () => {
 sessionTriggerBtn.addEventListener('click', () => {
   setPopover(state.popover === 'session' ? 'none' : 'session');
 });
+
+if (pluginTriggerBtn) {
+  pluginTriggerBtn.addEventListener('click', () => {
+    setPopover(state.popover === 'plugin' ? 'none' : 'plugin');
+  });
+}
 
 popoverBackdropEl.addEventListener('click', () => {
   setPopover('none');

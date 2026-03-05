@@ -1346,6 +1346,56 @@ body {
   color: rgba(255, 255, 255, 0.45);
 }
 
+.plugin-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.plugin-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plugin-item-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-item-meta {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.plugin-item.required {
+  border: 1px solid rgba(193, 95, 60, 0.45);
+}
+
+.plugin-item.active .plugin-item-meta {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.plugin-item:disabled {
+  opacity: 0.75;
+  cursor: default;
+}
+
+.plugin-required-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ffcfbf;
+  border: 1px solid rgba(255, 207, 191, 0.36);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
 .session-row {
   display: flex;
   align-items: center;

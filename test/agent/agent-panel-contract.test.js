@@ -9,13 +9,16 @@ const panelJs = fs.readFileSync('extension/agent-panel.js', 'utf8');
 test('agent panel has inline model and session selectors with popovers', () => {
   assert.match(html, /id="bf-model-trigger"/);
   assert.match(html, /id="bf-session-trigger"/);
+  assert.match(html, /id="bf-plugin-trigger"/);
   assert.match(html, /id="bf-new-session"/);
   assert.match(html, /aria-label="New Session"/);
   assert.match(html, /id="bf-model-panel"/);
   assert.match(html, /id="bf-session-panel"/);
+  assert.match(html, /id="bf-plugin-panel"/);
   assert.match(html, /id="bf-model-list"/);
   assert.match(html, /id="bf-thinking-list"/);
   assert.match(html, /id="bf-switch-session-list"/);
+  assert.match(html, /id="bf-plugin-list"/);
   assert.match(html, /id="bf-tab-attach-banner"/);
   assert.match(html, /id="bf-tab-attach-text"/);
   assert.match(html, /id="bf-attach-current-tab"/);
@@ -122,4 +125,11 @@ test('startup error card action buttons have dedicated styling hooks', () => {
   assert.match(css, /\.empty-actions/);
   assert.match(css, /\.empty-action-btn/);
   assert.match(css, /\.empty-action-btn\.secondary/);
+});
+
+test('plugin popover rows include required badge and enabled-state styling hooks', () => {
+  assert.match(css, /\.plugin-item/);
+  assert.match(css, /\.plugin-item\.required/);
+  assert.match(css, /\.plugin-required-tag/);
+  assert.match(css, /\.plugin-item\.active/);
 });
