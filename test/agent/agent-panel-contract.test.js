@@ -72,6 +72,7 @@ test('agent panel composer matches compact/expanded shell structure', () => {
 
 test('composer action buttons respect hidden attribute for send/stop swapping', () => {
   assert.match(css, /\.composer-actions button\[hidden\][\s\S]*display:\s*none/);
+  assert.match(css, /\.queued-row\[hidden\][\s\S]*display:\s*none/);
 });
 
 test('reasoning title rows use shimmer and enter transition treatment', () => {

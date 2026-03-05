@@ -1092,6 +1092,10 @@ body {
   gap: 8px;
 }
 
+.queued-row[hidden] {
+  display: none;
+}
+
 .queued-row-icon {
   width: 18px;
   height: 18px;
