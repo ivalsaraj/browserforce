@@ -127,9 +127,7 @@ test('startup error card action buttons have dedicated styling hooks', () => {
   assert.match(css, /\.empty-action-btn\.secondary/);
 });
 
-test('plugin popover rows include required badge and enabled-state styling hooks', () => {
+test('plugin popover rows include enabled-state styling hooks', () => {
   assert.match(css, /\.plugin-item/);
-  assert.match(css, /\.plugin-item\.required/);
-  assert.match(css, /\.plugin-required-tag/);
   assert.match(css, /\.plugin-item\.active/);
 });

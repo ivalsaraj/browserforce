@@ -30,7 +30,6 @@ const state = {
   auth: null,
   modelPresets: [{ value: null, label: 'Default' }],
   pluginCatalog: [],
-  requiredPlugins: ['google-sheets'],
   defaultReasoningEffort: 'medium',
   currentRunBySession: {},
   expandedTimelineEntries: {},
@@ -496,7 +495,6 @@ function normalizePluginCatalogRows(input) {
     rows.push({
       name,
       installed: row.installed !== false,
-      required: !!row.required,
     });
   }
   return rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -714,25 +712,20 @@ function renderPluginList() {
   }
 
   const enabled = new Set(activeSessionEnabledPlugins());
-  const required = new Set(normalizeEnabledPlugins(state.requiredPlugins));
   pluginListEl.innerHTML = plugins.map((plugin) => {
-    const isRequired = !!plugin.required || required.has(plugin.name);
-    const isEnabled = enabled.has(plugin.name) || isRequired;
+    const isEnabled = enabled.has(plugin.name);
     const isInstalled = plugin.installed !== false;
     const activeClass = isEnabled ? 'active' : '';
-    const requiredClass = isRequired ? 'required' : '';
-    const disabled = isRequired || !isInstalled;
+    const disabled = !isInstalled;
     const disabledAttr = disabled ? 'disabled' : '';
     const statusLabel = isInstalled ? (isEnabled ? 'Enabled' : 'Disabled') : 'Not installed';
-    const requiredTag = isRequired ? '<span class="plugin-required-tag">Required</span>' : '';
     return `
       <li>
-        <button type="button" data-plugin-name="${escapeHtml(plugin.name)}" class="popover-item plugin-item ${requiredClass} ${activeClass}" ${disabledAttr}>
+        <button type="button" data-plugin-name="${escapeHtml(plugin.name)}" class="popover-item plugin-item ${activeClass}" ${disabledAttr}>
           <span class="plugin-item-main">
             <span class="plugin-item-name">${escapeHtml(plugin.name)}</span>
             <span class="plugin-item-meta">${escapeHtml(statusLabel)}</span>
           </span>
-          ${requiredTag}
         </button>
       </li>
     `;
@@ -1866,15 +1859,7 @@ async function loadPluginCatalog() {
   const res = await api('/v1/plugins', { method: 'GET', headers: {} });
   await ensureOk(res, 'Failed to load plugins');
   const body = await readJsonOrEmpty(res);
-  state.requiredPlugins = normalizeEnabledPlugins(body.requiredPlugins);
-  const catalogRows = normalizePluginCatalogRows(body.plugins);
-  const seen = new Set(catalogRows.map((row) => row.name));
-  for (const name of state.requiredPlugins) {
-    if (seen.has(name)) continue;
-    catalogRows.push({ name, installed: false, required: true });
-    seen.add(name);
-  }
-  state.pluginCatalog = catalogRows.sort((a, b) => a.name.localeCompare(b.name));
+  state.pluginCatalog = normalizePluginCatalogRows(body.plugins);
 }
 
 async function loadMessages(sessionId) {

@@ -1371,10 +1371,6 @@ body {
   color: rgba(255, 255, 255, 0.55);
 }
 
-.plugin-item.required {
-  border: 1px solid rgba(193, 95, 60, 0.45);
-}
-
 .plugin-item.active .plugin-item-meta {
   color: rgba(255, 255, 255, 0.9);
 }
@@ -1382,18 +1378,6 @@ body {
 .plugin-item:disabled {
   opacity: 0.75;
   cursor: default;
-}
-
-.plugin-required-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #ffcfbf;
-  border: 1px solid rgba(255, 207, 191, 0.36);
-  border-radius: 999px;
-  padding: 2px 6px;
-  flex-shrink: 0;
 }
 
 .session-row {

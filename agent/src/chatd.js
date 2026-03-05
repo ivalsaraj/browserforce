@@ -28,7 +28,6 @@ const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
 const MODEL_LIST_TIMEOUT_MS = 5000;
 const DEFAULT_REASONING_EFFORT = 'medium';
-const REQUIRED_PLUGINS = Object.freeze(['google-sheets']);
 const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
 const LOCAL_FILE_MAX_BYTES = 15 * 1024 * 1024;
 const LOCAL_IMAGE_CONTENT_TYPES = {
@@ -272,20 +271,6 @@ function normalizePluginCatalogRows(rows) {
     byName.set(name, {
       name,
       installed,
-      required: false,
-    });
-  }
-
-  for (const requiredName of REQUIRED_PLUGINS.map((value) => normalizePluginId(value)).filter(Boolean)) {
-    const existing = byName.get(requiredName);
-    if (existing) {
-      byName.set(requiredName, { ...existing, required: true });
-      continue;
-    }
-    byName.set(requiredName, {
-      name: requiredName,
-      installed: false,
-      required: true,
     });
   }
 
@@ -333,34 +318,13 @@ function hasInvalidEnabledPluginIds(input) {
   return false;
 }
 
-function mergeRequiredPlugins(enabledPlugins) {
-  const merged = normalizeEnabledPluginsList(enabledPlugins);
-  const seen = new Set(merged);
-  for (const rawRequired of REQUIRED_PLUGINS) {
-    const required = normalizePluginId(rawRequired);
-    if (!required || seen.has(required)) continue;
-    merged.push(required);
-    seen.add(required);
-  }
-  return merged;
-}
-
-function applySessionPluginDefaults(session) {
-  if (!session || typeof session !== 'object') return session;
-  return {
-    ...session,
-    enabledPlugins: mergeRequiredPlugins(session.enabledPlugins),
-  };
-}
-
 function buildPluginPromptContext(enabledPlugins) {
-  const normalized = mergeRequiredPlugins(enabledPlugins);
+  const normalized = normalizeEnabledPluginsList(enabledPlugins);
   if (!normalized.length) return '';
-  const requiredSet = new Set(REQUIRED_PLUGINS.map((value) => normalizePluginId(value)).filter(Boolean));
   const lines = [
     'Enabled BrowserForce plugins:',
-    ...normalized.map((pluginName) => requiredSet.has(pluginName) ? `- ${pluginName} (required)` : `- ${pluginName}`),
-    'Use pluginCatalog() to confirm available plugin metadata and pluginHelp(name, section?) when details are needed.',
+    ...normalized.map((pluginName) => `- ${pluginName}`),
+    'If this request appears to match one of these plugins, call pluginHelp(name, section?) for that plugin before using its helpers.',
   ];
   return lines.join('\n');
 }
@@ -1468,7 +1432,7 @@ export async function startChatd(opts = {}) {
       }
 
       if (url.pathname === '/v1/sessions' && req.method === 'GET') {
-        const sessions = (await listSessions({ storageRoot })).map(applySessionPluginDefaults);
+        const sessions = await listSessions({ storageRoot });
         json(res, 200, { sessions });
         return;
       }
@@ -1481,7 +1445,7 @@ export async function startChatd(opts = {}) {
 
       if (url.pathname === '/v1/plugins' && req.method === 'GET') {
         const plugins = normalizePluginCatalogRows(await pluginFetcher());
-        json(res, 200, { plugins, requiredPlugins: REQUIRED_PLUGINS });
+        json(res, 200, { plugins });
         return;
       }
 
@@ -1500,7 +1464,7 @@ export async function startChatd(opts = {}) {
             reasoningEffort: body.reasoningEffort ?? null,
             storageRoot,
           });
-          json(res, 201, applySessionPluginDefaults(session));
+          json(res, 201, session);
         } catch (error) {
           json(res, 400, { error: error?.message || 'Invalid session body' });
         }
@@ -1519,7 +1483,7 @@ export async function startChatd(opts = {}) {
           json(res, 404, { error: 'Session not found' });
           return;
         }
-        json(res, 200, applySessionPluginDefaults(session));
+        json(res, 200, session);
         return;
       }
 
@@ -1551,7 +1515,7 @@ export async function startChatd(opts = {}) {
             ...(Object.prototype.hasOwnProperty.call(body, 'model') ? { model: body.model } : {}),
             ...(Object.prototype.hasOwnProperty.call(body, 'reasoningEffort') ? { reasoningEffort: body.reasoningEffort } : {}),
             ...(Object.prototype.hasOwnProperty.call(body, 'enabledPlugins')
-              ? { enabledPlugins: mergeRequiredPlugins(body.enabledPlugins) }
+              ? { enabledPlugins: normalizeEnabledPluginsList(body.enabledPlugins) }
               : {}),
           };
           const updated = await updateSession({
@@ -1563,7 +1527,7 @@ export async function startChatd(opts = {}) {
             json(res, 404, { error: 'Session not found' });
             return;
           }
-          json(res, 200, applySessionPluginDefaults(updated));
+          json(res, 200, updated);
         } catch (error) {
           json(res, 400, { error: error?.message || 'Invalid session patch' });
         }
@@ -1663,7 +1627,7 @@ export async function startChatd(opts = {}) {
           return;
         }
         const browserContext = normalizeBrowserContext(body?.browserContext);
-        const enabledPlugins = mergeRequiredPlugins(session.enabledPlugins);
+        const enabledPlugins = normalizeEnabledPluginsList(session.enabledPlugins);
         const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
           ? session.providerState.codex.sessionId
           : null;

@@ -77,7 +77,7 @@ test('GET /v1/models falls back to configured model when model fetcher fails', a
   }
 });
 
-test('GET /v1/plugins returns plugin catalog with required plugin metadata', async () => {
+test('GET /v1/plugins returns plugin catalog', async () => {
   const daemon = await startChatd({
     port: 0,
     writeChatdUrl: false,
@@ -92,12 +92,11 @@ test('GET /v1/plugins returns plugin catalog with required plugin metadata', asy
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(Array.isArray(body.plugins), true);
-    assert.deepEqual(body.requiredPlugins, ['google-sheets']);
+    assert.equal(Object.prototype.hasOwnProperty.call(body, 'requiredPlugins'), false);
 
     const byName = Object.fromEntries((body.plugins || []).map((row) => [row.name, row]));
     assert.equal(byName.highlight?.installed, true);
-    assert.equal(byName.highlight?.required, false);
-    assert.equal(byName['google-sheets']?.required, true);
+    assert.equal(typeof byName.highlight?.required, 'undefined');
   } finally {
     await daemon.stop();
   }
@@ -386,7 +385,7 @@ test('PATCH /v1/sessions rejects invalid reasoning effort values', async () => {
   }
 });
 
-test('PATCH /v1/sessions enforces required google-sheets plugin', async () => {
+test('PATCH /v1/sessions persists selected enabled plugins', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
     const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
@@ -408,7 +407,7 @@ test('PATCH /v1/sessions enforces required google-sheets plugin', async () => {
     });
     assert.equal(patched.status, 200);
     const body = await patched.json();
-    assert.deepEqual(body.enabledPlugins, ['highlight', 'google-sheets']);
+    assert.deepEqual(body.enabledPlugins, ['highlight']);
   } finally {
     await daemon.stop();
   }
@@ -442,7 +441,7 @@ test('PATCH /v1/sessions rejects invalid enabled plugin ids', async () => {
   }
 });
 
-test('POST /v1/runs injects required plugin context for unpatched sessions', async () => {
+test('POST /v1/runs does not inject plugin context when no plugins are enabled', async () => {
   const seenRuns = [];
   const daemon = await startChatd({
     port: 0,
@@ -461,7 +460,7 @@ test('POST /v1/runs injects required plugin context for unpatched sessions', asy
         'content-type': 'application/json',
         authorization: `Bearer ${daemon.token}`,
       },
-      body: JSON.stringify({ title: 'Required plugins only' }),
+      body: JSON.stringify({ title: 'No plugins enabled' }),
     }).then((res) => res.json());
 
     const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
@@ -476,8 +475,7 @@ test('POST /v1/runs injects required plugin context for unpatched sessions', asy
     await new Promise((resolve) => setTimeout(resolve, 60));
 
     const prompt = seenRuns.at(-1)?.message || '';
-    assert.match(prompt, /Enabled BrowserForce plugins:/);
-    assert.match(prompt, /google-sheets/);
+    assert.doesNotMatch(prompt, /Enabled BrowserForce plugins:/);
   } finally {
     await daemon.stop();
   }
@@ -976,14 +974,20 @@ test('POST /v1/runs uses one-line AGENTS reminder on resume runs', async () => {
     assert.match(seenRuns[0].message || '', /System instructions from AGENTS\.md/);
     assert.match(seenRuns[0].message || '', /Always be explicit\./);
     assert.match(seenRuns[0].message || '', /Enabled BrowserForce plugins:/);
-    assert.match(seenRuns[0].message || '', /google-sheets/);
     assert.match(seenRuns[0].message || '', /highlight/);
+    assert.match(
+      seenRuns[0].message || '',
+      /If this request appears to match one of these plugins, call pluginHelp\(name, section\?\) for that plugin before using its helpers\./
+    );
     assert.equal(seenRuns[1].resumeSessionId, providerSessionId);
     assert.match(seenRuns[1].message || '', /System reminder: follow the previously established system instructions for this thread\./);
     assert.doesNotMatch(seenRuns[1].message || '', /Always be explicit\./);
     assert.match(seenRuns[1].message || '', /Enabled BrowserForce plugins:/);
-    assert.match(seenRuns[1].message || '', /google-sheets/);
     assert.match(seenRuns[1].message || '', /highlight/);
+    assert.match(
+      seenRuns[1].message || '',
+      /If this request appears to match one of these plugins, call pluginHelp\(name, section\?\) for that plugin before using its helpers\./
+    );
   } finally {
     await daemon.stop();
     rmSync(codexCwd, { recursive: true, force: true });
