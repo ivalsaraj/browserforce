@@ -110,6 +110,9 @@ Optional external config:
   - Overrides `chatd-url.json` path.
 - `BF_CHATD_LOCK_PATH`
   - Overrides lock file path used by `browserforce agent start|status|stop`.
+- `BF_CHATD_CODEX_CWD`
+  - Working directory for `codex exec --json` runs. Defaults to `~/.browserforce/agent-cwd` when started via `browserforce agent start`.
+  - `agent start` syncs a managed BrowserForce `AGENTS.md` into this directory (unless a custom unmanaged `AGENTS.md` is already present).
 - `BF_CHATD_CODEX_COMMAND`
   - Codex binary/command used by chatd (default `codex`).
 - `BF_CHATD_MODEL_LIST_TIMEOUT_MS`
