@@ -299,7 +299,7 @@ test('runCode uses execute-scope console shim instead of global console', async 
 
   try {
     const result = await runCode(
-      'console.log("hello", { ok: true }); console.error("warn"); return state.__execConsoleLogs;',
+      'console.log("hello", { ok: true }); console.error("warn"); return getExecConsoleLogs({ count: 10 });',
       ctx,
       5000,
     );
@@ -528,6 +528,8 @@ test('buildExecContext exposes screenshot and content helpers in execute scope',
   const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
   assert.equal(typeof ctx.console, 'object');
   assert.equal(typeof ctx.console.log, 'function');
+  assert.equal(typeof ctx.getExecConsoleLogs, 'function');
+  assert.equal(typeof ctx.clearExecConsoleLogs, 'function');
   assert.equal(typeof ctx.screenshotWithAccessibilityLabels, 'function');
   assert.equal(typeof ctx.cleanHTML, 'function');
   assert.equal(typeof ctx.pageMarkdown, 'function');

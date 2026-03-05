@@ -608,6 +608,19 @@ export function buildExecContext(
     },
   });
 
+  const getExecConsoleLogs = ({ count } = {}) => {
+    const logs = Array.isArray(execConsoleLogs) ? execConsoleLogs : [];
+    if (!Number.isInteger(count) || count <= 0) {
+      return logs.map((entry) => ({ ...entry }));
+    }
+    return logs.slice(-count).map((entry) => ({ ...entry }));
+  };
+
+  const clearExecConsoleLogs = () => {
+    if (!Array.isArray(execConsoleLogs)) return;
+    execConsoleLogs.length = 0;
+  };
+
   const activePage = () => {
     if (userState.page && !userState.page.isClosed()) return userState.page;
     if (defaultPage && !defaultPage.isClosed()) return defaultPage;
@@ -862,6 +875,8 @@ export function buildExecContext(
     'pluginCatalog',
     'pluginHelp',
     'console',
+    'getExecConsoleLogs',
+    'clearExecConsoleLogs',
     'fetch',
     'URL',
     'URLSearchParams',
@@ -895,6 +910,8 @@ export function buildExecContext(
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,
     console: execConsole,
+    getExecConsoleLogs,
+    clearExecConsoleLogs,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,
   };
