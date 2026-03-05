@@ -418,6 +418,8 @@ Port/auth bootstrap:
 
 - `agent start` picks a loopback port. If `BF_CHATD_PORT` is set and free, it is used.
 - If that port is unavailable, BrowserForce falls back to the first free port in `19280-19320`.
+- By default, `agent start` runs Codex in `~/.browserforce/agent-cwd` (override with `BF_CHATD_CODEX_CWD`) so project-specific `AGENTS.md` does not leak into side-panel runs.
+- `agent start` syncs a managed BrowserForce `AGENTS.md` into that cwd. If you want full manual control, replace that file and remove the managed header line.
 - The daemon writes `~/.browserforce/chatd-url.json` (`{ port, token }`, mode `0600`).
 - Side-panel JS reads relay URL from extension storage, calls relay `GET /chatd-url` (extension-origin gated), then connects directly to chatd with Bearer auth.
 
