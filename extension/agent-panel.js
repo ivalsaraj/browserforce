@@ -1240,8 +1240,10 @@ function renderRunTimeline(run, fallbackText = '') {
 
       const bodyHtml = expanded
         ? `
-          <div class="reasoning-body${isActiveReasoning ? ' streaming' : ''}" data-reasoning-streaming="${isActiveReasoning ? 'true' : 'false'}">
-            <div class="reasoning-body-text">${renderInlineContent(bodyTextRaw).replace(/\n/g, '<br>')}</div>
+          <div class="reasoning-body-shell">
+            <div class="reasoning-body${isActiveReasoning ? ' streaming' : ''}" data-reasoning-streaming="${isActiveReasoning ? 'true' : 'false'}">
+              <div class="reasoning-body-text">${renderInlineContent(bodyTextRaw).replace(/\n/g, '<br>')}</div>
+            </div>
           </div>
         `
         : '';
@@ -1291,8 +1293,10 @@ function renderRunTimeline(run, fallbackText = '') {
       ? (
         isExecuteStep
           ? `
-            <div class="reasoning-body execute-details-body">
-              <div class="reasoning-body-text execute-details-text">${escapeHtml(executeDetailsText)}</div>
+            <div class="reasoning-body-shell execute-details-body-shell">
+              <div class="reasoning-body execute-details-body">
+                <div class="reasoning-body-text execute-details-text">${escapeHtml(executeDetailsText)}</div>
+              </div>
             </div>
           `
           : `<ul class="step-details">${detailsHtml}</ul>`
@@ -1414,12 +1418,14 @@ function pinStreamingReasoningBodiesToLatest() {
 
 function syncReasoningBodyFade(node) {
   if (!(node instanceof HTMLElement)) return;
+  const shell = node.closest('.reasoning-body-shell');
+  if (!(shell instanceof HTMLElement)) return;
   const shouldShowFade = shouldShowBottomScrollFade({
     scrollTop: node.scrollTop,
     scrollHeight: node.scrollHeight,
     clientHeight: node.clientHeight,
   });
-  node.classList.toggle('show-bottom-fade', shouldShowFade);
+  shell.classList.toggle('show-bottom-fade', shouldShowFade);
 }
 
 function refreshReasoningBodyFades() {

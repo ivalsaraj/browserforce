@@ -98,7 +98,7 @@ test('reasoning timeline uses icon-led blocks with fixed-height commentary body'
   assert.match(css, /\.reasoning-body/);
   assert.match(css, /padding:\s*2px 8px/);
   assert.match(css, /max-height:\s*74px/);
-  assert.match(css, /\.reasoning-body\.show-bottom-fade::after/);
+  assert.match(css, /\.reasoning-body-shell\.show-bottom-fade::after/);
   assert.match(css, /\.reasoning-body-text[\s\S]*color:\s*#8f8a82/);
   assert.match(css, /\.execute-details-text[\s\S]*white-space:\s*pre-wrap/);
   assert.doesNotMatch(css, /\.reasoning-body\s*\{[^}]*\n\s+border:\s*1px\s+solid\s+var\(--line-soft\);/);

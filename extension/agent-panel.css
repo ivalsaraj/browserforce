@@ -773,29 +773,32 @@ body {
   letter-spacing: 0.005em;
 }
 
-.reasoning-body {
+.reasoning-body-shell {
   margin-top: 6px;
+  position: relative;
+}
+
+.reasoning-body {
   padding: 2px 8px;
   max-height: 74px;
   overflow-y: auto;
   overflow-x: hidden;
-  position: relative;
 }
 
-.reasoning-body::after {
+.reasoning-body-shell::after {
   content: '';
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 8px;
+  left: 8px;
+  right: 8px;
+  bottom: 2px;
+  height: 14px;
   pointer-events: none;
-  background: linear-gradient(to top, #fff 0%, rgba(255, 255, 255, 0) 100%);
+  background: linear-gradient(to top, #e3ddd2 0%, rgba(227, 221, 210, 0) 100%);
   opacity: 0;
   transition: opacity 120ms ease-out;
 }
 
-.reasoning-body.show-bottom-fade::after {
+.reasoning-body-shell.show-bottom-fade::after {
   opacity: 1;
 }
 
