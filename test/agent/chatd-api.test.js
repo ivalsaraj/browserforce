@@ -618,6 +618,129 @@ test('POST /v1/runs includes active tab context in runExecutor prompt', async ()
   }
 });
 
+test('POST /v1/runs injects AGENTS.md content as system instructions', async () => {
+  const codexCwd = mkdtempSync(join(tmpdir(), 'bf-chatd-codex-cwd-'));
+  writeFileSync(join(codexCwd, 'AGENTS.md'), '# Agent Rules\nAlways be explicit.', 'utf8');
+
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    codexCwd,
+    runExecutor: ({ runId, sessionId, message, onExit }) => {
+      seenRuns.push({ runId, sessionId, message });
+      setTimeout(() => onExit({ code: 0 }), 5);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'agents-instructions' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        message: 'what should we do next?',
+      }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const prompt = seenRuns.at(-1)?.message || '';
+    assert.match(prompt, /System instructions from AGENTS\.md/);
+    assert.match(prompt, /Always be explicit\./);
+    assert.match(prompt, /what should we do next\?/i);
+  } finally {
+    await daemon.stop();
+    rmSync(codexCwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /v1/runs uses one-line AGENTS reminder on resume runs', async () => {
+  const codexCwd = mkdtempSync(join(tmpdir(), 'bf-chatd-codex-cwd-'));
+  writeFileSync(join(codexCwd, 'AGENTS.md'), '# Agent Rules\nAlways be explicit.', 'utf8');
+  const providerSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';
+
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    codexCwd,
+    runExecutor: ({ runId, sessionId, message, resumeSessionId, onEvent, onExit }) => {
+      seenRuns.push({ runId, sessionId, message, resumeSessionId: resumeSessionId || null });
+      setTimeout(() => {
+        onEvent({
+          event: 'run.provider_session',
+          runId,
+          sessionId,
+          payload: { provider: 'codex', sessionId: providerSessionId },
+        });
+      }, 5);
+      setTimeout(() => {
+        onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'ok' } });
+      }, 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'agents-reminder' }),
+    }).then((res) => res.json());
+
+    const runOneRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'first' }),
+    });
+    assert.equal(runOneRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const runTwoRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'second' }),
+    });
+    assert.equal(runTwoRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(seenRuns.length >= 2, true);
+    assert.equal(seenRuns[0].resumeSessionId, null);
+    assert.match(seenRuns[0].message || '', /System instructions from AGENTS\.md/);
+    assert.match(seenRuns[0].message || '', /Always be explicit\./);
+    assert.equal(seenRuns[1].resumeSessionId, providerSessionId);
+    assert.match(seenRuns[1].message || '', /System reminder: follow the previously established system instructions for this thread\./);
+    assert.doesNotMatch(seenRuns[1].message || '', /Always be explicit\./);
+  } finally {
+    await daemon.stop();
+    rmSync(codexCwd, { recursive: true, force: true });
+  }
+});
+
 test('POST /v1/runs reuses codex provider session id on second turn', async () => {
   const observed = [];
   const providerSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';

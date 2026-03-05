@@ -942,6 +942,43 @@ function buildRunPrompt({ message, browserContext }) {
   return lines.join('\n');
 }
 
+async function loadAgentsInstructions(codexCwd) {
+  const base = String(codexCwd || '').trim();
+  if (!base) return '';
+  const path = join(base, 'AGENTS.md');
+  try {
+    const raw = await fs.readFile(path, 'utf8');
+    return String(raw || '').trim();
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return '';
+    throw error;
+  }
+}
+
+function buildPromptWithAgents({ message, browserContext, agentsInstructions }) {
+  const prompt = buildRunPrompt({ message, browserContext });
+  const agents = String(agentsInstructions || '').trim();
+  if (!agents) return prompt;
+  return [
+    'System instructions from AGENTS.md (highest priority):',
+    '',
+    agents,
+    '',
+    '---',
+    '',
+    prompt,
+  ].join('\n');
+}
+
+function buildPromptWithAgentsReminder({ message, browserContext }) {
+  const prompt = buildRunPrompt({ message, browserContext });
+  return [
+    'System reminder: follow the previously established system instructions for this thread.',
+    '',
+    prompt,
+  ].join('\n');
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -1000,8 +1037,9 @@ export async function startChatd(opts = {}) {
   const token = opts.token || process.env.BF_CHATD_TOKEN || randomBytes(32).toString('base64url');
   const chatdUrlPath = opts.chatdUrlPath || process.env.BF_CHATD_URL_PATH || CHATD_URL_PATH;
   const envCodexCwd = String(process.env.BF_CHATD_CODEX_CWD || '').trim();
+  const codexCwd = opts.codexCwd || envCodexCwd || process.cwd();
   const runExecutor = opts.runExecutor || createDefaultRunExecutor({
-    codexCwd: opts.codexCwd || envCodexCwd || process.cwd(),
+    codexCwd,
   });
   const modelFetcher = opts.modelFetcher || (() => fetchCodexModelCatalog({
     command: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
@@ -1315,7 +1353,16 @@ export async function startChatd(opts = {}) {
           return;
         }
         const browserContext = normalizeBrowserContext(body?.browserContext);
-        const promptMessage = buildRunPrompt({ message, browserContext });
+        const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
+          ? session.providerState.codex.sessionId
+          : null;
+        const promptMessage = resumeSessionId
+          ? buildPromptWithAgentsReminder({ message, browserContext })
+          : buildPromptWithAgents({
+            message,
+            browserContext,
+            agentsInstructions: await loadAgentsInstructions(codexCwd),
+          });
         const runReasoningEffort = resolveEffectiveReasoningEffort(
           session.reasoningEffort,
           configuredReasoningEffort,
@@ -1334,9 +1381,7 @@ export async function startChatd(opts = {}) {
           queue: Promise.resolve(),
           lastError: null,
           resumeRetryAttempted: false,
-          resumeSessionId: isValidSessionId(session?.providerState?.codex?.sessionId || '')
-            ? session.providerState.codex.sessionId
-            : null,
+          resumeSessionId,
           reasoningEffort: runReasoningEffort,
         };
 
