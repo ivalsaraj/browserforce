@@ -513,6 +513,40 @@ function normalizeStepDetails(details, label = '') {
   return lines;
 }
 
+function stripInlineMarkdown(text) {
+  return String(text || '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/^>\s*/gm, '')
+    .trim();
+}
+
+function commentaryHeadingFromDelta(delta) {
+  const source = String(delta || '').trim();
+  if (!source) return '';
+  const firstLine = source
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+  if (!firstLine) return '';
+
+  let heading = stripInlineMarkdown(firstLine)
+    .replace(/^[\-*•\d.)\s]+/, '')
+    .replace(/^\s*(?:i['’]?m|i am|i['’]?ll|i will)\s+/i, '')
+    .replace(/^(?:next|now)\s*,?\s+/i, '')
+    .replace(/[.?!:;,\s]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!heading) return '';
+  if (/^(browserforce|recovery action|error[:\s])/i.test(heading)) return '';
+  if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+  return heading.charAt(0).toUpperCase() + heading.slice(1);
+}
+
 function normalizeRunStep(step) {
   if (!step || typeof step !== 'object') return null;
   const label = trimStepLabel(step.label);
@@ -643,6 +677,23 @@ function pushRunTimelineEntry(run, entry) {
           return;
         }
       }
+      if (!next.key && String(next.kind || '') === 'reasoning') {
+        for (let idx = timeline.length - 1; idx >= 0; idx -= 1) {
+          const item = timeline[idx];
+          if (!item) continue;
+          if (item.type === 'text') continue;
+          if (item.type !== 'step') break;
+          if (String(item.kind || '') !== 'reasoning') break;
+          if (String(item.label || '') !== String(next.label || '')) break;
+          timeline[idx] = {
+            ...item,
+            ...next,
+            details: next.details && next.details.length > 0 ? next.details : item.details,
+          };
+          run.timeline = timeline;
+          return;
+        }
+      }
       const last = timeline[timeline.length - 1];
       if (
         last
@@ -703,6 +754,14 @@ function stepLabelForToolEvent(evt) {
     return toolLabel || 'Tool call completed';
   }
   if (evt.event === 'tool.delta') {
+    if (String(payload.type || '').toLowerCase() === 'reasoning') {
+      const heading = commentaryHeadingFromDelta(firstString([
+        payload.text,
+        payload.message,
+        payload.delta,
+      ]));
+      return heading || 'Reasoning';
+    }
     return normalizeToolLabel(firstString([
       payload.text,
       payload.message,
@@ -719,6 +778,7 @@ function stepLabelForToolEvent(evt) {
 
 function stepDetailsForToolEvent(evt, label) {
   const payload = evt?.payload || {};
+  if (String(payload.type || '').toLowerCase() === 'reasoning') return [];
   return normalizeStepDetails([
     payload.details,
     payload.text,

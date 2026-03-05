@@ -343,6 +343,23 @@ function pushTimelineEntry(run, entry) {
       }
     }
 
+    if (!candidate.key && String(candidate.kind || '') === 'reasoning') {
+      for (let idx = timeline.length - 1; idx >= 0; idx -= 1) {
+        const item = timeline[idx];
+        if (!item) continue;
+        if (item.type === 'text') continue;
+        if (item.type !== 'step') break;
+        if (String(item.kind || '') !== 'reasoning') break;
+        if (String(item.label || '') !== String(candidate.label || '')) break;
+        timeline[idx] = {
+          ...item,
+          ...candidate,
+          details: candidate.details && candidate.details.length > 0 ? candidate.details : item.details,
+        };
+        return timeline;
+      }
+    }
+
     const last = timeline[timeline.length - 1];
     if (
       last
@@ -440,6 +457,14 @@ function stepLabelForToolEvent(evt) {
     return toolLabel || 'Tool call completed';
   }
   if (evt.event === 'tool.delta') {
+    if (String(payload.type || '').toLowerCase() === 'reasoning') {
+      const heading = commentaryHeadingFromDelta(firstString([
+        payload.text,
+        payload.message,
+        payload.delta,
+      ]));
+      return heading || 'Reasoning';
+    }
     return normalizeToolLabel(firstString([
       payload.text,
       payload.message,
@@ -471,6 +496,7 @@ function stepKeyForToolEvent(evt) {
 
 function stepDetailsForToolEvent(evt, label) {
   const payload = evt?.payload || {};
+  if (String(payload.type || '').toLowerCase() === 'reasoning') return [];
   return normalizeStepDetails([
     payload.details,
     payload.text,
