@@ -630,6 +630,29 @@ function normalizeUsagePayload(payload) {
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
+function normalizeProviderKey(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || null;
+}
+
+function usageFromProviderState(providerState, provider) {
+  if (!providerState || typeof providerState !== 'object') return null;
+  const keys = [];
+  const preferred = normalizeProviderKey(provider);
+  if (preferred) keys.push(preferred);
+  if (!keys.includes('codex')) keys.push('codex');
+
+  for (const key of keys) {
+    const usage = normalizeUsagePayload(providerState?.[key]?.latestUsage);
+    if (usage) return usage;
+  }
+
+  const legacyTopLevelUsage = normalizeUsagePayload(providerState.latestUsage);
+  if (legacyTopLevelUsage) return legacyTopLevelUsage;
+
+  return null;
+}
+
 function normalizeStoredStep(step) {
   return normalizeStep(step);
 }
@@ -700,7 +723,7 @@ export function reduceState(state = initialState, action = {}) {
   }
 
   if (action.type === 'session.metadata.loaded') {
-    const usage = normalizeUsagePayload(action.session?.providerState?.codex?.latestUsage);
+    const usage = usageFromProviderState(action.session?.providerState, action.session?.provider);
     if (!usage || !action.sessionId) return state;
     return {
       ...state,
@@ -934,7 +957,10 @@ export function applyEvent(state = initialState, evt = {}) {
   }
 
   if (evt.event === 'run.usage') {
-    const usage = normalizeUsagePayload(evt.payload);
+    const usagePayload = (evt?.payload?.usage && typeof evt.payload.usage === 'object')
+      ? evt.payload.usage
+      : evt.payload;
+    const usage = normalizeUsagePayload(usagePayload);
     if (!usage) return state;
     const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     return {

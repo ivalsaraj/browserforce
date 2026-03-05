@@ -13,6 +13,7 @@ test('agent panel has inline model and session selectors with popovers', () => {
   assert.match(html, /aria-label="New Session"/);
   assert.match(html, /id="bf-model-panel"/);
   assert.match(html, /id="bf-session-panel"/);
+  assert.match(html, /id="bf-provider-list"/);
   assert.match(html, /id="bf-model-list"/);
   assert.match(html, /id="bf-thinking-list"/);
   assert.match(html, /id="bf-switch-session-list"/);
@@ -109,4 +110,12 @@ test('startup error card action buttons have dedicated styling hooks', () => {
   assert.match(css, /\.empty-actions/);
   assert.match(css, /\.empty-action-btn/);
   assert.match(css, /\.empty-action-btn\.secondary/);
+});
+
+test('model popover includes provider selector and session patch flow for provider updates', () => {
+  assert.match(panelJs, /const providerListEl = document\.getElementById\('bf-provider-list'\)/);
+  assert.match(panelJs, /data-provider=/);
+  assert.match(panelJs, /async function updateActiveSessionProvider\(provider\)/);
+  assert.match(panelJs, /method:\s*'PATCH'/);
+  assert.match(panelJs, /JSON\.stringify\(\{\s*provider:\s*nextProvider\s*\}\)/);
 });
