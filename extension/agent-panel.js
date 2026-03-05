@@ -885,8 +885,10 @@ function shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReas
   if (!isLatest || !isRunningReasoning) return false;
   const runId = String(run?.runId || '').trim();
   if (!runId) return false;
-  const signature = `${String(entry?.key || '').trim()}::${String(entry?.label || '').trim()}`;
-  if (!signature || signature === '::') return false;
+  // Animate only when a new reasoning step appears. Re-animating on every
+  // label delta resets shimmer and can make the gradient look frozen mid-pass.
+  const signature = String(entry?.key || '').trim();
+  if (!signature) return false;
   const previous = state.latestReasoningTitleByRun[runId];
   if (previous === signature) return false;
   state.latestReasoningTitleByRun = {

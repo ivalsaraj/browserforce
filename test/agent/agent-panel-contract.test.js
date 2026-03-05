@@ -68,6 +68,7 @@ test('composer action buttons respect hidden attribute for send/stop swapping', 
 
 test('reasoning title rows use shimmer and enter transition treatment', () => {
   assert.match(panelJs, /shouldAnimateLatestReasoningTitle/);
+  assert.match(panelJs, /const signature = String\(entry\?\.key \|\| ''\)\.trim\(\);/);
   assert.match(panelJs, /title-label/);
   assert.match(panelJs, /shimmer-text/);
   assert.match(panelJs, /title-transition-in/);
