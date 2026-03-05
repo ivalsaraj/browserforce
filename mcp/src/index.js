@@ -303,6 +303,8 @@ Helpers:
   waitForPageLoad({ timeout? })      Smart load detection (filters analytics/ads, polls readyState).
   getLogs({ count? })                Browser console logs captured for current page.
   clearLogs()                        Clear captured console logs.
+  getExecConsoleLogs({ count? })     Execute-snippet console logs captured from console.* calls.
+  clearExecConsoleLogs()             Clear execute-snippet console logs.
   screenshotWithAccessibilityLabels({ selector?, interactiveOnly? })
                                      Vimium-style labeled screenshot + accessibility snapshot.
                                      Returns image with color-coded element labels (e1, e2...) and
@@ -460,6 +462,7 @@ Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 ✗ Don't navigate the user's existing tabs
 ✗ Don't screenshot to read text; use snapshot
 ✗ Don't use console.log()/console.error() in execute code; use return values, snapshot(), or getLogs() instead
+  If console.* was already used, inspect it with getExecConsoleLogs({ count }) instead of re-logging.
 ✗ Don't chain actions blindly without verification
 ✗ Don't use page.waitForTimeout() when a deterministic wait is available
 ✗ Don't use stale refs after DOM/navigation updates (stale locator refs cause false actions)
@@ -483,6 +486,8 @@ snapshot(options?) -> text accessibility tree with interactive refs; options.sho
 waitForPageLoad(options?) -> { success, readyState, pendingRequests, waitTimeMs, timedOut }
 getLogs(options?) -> browser console log entries
 clearLogs() -> clears captured logs for current page
+getExecConsoleLogs(options?) -> execute-snippet console logs captured from console.*
+clearExecConsoleLogs() -> clears captured execute-snippet console logs
 state -> persistent across execute calls; cleared on reset`;
 
 function registerExecuteTool(skillAppendix = '') {
@@ -490,7 +495,7 @@ function registerExecuteTool(skillAppendix = '') {
     'execute',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/getCDPSession/waitForPageLoad/getLogs/cleanHTML/pageMarkdown in scope'),
+      code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/getCDPSession/waitForPageLoad/getLogs/getExecConsoleLogs/cleanHTML/pageMarkdown in scope'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
     },
     async ({ code, timeout = 30000 }) => {

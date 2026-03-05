@@ -121,6 +121,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('screenshotWithAccessibilityLabels'), 'should mention screenshotWithAccessibilityLabels helper');
     assert.ok(promptBlock.includes('refToLocator({ ref })'), 'should mention refToLocator helper usage');
     assert.ok(promptBlock.includes('getCDPSession({ page })'), 'should mention relay-safe getCDPSession helper usage');
+    assert.ok(promptBlock.includes('getExecConsoleLogs'), 'should mention execute console log retrieval helper');
     assert.ok(promptBlock.includes('cleanHTML'), 'should mention cleanHTML helper');
     assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
     assert.ok(promptBlock.includes('pluginCatalog()'), 'should mention pluginCatalog built-in helper');
@@ -145,6 +146,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('login popups'), 'should include login popup handling');
     assert.ok(promptBlock.includes('cookie') || promptBlock.includes('consent'), 'should include consent modal handling');
     assert.ok(promptBlock.includes("Don't use console.log()/console.error()"), 'should forbid console logging in execute snippets');
+    assert.ok(promptBlock.includes('If console.* was already used'), 'should include guidance for reading captured execute logs');
     assert.ok(promptBlock.includes('stale locator'), 'should include stale locator warning');
     assert.ok(promptBlock.includes('snapshot({ showDiffSinceLastCall'), 'should include diff usage guidance');
     assert.ok(promptBlock.includes('options.showDiffSinceLastCall'), 'should document snapshot diff toggle in API reference');
