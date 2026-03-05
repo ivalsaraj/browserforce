@@ -810,14 +810,31 @@ export function applyEvent(state = initialState, evt = {}) {
       status: 'failed',
       label: `Failed: ${error}`,
     };
+    const timeline = pushTimelineEntry(run, { type: 'step', ...step });
+    const currentMessages = state.messagesBySession[evt.sessionId] || [];
+    const hasStoredFinal = currentMessages.some(
+      (message) => message.runId === evt.runId && message.role === 'assistant',
+    );
+    const nextMessages = (!hasStoredFinal && (timeline.length > 0 || error))
+      ? [...currentMessages, {
+        role: 'assistant',
+        text: '',
+        runId: evt.runId,
+        timeline,
+      }]
+      : currentMessages;
     return {
       ...state,
+      messagesBySession: {
+        ...state.messagesBySession,
+        [evt.sessionId]: nextMessages,
+      },
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
         done: true,
         error,
         steps: pushStep(run, step),
-        timeline: pushTimelineEntry(run, { type: 'step', ...step }),
+        timeline,
       }),
     };
   }
