@@ -10,3 +10,8 @@ pnpm-debug.log*
 docs/plans/*
 .superset
 AGENTS.local.md
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
