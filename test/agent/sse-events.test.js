@@ -63,6 +63,34 @@ test('tool and reasoning events are tracked as steps', () => {
   assert.equal(s4.runs.r1.steps.find((step) => /fetch/i.test(step?.label || ''))?.status, 'done');
 });
 
+test('reasoning tool deltas use heading-style labels and collapse duplicates across commentary text', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'chat.commentary',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { delta: 'I’m checking the same BUCKS Settings tab again now.' },
+  });
+  const s3 = applyEvent(s2, {
+    event: 'tool.delta',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { type: 'reasoning', text: 'I’m checking the same BUCKS Settings tab again now.' },
+  });
+
+  const steps = s3.runs.r1.steps || [];
+  const timeline = s3.runs.r1.timeline || [];
+  const reasoningSteps = steps.filter((item) => item?.kind === 'reasoning');
+  const timelineReasoningSteps = timeline.filter((item) => item?.type === 'step' && item?.kind === 'reasoning');
+
+  assert.equal(reasoningSteps.length, 1);
+  assert.equal(timelineReasoningSteps.length, 1);
+  assert.match(reasoningSteps[0]?.label || '', /^Checking the same BUCKS Settings tab again now$/);
+  assert.equal(timeline.length, 2);
+  assert.equal(timeline[0]?.type, 'step');
+  assert.equal(timeline[1]?.type, 'text');
+});
+
 test('chat and tool events preserve inline timeline order', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, { event: 'chat.delta', runId: 'r1', sessionId: 's1', payload: { delta: 'First chunk. ' } });
