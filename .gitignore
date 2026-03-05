@@ -8,10 +8,7 @@ node_modules/
 pnpm-debug.log*
 .worktrees/
 docs/plans/*
-docs/INDEX.md
-docs/critical-patterns.md
-docs/knowledge*.md
-docs/timeline*.md
+knowledge/
 .superset
 AGENTS.local.md
 .env.*
