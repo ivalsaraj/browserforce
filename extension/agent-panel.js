@@ -167,7 +167,7 @@ function syncQueuedMessageRow() {
   queuedDeleteBtn.disabled = inFlight;
 }
 
-async function sendQueuedMessageNow({ sessionId = state.value.activeSessionId, abortActiveRun = false } = {}) {
+async function sendQueuedMessageNow({ sessionId = state.value.activeSessionId } = {}) {
   if (!sessionId || sessionId !== state.value.activeSessionId) return false;
   const queuedText = getQueuedMessage(sessionId);
   if (!queuedText || isQueuedSendInFlight(sessionId)) return false;
@@ -177,9 +177,6 @@ async function sendQueuedMessageNow({ sessionId = state.value.activeSessionId, a
   syncQueuedMessageRow();
 
   try {
-    if (abortActiveRun && isActiveRunInProgress()) {
-      await stopRun().catch(() => {});
-    }
     await sendMessage(queuedText);
     return true;
   } catch (error) {
@@ -2288,7 +2285,7 @@ if (queuedSteerBtn) {
   queuedSteerBtn.addEventListener('click', () => {
     const sessionId = state.value.activeSessionId;
     if (!sessionId) return;
-    sendQueuedMessageNow({ sessionId, abortActiveRun: true }).catch(() => {});
+    sendQueuedMessageNow({ sessionId }).catch(() => {});
   });
 }
 

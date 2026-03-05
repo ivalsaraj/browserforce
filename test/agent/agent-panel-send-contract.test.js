@@ -228,7 +228,8 @@ test('terminal run events trigger queued follow-up auto-send once', () => {
 
 test('queued row actions support steer-now and delete', () => {
   assert.match(js, /queuedSteerBtn\.addEventListener\('click'/);
-  assert.match(js, /sendQueuedMessageNow\(\{ sessionId, abortActiveRun: true \}\)\.catch/);
+  assert.match(js, /sendQueuedMessageNow\(\{ sessionId \}\)\.catch/);
+  assert.doesNotMatch(js, /sendQueuedMessageNow\(\{ sessionId, abortActiveRun: true \}\)\.catch/);
   assert.match(js, /queuedDeleteBtn\.addEventListener\('click'/);
   assert.match(js, /clearQueuedMessage\(sessionId\)/);
 });
