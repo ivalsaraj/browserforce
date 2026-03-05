@@ -230,6 +230,11 @@ test('run.error appends a final failed step', () => {
   const last = s2.runs.r1.steps.at(-1);
   assert.equal(last.status, 'failed');
   assert.match(last.label, /boom/);
+  const message = s2.messagesBySession.s1?.at(-1);
+  assert.equal(message?.role, 'assistant');
+  assert.equal(message?.runId, 'r1');
+  assert.equal(Array.isArray(message?.timeline), true);
+  assert.equal(message.timeline.some((item) => item.type === 'step' && item.status === 'failed'), true);
 });
 
 test('run.event is converted into a visible in-flight step', () => {

@@ -268,6 +268,17 @@ function dispatch(action) {
 
 function applyIncomingEvent(evt) {
   state.value = applyEvent(state.value, evt);
+  const isActiveSessionEvent = evt?.sessionId && evt.sessionId === state.value.activeSessionId;
+  if (isActiveSessionEvent && evt?.event === 'run.started') {
+    setStatus('ready', 'Ready');
+  }
+  if (isActiveSessionEvent && evt?.event === 'run.error') {
+    const errorText = evt?.payload?.error || 'Run failed';
+    setStatus('error', `Run failed: ${errorText}`);
+  }
+  if (isActiveSessionEvent && (evt?.event === 'chat.final' || evt?.event === 'run.aborted')) {
+    setStatus('ready', 'Ready');
+  }
   if (evt?.event === 'run.started' && evt.sessionId && evt.runId) {
     state.currentRunBySession = assignSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
   }
