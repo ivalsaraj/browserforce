@@ -144,6 +144,7 @@ describe('Tool Definitions', () => {
     assert.ok(promptBlock.includes('Selector priority'), 'should include selector ranking guidance');
     assert.ok(promptBlock.includes('login popups'), 'should include login popup handling');
     assert.ok(promptBlock.includes('cookie') || promptBlock.includes('consent'), 'should include consent modal handling');
+    assert.ok(promptBlock.includes("Don't use console.log()/console.error()"), 'should forbid console logging in execute snippets');
     assert.ok(promptBlock.includes('stale locator'), 'should include stale locator warning');
     assert.ok(promptBlock.includes('snapshot({ showDiffSinceLastCall'), 'should include diff usage guidance');
     assert.ok(promptBlock.includes('options.showDiffSinceLastCall'), 'should document snapshot diff toggle in API reference');

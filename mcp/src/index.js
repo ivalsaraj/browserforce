@@ -379,7 +379,7 @@ Each execute call should usually do one meaningful action and return verificatio
 Multi-step is allowed for read-only bulk extraction when actions are independent.
 
 Recommended cycle:
-  1) OBSERVE: console.log('URL:', state.page.url()); return await snapshot();
+  1) OBSERVE: return await snapshot();
   2) ACT: one action (click, type, navigate, submit)
   3) OBSERVE: snapshot() again; verify the expected change happened
 
@@ -459,6 +459,7 @@ Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 
 ✗ Don't navigate the user's existing tabs
 ✗ Don't screenshot to read text; use snapshot
+✗ Don't use console.log()/console.error() in execute code; use return values, snapshot(), or getLogs() instead
 ✗ Don't chain actions blindly without verification
 ✗ Don't use page.waitForTimeout() when a deterministic wait is available
 ✗ Don't use stale refs after DOM/navigation updates (stale locator refs cause false actions)
