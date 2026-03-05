@@ -247,6 +247,42 @@ test('execute tool step captures code details for collapsible rendering', () => 
   ]);
 });
 
+test('execute tool step keeps full script lines without detail truncation', () => {
+  const longLine = `const longValue = '${'x'.repeat(260)}';`;
+  const code = [
+    'const page = await snapshot();',
+    '',
+    'if (!page) {',
+    "  throw new Error('missing page');",
+    '}',
+    longLine,
+    'await waitForPageLoad();',
+    "return { ok: true, count: page.length };",
+    'const another = 1;',
+    'const another2 = 2;',
+    'const another3 = 3;',
+    'const another4 = 4;',
+  ].join('\n');
+
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'tool.started',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      name: 'execute',
+      args: { code },
+    },
+  });
+
+  const step = s2.runs.r1.steps.find((item) => /execute/i.test(item?.label || ''));
+  assert.equal(step?.label, 'BrowserForce:execute');
+  assert.equal(Array.isArray(step?.details), true);
+  assert.equal(step.details.length, 11);
+  assert.equal(step.details.includes(longLine), true);
+  assert.equal(step.details.some((line) => line.endsWith('...')), false);
+});
+
 test('chat.commentary text stays inline but does not pollute final assistant message text', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, {

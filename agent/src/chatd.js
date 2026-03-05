@@ -542,27 +542,38 @@ function detailsEqual(a, b) {
   return JSON.stringify(a || []) === JSON.stringify(b || []);
 }
 
-function normalizeStepDetails(details, label = '') {
+function normalizeStepDetails(details, label = '', options = {}) {
+  const resolvedOptions = options && typeof options === 'object' ? options : {};
+  const maxLines = Number.isFinite(resolvedOptions.maxLines) && resolvedOptions.maxLines > 0
+    ? Math.floor(resolvedOptions.maxLines)
+    : null;
+  const maxLineLength = Number.isFinite(resolvedOptions.maxLineLength) && resolvedOptions.maxLineLength > 3
+    ? Math.floor(resolvedOptions.maxLineLength)
+    : null;
+  const preserveIndentation = resolvedOptions.preserveIndentation === true;
+  const normalizedLabel = String(label || '').trim();
   const lines = [];
   const pushLine = (value) => {
     const parts = unwrapShellLcCommand(value)
       .split('\n')
-      .map((part) => part.trim())
-      .filter(Boolean);
+      .map((part) => (preserveIndentation ? part.replace(/\s+$/g, '') : part.trim()));
     for (const rawPart of parts) {
-      const part = rawPart.replace(/^[-*]\s+/, '').trim();
-      if (!part) continue;
-      if (part === label) continue;
+      const part = preserveIndentation ? rawPart : rawPart.replace(/^[-*]\s+/, '').trim();
+      const comparablePart = preserveIndentation ? part.trim() : part;
+      if (!comparablePart) continue;
+      if (normalizedLabel && comparablePart === normalizedLabel) continue;
       if (lines.includes(part)) continue;
-      lines.push(part.length > 220 ? `${part.slice(0, 217)}...` : part);
-      if (lines.length >= 8) return;
+      lines.push(maxLineLength && part.length > maxLineLength
+        ? `${part.slice(0, maxLineLength - 3)}...`
+        : part);
+      if (maxLines && lines.length >= maxLines) return;
     }
   };
   const visit = (value) => {
     if (value == null) return;
     if (Array.isArray(value)) {
       for (const item of value) {
-        if (lines.length >= 8) return;
+        if (maxLines && lines.length >= maxLines) return;
         visit(item);
       }
       return;
@@ -915,6 +926,7 @@ function stepLabelForToolEvent(evt) {
 function stepDetailsForToolEvent(evt, label) {
   const payload = evt?.payload || {};
   if (String(payload.type || '').toLowerCase() === 'reasoning') return [];
+  const preserveExecuteScript = isBrowserForceExecutePayload(payload);
   return normalizeStepDetails([
     payload.details,
     payload.text,
@@ -931,7 +943,9 @@ function stepDetailsForToolEvent(evt, label) {
     payload.paths,
     payload.items,
     payload.item,
-  ], label);
+  ], label, preserveExecuteScript
+    ? { maxLines: null, maxLineLength: null, preserveIndentation: true }
+    : undefined);
 }
 
 function stepKeyForToolEvent(evt) {
@@ -1029,6 +1043,18 @@ function stepKeyForRunEvent(evt) {
 function stepDetailsForRunEvent(evt, label) {
   const payload = evt?.payload || {};
   const item = payload?.item && typeof payload.item === 'object' ? payload.item : {};
+  const normalizedPayload = {
+    ...payload,
+    ...item,
+    name: firstString([item.name, payload.name]),
+    toolName: firstString([item.toolName, payload.toolName]),
+    tool: firstString([item.tool, payload.tool]),
+    args: item.args || payload.args,
+    arguments: firstString([item.arguments, payload.arguments]),
+    input: item.input || payload.input,
+    code: firstString([item.code, payload.code]),
+  };
+  const preserveExecuteScript = isBrowserForceExecutePayload(normalizedPayload);
   return normalizeStepDetails([
     payload.details,
     payload.text,
@@ -1054,7 +1080,10 @@ function stepDetailsForRunEvent(evt, label) {
     item?.paths,
     item?.input,
     item?.arguments,
-  ], label);
+    item?.code,
+  ], label, preserveExecuteScript
+    ? { maxLines: null, maxLineLength: null, preserveIndentation: true }
+    : undefined);
 }
 
 function trackRunStep(run, evt) {
