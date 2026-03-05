@@ -242,6 +242,17 @@ test('terminal run events trigger queued follow-up auto-send once', () => {
   assert.match(js, /sendQueuedMessageNow\(\{ sessionId: evt\.sessionId \}\)\.catch/);
 });
 
+test('starting a new run pins previous in-flight run into transcript instead of hiding it', () => {
+  assert.match(js, /function pinInFlightRunToMessages\(sessionId, runId\)/);
+  assert.match(js, /const previousRunId = getSessionRunId\(state\.currentRunBySession, evt\.sessionId\);/);
+  assert.match(js, /pinInFlightRunToMessages\(evt\.sessionId, previousRunId\);/);
+});
+
+test('sendMessage pins active in-flight assistant progress before appending new user message', () => {
+  assert.match(js, /const activeRunId = getSessionRunId\(state\.currentRunBySession, sessionId\);/);
+  assert.match(js, /if \(activeRunId\)\s*\{\s*pinInFlightRunToMessages\(sessionId, activeRunId\);/);
+});
+
 test('queued row actions support steer-now and delete', () => {
   assert.match(js, /queuedSteerBtn\.addEventListener\('click'/);
   assert.match(js, /sendQueuedMessageNow\(\{ sessionId \}\)\.catch/);

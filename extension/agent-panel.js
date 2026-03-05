@@ -103,6 +103,39 @@ function getActiveMessages() {
   return state.value.messagesBySession[state.value.activeSessionId] || [];
 }
 
+function pinInFlightRunToMessages(sessionId, runId) {
+  if (!sessionId || !runId) return;
+  const run = state.value.runs?.[runId];
+  if (!run) return;
+
+  const hasVisibleContent = Boolean(
+    (typeof run.text === 'string' && run.text.trim())
+    || (Array.isArray(run.timeline) && run.timeline.length > 0)
+    || (Array.isArray(run.steps) && run.steps.length > 0),
+  );
+  if (!hasVisibleContent) return;
+
+  const existingMessages = state.value.messagesBySession?.[sessionId] || [];
+  const alreadyPinned = existingMessages.some(
+    (message) => message?.role === 'assistant' && message?.runId === runId,
+  );
+  if (alreadyPinned) return;
+
+  const pinnedMessage = {
+    role: 'assistant',
+    text: typeof run.text === 'string' ? run.text : '',
+    runId,
+    timeline: Array.isArray(run.timeline) ? run.timeline : [],
+    createdAt: new Date().toISOString(),
+  };
+
+  state.value = reduceState(state.value, {
+    type: 'messages.loaded',
+    sessionId,
+    messages: [...existingMessages, pinnedMessage],
+  });
+}
+
 function getActiveRun() {
   const sessionId = state.value.activeSessionId;
   if (!sessionId) return null;
@@ -377,6 +410,10 @@ function applyIncomingEvent(evt) {
     setStatus('ready', 'Ready');
   }
   if (evt?.event === 'run.started' && evt.sessionId && evt.runId) {
+    const previousRunId = getSessionRunId(state.currentRunBySession, evt.sessionId);
+    if (previousRunId && previousRunId !== evt.runId) {
+      pinInFlightRunToMessages(evt.sessionId, previousRunId);
+    }
     state.currentRunBySession = assignSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
   }
   if (isTerminalRunEvent) {
@@ -2261,11 +2298,18 @@ async function sendMessage(text) {
   const sessionId = state.value.activeSessionId;
   if (!sessionId || !text.trim()) return;
 
-  const existing = getActiveMessages();
+  let existing = getActiveMessages();
+  const activeRunId = getSessionRunId(state.currentRunBySession, sessionId);
+  if (activeRunId) {
+    pinInFlightRunToMessages(sessionId, activeRunId);
+    existing = state.value.messagesBySession[sessionId] || existing;
+  }
+
+  const optimisticMessages = [...existing, { role: 'user', text, createdAt: new Date().toISOString() }];
   dispatch({
     type: 'messages.loaded',
     sessionId,
-    messages: [...existing, { role: 'user', text, createdAt: new Date().toISOString() }],
+    messages: optimisticMessages,
   });
 
   await ensureCurrentTabAttached();
