@@ -20,6 +20,7 @@ const DEFAULT_PORT = 19222;
 const LABEL_SCREENSHOT_MAX_DIMENSION = 1568;
 const LABEL_BOX_CONCURRENCY = 16;
 const MAX_LABEL_OVERLAY_REFS = 300;
+const EXEC_CONSOLE_MAX_ENTRIES = 200;
 export const BF_DIR = join(homedir(), '.browserforce');
 export const CDP_URL_FILE = join(BF_DIR, 'cdp-url');
 const RELAY_SCRIPT = fileURLToPath(new URL('../../relay/src/index.js', import.meta.url));
@@ -562,6 +563,50 @@ export function buildExecContext(
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
   const lastRefToLocator = userState.__lastRefToLocator || (userState.__lastRefToLocator = new WeakMap());
+  const execConsoleLogs = Array.isArray(userState.__execConsoleLogs)
+    ? userState.__execConsoleLogs
+    : (userState.__execConsoleLogs = []);
+
+  const serializeExecConsoleArg = (value) => {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) return value.stack || value.message || String(value);
+    if (typeof value === 'symbol') return value.toString();
+    try {
+      return JSON.stringify(value);
+    } catch {
+      try {
+        return String(value);
+      } catch {
+        return '[unserializable]';
+      }
+    }
+  };
+
+  const pushExecConsole = (level, args) => {
+    const text = args.map((arg) => serializeExecConsoleArg(arg)).join(' ');
+    execConsoleLogs.push({
+      level,
+      text,
+      timestamp: new Date().toISOString(),
+    });
+    if (execConsoleLogs.length > EXEC_CONSOLE_MAX_ENTRIES) {
+      execConsoleLogs.splice(0, execConsoleLogs.length - EXEC_CONSOLE_MAX_ENTRIES);
+    }
+  };
+
+  const execConsole = Object.freeze({
+    log: (...args) => pushExecConsole('log', args),
+    info: (...args) => pushExecConsole('info', args),
+    warn: (...args) => pushExecConsole('warn', args),
+    error: (...args) => pushExecConsole('error', args),
+    debug: (...args) => pushExecConsole('debug', args),
+    trace: (...args) => pushExecConsole('trace', args),
+    assert: (condition, ...args) => {
+      if (condition) return;
+      const payload = args.length > 0 ? args : ['Assertion failed'];
+      pushExecConsole('error', payload);
+    },
+  });
 
   const activePage = () => {
     if (userState.page && !userState.page.isClosed()) return userState.page;
@@ -816,6 +861,7 @@ export function buildExecContext(
     'pageMarkdown',
     'pluginCatalog',
     'pluginHelp',
+    'console',
     'fetch',
     'URL',
     'URLSearchParams',
@@ -848,6 +894,7 @@ export function buildExecContext(
     snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,
+    console: execConsole,
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,
   };

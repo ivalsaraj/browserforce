@@ -282,6 +282,41 @@ test('plugin helper receives null page gracefully when no page open', async () =
   assert.equal(result, 'no-page');
 });
 
+test('runCode uses execute-scope console shim instead of global console', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  const originalLog = globalThis.console.log;
+  const originalError = globalThis.console.error;
+  let globalCalls = 0;
+
+  globalThis.console.log = () => {
+    globalCalls += 1;
+    throw new Error('global console.log should not be called');
+  };
+  globalThis.console.error = () => {
+    globalCalls += 1;
+    throw new Error('global console.error should not be called');
+  };
+
+  try {
+    const result = await runCode(
+      'console.log("hello", { ok: true }); console.error("warn"); return state.__execConsoleLogs;',
+      ctx,
+      5000,
+    );
+    assert.equal(globalCalls, 0);
+    assert.ok(Array.isArray(result));
+    assert.equal(result.length, 2);
+    assert.equal(result[0].level, 'log');
+    assert.equal(result[1].level, 'error');
+    assert.ok(result[0].text.includes('hello'));
+    assert.ok(result[0].text.includes('"ok":true'));
+    assert.ok(result[1].text.includes('warn'));
+  } finally {
+    globalThis.console.log = originalLog;
+    globalThis.console.error = originalError;
+  }
+});
+
 test('gsSummarizeSheet reuses cached rows on repeated calls with same options', async () => {
   const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
   const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
@@ -491,6 +526,8 @@ test('gsFormatBulletsInRange invalidates gsSummarizeSheet cache after real write
 
 test('buildExecContext exposes screenshot and content helpers in execute scope', () => {
   const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  assert.equal(typeof ctx.console, 'object');
+  assert.equal(typeof ctx.console.log, 'function');
   assert.equal(typeof ctx.screenshotWithAccessibilityLabels, 'function');
   assert.equal(typeof ctx.cleanHTML, 'function');
   assert.equal(typeof ctx.pageMarkdown, 'function');
