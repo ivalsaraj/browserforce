@@ -512,12 +512,70 @@ function renderSessions() {
 function normalizeRunTimeline(run, fallbackText = '') {
   if (!run) return [];
   if (Array.isArray(run.timeline) && run.timeline.length > 0) {
-    return run.timeline.filter((entry) => {
-      if (!entry || typeof entry !== 'object') return false;
-      if (entry.type === 'text') return typeof entry.text === 'string' && entry.text.length > 0;
-      if (entry.type === 'step') return typeof entry.label === 'string' && entry.label.trim().length > 0;
-      return false;
-    });
+    const isRenderableStep = (entry) => (
+      !!entry
+      && typeof entry === 'object'
+      && entry.type === 'step'
+      && typeof entry.label === 'string'
+      && entry.label.trim().length > 0
+    );
+    const isRenderableText = (entry) => (
+      !!entry
+      && typeof entry === 'object'
+      && entry.type === 'text'
+      && typeof entry.text === 'string'
+      && entry.text.trim().length > 0
+    );
+    const stripInlineMarkdown = (text) => String(text || '')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/~~([^~]+)~~/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+      .replace(/^>\s*/gm, '')
+      .trim();
+    const headingFromText = (text) => {
+      const firstLine = String(text || '')
+        .split('\n')
+        .map((line) => line.trim())
+        .find(Boolean) || '';
+      if (!firstLine) return '';
+      let heading = stripInlineMarkdown(firstLine)
+        .replace(/^[\-*\d.)\s]+/, '')
+        .replace(/^\s*(?:i'?m|i am|i'?ll|i will)\s+/i, '')
+        .replace(/^(?:next|now)\s*,?\s+/i, '')
+        .replace(/[.?!:;,\s]+$/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!heading) return '';
+      if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+      return heading.charAt(0).toUpperCase() + heading.slice(1);
+    };
+
+    const timeline = [];
+    const source = run.timeline.filter((entry) => isRenderableStep(entry) || isRenderableText(entry));
+    for (let index = 0; index < source.length; index += 1) {
+      const entry = source[index];
+      if (entry.type === 'step') {
+        timeline.push(entry);
+        continue;
+      }
+      const hasStepAfter = source.slice(index + 1).some((item) => item.type === 'step');
+      if (!hasStepAfter) {
+        timeline.push(entry);
+        continue;
+      }
+      const heading = headingFromText(entry.text || '');
+      if (!heading) continue;
+      timeline.push({
+        type: 'step',
+        kind: 'reasoning',
+        status: run.done ? 'done' : 'running',
+        key: `derived:commentary:${index}`,
+        label: heading,
+      });
+    }
+    return timeline;
   }
 
   const steps = Array.isArray(run.steps) ? run.steps : [];
