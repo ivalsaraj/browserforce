@@ -41,12 +41,12 @@ test('maps codex item.completed agent_message to chat.delta (not premature final
 
 test('buildCodexExecArgs includes --model when session model is set', () => {
   const args = buildCodexExecArgs({ prompt: 'hi', model: 'gpt-5' });
-  assert.deepEqual(args, ['exec', '--json', '--model', 'gpt-5', 'hi']);
+  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', '--model', 'gpt-5', 'hi']);
 });
 
 test('buildCodexExecArgs includes reasoning effort override when set', () => {
   const args = buildCodexExecArgs({ prompt: 'hi', reasoningEffort: 'medium' });
-  assert.deepEqual(args, ['exec', '--json', '-c', 'model_reasoning_effort="medium"', 'hi']);
+  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', '-c', 'model_reasoning_effort="medium"', 'hi']);
 });
 
 test('buildCodexExecArgs emits resume invocation when codex session id is provided', () => {
@@ -60,6 +60,7 @@ test('buildCodexExecArgs emits resume invocation when codex session id is provid
     'resume',
     '019caa6f-8c63-7c81-a542-3dbcf922d065',
     '--json',
+    '--skip-git-repo-check',
     '--model',
     'gpt-5',
     'hi',
@@ -68,7 +69,7 @@ test('buildCodexExecArgs emits resume invocation when codex session id is provid
 
 test('buildCodexExecArgs omits --model when model is empty', () => {
   const args = buildCodexExecArgs({ prompt: 'hi', model: '' });
-  assert.deepEqual(args, ['exec', '--json', 'hi']);
+  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', 'hi']);
 });
 
 test('maps transient codex error line to non-fatal tool event', () => {

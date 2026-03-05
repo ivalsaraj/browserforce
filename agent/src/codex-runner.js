@@ -486,6 +486,7 @@ export function buildCodexExecArgs({ prompt, model, reasoningEffort, args, resum
   const resolved = resumeId
     ? ['exec', 'resume', resumeId, '--json']
     : ['exec', '--json'];
+  resolved.push('--skip-git-repo-check');
   if (typeof model === 'string' && model.trim()) {
     resolved.push('--model', model.trim());
   }
