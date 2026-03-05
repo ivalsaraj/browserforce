@@ -443,6 +443,34 @@ export function shouldShowBottomScrollFade({ scrollTop, scrollHeight, clientHeig
   return (top + viewport) < (height - safeTolerance);
 }
 
+export function formatMessageTimestampForHover(value, { now = Date.now(), locale, timeZone } = {}) {
+  if (!value) return null;
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return null;
+
+  const reference = new Date(now);
+  if (Number.isNaN(reference.getTime())) return null;
+
+  const ageMs = Math.abs(reference.getTime() - timestamp.getTime());
+  const withinDay = ageMs < 24 * 60 * 60 * 1000;
+  const formatOptions = withinDay
+    ? {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    }
+    : {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    };
+
+  if (timeZone) formatOptions.timeZone = timeZone;
+  return timestamp.toLocaleString(locale || undefined, formatOptions);
+}
+
 export function formatContextUsage({ totalTokens, modelContextWindow } = {}) {
   const total = normalizeUsageValue(totalTokens);
   const windowSize = normalizeUsageValue(modelContextWindow);

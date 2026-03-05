@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   assignSessionRunId,
   classifyRunStepIcon,
+  formatMessageTimestampForHover,
   clearSessionRunId,
   formatContextUsage,
   getLatestInFlightStepIndex,
@@ -148,6 +149,26 @@ test('returns null for context usage formatting when values are incomplete', () 
   assert.equal(formatContextUsage({ totalTokens: 12345 }), null);
   assert.equal(formatContextUsage({ modelContextWindow: 258400 }), null);
   assert.equal(formatContextUsage({ totalTokens: 0, modelContextWindow: 258400 }), null);
+});
+
+test('formats message hover timestamp as time under 24h and date+time over 24h', () => {
+  assert.equal(
+    formatMessageTimestampForHover('2026-03-05T12:30:00.000Z', {
+      now: '2026-03-05T18:00:00.000Z',
+      locale: 'en-US',
+      timeZone: 'UTC',
+    }),
+    '12:30 PM',
+  );
+  assert.equal(
+    formatMessageTimestampForHover('2026-03-04T12:30:00.000Z', {
+      now: '2026-03-05T18:00:00.000Z',
+      locale: 'en-US',
+      timeZone: 'UTC',
+    }),
+    'Mar 4, 12:30 PM',
+  );
+  assert.equal(formatMessageTimestampForHover('not-a-date'), null);
 });
 
 test('shows bottom fade only when content is scrollable and not yet at bottom', () => {

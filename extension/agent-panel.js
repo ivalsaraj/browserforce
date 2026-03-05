@@ -4,6 +4,7 @@ import {
   classifyRunStepIcon,
   clearSessionRunId,
   formatContextUsage,
+  formatMessageTimestampForHover,
   getSessionRunId,
   renderMarkdownContent,
   renderInlineContent,
@@ -1133,6 +1134,10 @@ function renderContent(value) {
   return renderMarkdownContent(value);
 }
 
+function formatMessageTimestampTitle(message) {
+  return formatMessageTimestampForHover(message?.createdAt || message?.updatedAt || null);
+}
+
 async function loadLocalImageBlobUrl(localPath) {
   const path = String(localPath || '').trim();
   if (!path || !state.auth?.baseUrl || !state.auth?.token) return null;
@@ -1260,10 +1265,13 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
 
   const chunks = messages.map((msg) => {
     const role = msg.role || 'assistant';
+    const authorTitle = formatMessageTimestampTitle(msg);
+    const userAuthorTitle = authorTitle ? ` title="${escapeHtml(authorTitle)}"` : '';
+    const assistantAuthorTitle = authorTitle ? ` title="${escapeHtml(authorTitle)}"` : '';
     if (role === 'user') {
       return `
         <article class="message user">
-          <div class="msg-meta"><span class="msg-author">You</span></div>
+          <div class="msg-meta"><span class="msg-author"${userAuthorTitle}>You</span></div>
           <div class="bubble-user">${escapeHtml(msg.text || '')}</div>
         </article>
       `;
@@ -1274,7 +1282,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
     const fallbackHtml = `<div class="bubble-assistant">${renderContent(msg.text || '')}</div>`;
     return `
       <article class="message assistant">
-        <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
+        <div class="msg-meta"><span class="msg-author"${assistantAuthorTitle}>BrowserForce</span></div>
         <div class="msg-content-wrap">
           ${timelineHtml || fallbackHtml}
         </div>
@@ -2008,7 +2016,11 @@ async function sendMessage(text) {
   if (!sessionId || !text.trim()) return;
 
   const existing = getActiveMessages();
-  dispatch({ type: 'messages.loaded', sessionId, messages: [...existing, { role: 'user', text }] });
+  dispatch({
+    type: 'messages.loaded',
+    sessionId,
+    messages: [...existing, { role: 'user', text, createdAt: new Date().toISOString() }],
+  });
 
   await ensureCurrentTabAttached();
   scheduleTabAttachRefresh(0);

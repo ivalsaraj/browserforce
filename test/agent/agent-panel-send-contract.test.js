@@ -79,6 +79,13 @@ test('assistant transcript renders message bodies with markdown block renderer',
   assert.match(js, /<div class="bubble-assistant">\$\{renderContent\(entry\.text \|\| ''\)\}<\/div>/);
 });
 
+test('message author labels expose sent time in hover tooltip', () => {
+  assert.match(js, /formatMessageTimestampForHover/);
+  assert.match(js, /function formatMessageTimestampTitle\(message\)/);
+  assert.match(js, /class="msg-author"\$\{userAuthorTitle\}>You<\/span>/);
+  assert.match(js, /class="msg-author"\$\{assistantAuthorTitle\}>BrowserForce<\/span>/);
+});
+
 test('local screenshot markdown images hydrate through authenticated chatd fetch', () => {
   assert.match(js, /function loadLocalImageBlobUrl\(localPath\)/);
   assert.match(js, /\/v1\/local-file\?path=/);

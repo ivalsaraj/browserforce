@@ -875,6 +875,7 @@ export function applyEvent(state = initialState, evt = {}) {
         text: finalText,
         runId: evt.runId,
         timeline,
+        createdAt: evt.payload?.createdAt || new Date().toISOString(),
       }]
       : currentMessages;
 
@@ -913,6 +914,7 @@ export function applyEvent(state = initialState, evt = {}) {
         text: '',
         runId: evt.runId,
         timeline,
+        createdAt: evt.payload?.createdAt || new Date().toISOString(),
       }]
       : currentMessages;
     return {
@@ -954,6 +956,7 @@ export function applyEvent(state = initialState, evt = {}) {
         text: run.text || '',
         runId: evt.runId,
         timeline,
+        createdAt: evt.payload?.createdAt || new Date().toISOString(),
       }]
       : currentMessages;
     return {
