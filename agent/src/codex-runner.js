@@ -430,15 +430,50 @@ export function normalizeCodexLine({ runId, sessionId, line }) {
   if (type === 'item.completed') {
     const itemType = parsed.item?.type || '';
     if (itemType === 'agent_message') {
+      const text = firstString([parsed.item?.text, parsed.item?.message]);
+      if (!text) return null;
+      const phase = firstString([parsed.item?.phase, parsed.phase]).toLowerCase();
+      const eventType = classifyAssistantMessageEvent(phase);
+      if (eventType === 'chat.final') {
+        return envelope({
+          event: 'chat.final',
+          runId,
+          sessionId,
+          payload: { text, phase },
+        });
+      }
+      if (eventType === 'chat.commentary') {
+        return envelope({
+          event: 'chat.commentary',
+          runId,
+          sessionId,
+          payload: { delta: text, phase },
+        });
+      }
       return envelope({
         event: 'chat.delta',
         runId,
         sessionId,
-        payload: { delta: String(parsed.item?.text || '') },
+        payload: { delta: text, phase },
       });
     }
     if (itemType === 'reasoning') {
-      return envelope({ event: 'tool.delta', runId, sessionId, payload: parsed.item || parsed });
+      const text = firstString([
+        parsed.item?.text,
+        parsed.item?.message,
+        ...(Array.isArray(parsed.item?.summary)
+          ? parsed.item.summary
+            .map((summaryItem) => summaryItem?.text || summaryItem?.summary_text || '')
+            .filter(Boolean)
+          : []),
+      ]);
+      if (!text) return null;
+      return envelope({
+        event: 'tool.delta',
+        runId,
+        sessionId,
+        payload: { type: 'reasoning', text },
+      });
     }
   }
 

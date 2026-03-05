@@ -29,14 +29,24 @@ test('maps final line to chat.final event', () => {
   assert.equal(evt.payload.text, 'done');
 });
 
-test('maps codex item.completed agent_message to chat.delta (not premature final)', () => {
+test('maps codex item.completed agent_message commentary to chat.commentary', () => {
   const evt = normalizeCodexLine({
     runId: 'r1',
     sessionId: 's1',
-    line: '{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}',
+    line: '{"type":"item.completed","item":{"type":"agent_message","text":"hello","phase":"commentary"}}',
   });
-  assert.equal(evt.event, 'chat.delta');
+  assert.equal(evt.event, 'chat.commentary');
   assert.equal(evt.payload.delta, 'hello');
+});
+
+test('maps codex item.completed agent_message final_answer to chat.final', () => {
+  const evt = normalizeCodexLine({
+    runId: 'r1',
+    sessionId: 's1',
+    line: '{"type":"item.completed","item":{"type":"agent_message","text":"done","phase":"final_answer"}}',
+  });
+  assert.equal(evt.event, 'chat.final');
+  assert.equal(evt.payload.text, 'done');
 });
 
 test('buildCodexExecArgs includes --model when session model is set', () => {
