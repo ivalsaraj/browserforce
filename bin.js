@@ -620,6 +620,30 @@ async function cmdAgent() {
 
   const lockPath = process.env.BF_CHATD_LOCK_PATH || join(homedir(), '.browserforce', 'chatd-lock.json');
   const chatdUrlPath = process.env.BF_CHATD_URL_PATH || join(homedir(), '.browserforce', 'chatd-url.json');
+  const AGENT_INSTRUCTIONS_TEMPLATE_PATH = fileURLToPath(new URL('./agent/instructions/AGENTS.md', import.meta.url));
+  const MANAGED_AGENTS_HEADER = '<!-- BrowserForce managed AGENTS.md (remove this header to opt out of auto-sync) -->';
+
+  const syncManagedAgentInstructions = async (codexCwd) => {
+    const targetPath = join(codexCwd, 'AGENTS.md');
+    const template = await fsp.readFile(AGENT_INSTRUCTIONS_TEMPLATE_PATH, 'utf8');
+    const nextBody = `${MANAGED_AGENTS_HEADER}\n\n${String(template || '').trimEnd()}\n`;
+
+    let currentBody = null;
+    try {
+      currentBody = await fsp.readFile(targetPath, 'utf8');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+
+    if (currentBody == null) {
+      await fsp.writeFile(targetPath, nextBody, 'utf8');
+      return;
+    }
+
+    if (currentBody.startsWith(MANAGED_AGENTS_HEADER) && currentBody !== nextBody) {
+      await fsp.writeFile(targetPath, nextBody, 'utf8');
+    }
+  };
 
   if (sub === 'start') {
     const current = await readLock({ lockPath });
@@ -631,6 +655,10 @@ async function cmdAgent() {
     const envPort = Number(process.env.BF_CHATD_PORT || 0);
     const port = await pickChatdPort({ envPort });
     const token = randomBytes(32).toString('base64url');
+    const codexCwd = String(process.env.BF_CHATD_CODEX_CWD || '').trim()
+      || join(homedir(), '.browserforce', 'agent-cwd');
+    await fsp.mkdir(codexCwd, { recursive: true });
+    await syncManagedAgentInstructions(codexCwd);
 
     const child = spawn(
       process.execPath,
@@ -638,7 +666,12 @@ async function cmdAgent() {
       {
         detached: true,
         stdio: 'ignore',
-        env: { ...process.env, BF_CHATD_PORT: String(port), BF_CHATD_TOKEN: token },
+        env: {
+          ...process.env,
+          BF_CHATD_PORT: String(port),
+          BF_CHATD_TOKEN: token,
+          BF_CHATD_CODEX_CWD: codexCwd,
+        },
       },
     );
     child.unref();
