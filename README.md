@@ -1,4 +1,4 @@
-# BrowserForce // Parallel AI Agents in "your" Browser!
+<h1><img src="./assets/browserforce-logo.png" alt="BrowserForce logo" width="100" height="100" /> BrowserForce // Parallel AI Agents in "your" Browser!</h1>
 
 Give AI agents controlled access to the browser you already use.
 
