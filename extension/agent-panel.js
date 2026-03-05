@@ -631,6 +631,46 @@ function renderSessions() {
   });
 }
 
+function stripReasoningInlineMarkdown(text) {
+  return String(text || '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/^>\s*/gm, '')
+    .trim();
+}
+
+function reasoningHeadingFromText(text) {
+  const firstLine = String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+  if (!firstLine) return '';
+  let heading = stripReasoningInlineMarkdown(firstLine)
+    .replace(/^[\-*•\d.)\s]+/, '')
+    .replace(/^\s*(?:i['’]?m|i am|i['’]?ll|i will)\s+/i, '')
+    .replace(/^(?:next|now)\s*,?\s+/i, '')
+    .replace(/[.?!:;,\s]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!heading) return '';
+  if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+  return heading.charAt(0).toUpperCase() + heading.slice(1);
+}
+
+function comparableReasoningText(text) {
+  return stripReasoningInlineMarkdown(text)
+    .replace(/^[\-*•\d.)\s]+/, '')
+    .replace(/^\s*(?:i['’]?m|i am|i['’]?ll|i will)\s+/i, '')
+    .replace(/^(?:next|now)\s*,?\s+/i, '')
+    .replace(/[.?!:;,_()[\]{}'"`]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 function normalizeRunTimeline(run, fallbackText = '') {
   if (!run) return [];
   if (Array.isArray(run.timeline) && run.timeline.length > 0) {
@@ -648,31 +688,6 @@ function normalizeRunTimeline(run, fallbackText = '') {
       && typeof entry.text === 'string'
       && entry.text.trim().length > 0
     );
-    const stripInlineMarkdown = (text) => String(text || '')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/\*([^*\n]+)\*/g, '$1')
-      .replace(/~~([^~]+)~~/g, '$1')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-      .replace(/^>\s*/gm, '')
-      .trim();
-    const headingFromText = (text) => {
-      const firstLine = String(text || '')
-        .split('\n')
-        .map((line) => line.trim())
-        .find(Boolean) || '';
-      if (!firstLine) return '';
-      let heading = stripInlineMarkdown(firstLine)
-        .replace(/^[\-*\d.)\s]+/, '')
-        .replace(/^\s*(?:i'?m|i am|i'?ll|i will)\s+/i, '')
-        .replace(/^(?:next|now)\s*,?\s+/i, '')
-        .replace(/[.?!:;,\s]+$/, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!heading) return '';
-      if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
-      return heading.charAt(0).toUpperCase() + heading.slice(1);
-    };
 
     const timeline = [];
     const source = run.timeline.filter((entry) => isRenderableStep(entry) || isRenderableText(entry));
@@ -687,7 +702,7 @@ function normalizeRunTimeline(run, fallbackText = '') {
         timeline.push(entry);
         continue;
       }
-      const heading = headingFromText(entry.text || '');
+      const heading = reasoningHeadingFromText(entry.text || '');
       if (!heading) continue;
       timeline.push({
         type: 'step',
@@ -695,6 +710,10 @@ function normalizeRunTimeline(run, fallbackText = '') {
         status: run.done ? 'done' : 'running',
         key: `derived:commentary:${index}`,
         label: heading,
+      });
+      timeline.push({
+        type: 'text',
+        text: entry.text || '',
       });
     }
     return timeline;
@@ -831,10 +850,84 @@ function shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReas
   return true;
 }
 
+function normalizeReasoningTitleLabel(label) {
+  const text = reasoningHeadingFromText(label);
+  return text || 'Reasoning';
+}
+
+function classifyReasoningTitleIcon(label) {
+  const text = normalizeReasoningTitleLabel(label).toLowerCase();
+  if (/error|failed|blocked|denied|timeout/.test(text)) return 'warning';
+  if (/plan|planning|strategy|approach/.test(text)) return 'plan';
+  if (/inspect|check|checking|investigat|analy|read|explor|verify/.test(text)) return 'inspect';
+  if (/reset|retry|recover|reconnect|attach|connection/.test(text)) return 'recovery';
+  if (/report|summar|explain|final|result/.test(text)) return 'report';
+  if (/execute|attempt|trying|run|running/.test(text)) return 'action';
+  return 'dot';
+}
+
+function renderReasoningTitleIcon(iconName, { status = 'done', active = false } = {}) {
+  const normalizedIcon = String(iconName || 'dot').trim().toLowerCase();
+  const normalizedStatus = String(status || 'done').trim().toLowerCase();
+  const classes = ['reasoning-step-icon', `icon-${escapeHtml(normalizedIcon)}`];
+  if (active) classes.push('active');
+  if (normalizedStatus === 'failed') classes.push('failed');
+  if (normalizedStatus === 'running') classes.push('running');
+
+  const lucidePaths = {
+    plan: '<path d="M9 6h11"></path><path d="M9 12h11"></path><path d="M9 18h11"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>',
+    inspect: '<circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path>',
+    action: '<path d="M8 5v14l11-7z"></path>',
+    recovery: '<path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 3v5h5"></path>',
+    report: '<path d="M14 2H6a2 2 0 0 0-2 2v16l4-2 4 2 4-2 4 2V8z"></path><path d="M8 7h8"></path><path d="M8 11h8"></path>',
+    warning: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path>',
+  };
+
+  const glyph = lucidePaths[normalizedIcon];
+  if (!glyph) {
+    return `<span class="${classes.join(' ')} icon-dot" aria-hidden="true"></span>`;
+  }
+  return `
+    <span class="${classes.join(' ')}" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        ${glyph}
+      </svg>
+    </span>
+  `;
+}
+
+function getLatestReasoningTimelineStepIndex(run, timeline) {
+  if (!run || run.done) return -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.type !== 'step') continue;
+    if (String(entry?.kind || '').toLowerCase() !== 'reasoning') continue;
+    return index;
+  }
+  return -1;
+}
+
+function collectReasoningBodyText(timeline, startIndex) {
+  const textParts = [];
+  let cursor = startIndex + 1;
+  while (cursor < timeline.length) {
+    const entry = timeline[cursor];
+    if (!entry || entry.type !== 'text') break;
+    const text = String(entry.text || '').trim();
+    if (text) textParts.push(text);
+    cursor += 1;
+  }
+  return {
+    text: textParts.join('\n\n').trim(),
+    nextIndex: cursor,
+  };
+}
+
 function renderRunTimeline(run, fallbackText = '') {
   const timeline = normalizeRunTimeline(run, fallbackText);
   if (!timeline.length) return '';
   const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
+  const latestReasoningIndex = getLatestReasoningTimelineStepIndex(run, timeline);
   const getTimelineEntryKey = (entry, index) => {
     const runId = String(run?.runId || 'run');
     const stableKey = String(entry?.key || '').trim();
@@ -844,37 +937,103 @@ function renderRunTimeline(run, fallbackText = '') {
     const label = String(entry?.label || '');
     return `${runId}:${index}:${kind}:${status}:${label}`;
   };
-  return `
-    <div class="run-timeline">
-      ${timeline.map((entry, index) => {
+  const htmlParts = [];
+  for (let index = 0; index < timeline.length; index += 1) {
+    const entry = timeline[index];
     if (entry.type === 'text') {
-      return `<div class="bubble-assistant">${renderContent(entry.text || '')}</div>`;
+      htmlParts.push(`<div class="bubble-assistant">${renderContent(entry.text || '')}</div>`);
+      continue;
     }
-    const status = entry?.status || 'running';
-    const normalizedStatus = String(status || '').toLowerCase();
+
+    const kind = String(entry?.kind || '').toLowerCase();
+    const status = String(entry?.status || 'running').toLowerCase();
+
+    if (kind === 'reasoning') {
+      const key = getTimelineEntryKey(entry, index);
+      const { text: bodyTextRaw, nextIndex } = collectReasoningBodyText(timeline, index);
+      const hasStepAfterBody = timeline.slice(nextIndex).some((item) => item?.type === 'step');
+      const shouldConsumeReasoningBody = !!bodyTextRaw && (hasStepAfterBody || !run?.done);
+      let title = normalizeReasoningTitleLabel(entry?.label || '');
+      const comparableBody = comparableReasoningText(bodyTextRaw);
+      if (shouldConsumeReasoningBody && comparableBody && comparableReasoningText(title) === comparableBody) {
+        const derivedTitle = reasoningHeadingFromText(bodyTextRaw);
+        if (derivedTitle) title = derivedTitle;
+      }
+      const hideDuplicateBody = shouldConsumeReasoningBody
+        && comparableBody
+        && comparableReasoningText(title) === comparableBody;
+      const hasCommentaryBody = shouldConsumeReasoningBody && !hideDuplicateBody;
+      const isActiveReasoning = !run?.done && index === latestReasoningIndex;
+      const expanded = hasCommentaryBody && (isActiveReasoning || !!state.expandedTimelineEntries[key]);
+      const iconName = classifyReasoningTitleIcon(title);
+      const iconStatus = status === 'failed' ? 'failed' : (isActiveReasoning ? 'running' : 'done');
+      const titleClasses = ['step-label', 'title-label', 'reasoning-title-label'];
+      if (isActiveReasoning) {
+        titleClasses.push('shimmer-text');
+        if (shouldAnimateLatestReasoningTitle({
+          run,
+          entry,
+          isLatest: true,
+          isRunningReasoning: true,
+        })) {
+          titleClasses.push('title-transition-in');
+        }
+      }
+      const classes = ['step-item', 'timeline-step', 'reasoning-step'];
+      if (isActiveReasoning) classes.push('latest', 'active');
+      if (status === 'failed') classes.push('failed');
+      if (expanded) classes.push('expanded');
+
+      const headingHtml = hasCommentaryBody
+        ? `
+          <button type="button" class="step-toggle reasoning-toggle" data-step-key="${escapeHtml(key)}" aria-expanded="${expanded ? 'true' : 'false'}">
+            <span class="step-toggle-main">
+              <span class="${titleClasses.join(' ')}">${renderInlineContent(title)}</span>
+              <span class="step-caret" aria-hidden="true"></span>
+            </span>
+          </button>
+        `
+        : `<span class="${titleClasses.join(' ')}">${renderInlineContent(title)}</span>`;
+
+      const bodyHtml = expanded
+        ? `
+          <div class="reasoning-body${isActiveReasoning ? ' streaming' : ''}" data-reasoning-streaming="${isActiveReasoning ? 'true' : 'false'}">
+            <div class="reasoning-body-text">${renderInlineContent(bodyTextRaw).replace(/\n/g, '<br>')}</div>
+          </div>
+        `
+        : '';
+
+      htmlParts.push(`
+        <div class="${classes.join(' ')}">
+          ${renderReasoningTitleIcon(iconName, { status: iconStatus, active: isActiveReasoning })}
+          <div class="step-body">
+            ${headingHtml}
+            ${bodyHtml}
+          </div>
+        </div>
+      `);
+
+      if (shouldConsumeReasoningBody) {
+        index = nextIndex - 1;
+      }
+      continue;
+    }
+
     const icon = classifyRunStepIcon(entry);
     const isLatest = index === latestStepIndex;
     const shouldPulse = isLatest && status === 'running';
-    const isReasoningTitle = String(entry?.kind || '').toLowerCase() === 'reasoning';
-    const isExecuteTitle = isBrowserForceExecuteStep(entry);
-    const isTitleRow = isReasoningTitle || isExecuteTitle;
-    const isRunningTitle = isTitleRow && normalizedStatus === 'running';
     const labelClasses = ['step-label'];
-    if (isTitleRow) labelClasses.push('title-label');
-    if (isRunningTitle && isLatest) {
-      labelClasses.push('shimmer-text');
-      if (shouldAnimateLatestReasoningTitle({ run, entry, isLatest, isRunningReasoning: isRunningTitle })) {
-        labelClasses.push('title-transition-in');
-      }
-    }
     const details = Array.isArray(entry?.details) ? entry.details.filter(Boolean) : [];
     const isCollapsible = details.length > 0;
-    const classes = ['step-item', 'timeline-step', escapeHtml(status)];
+    const classes = ['step-item', 'timeline-step', 'tool-step', escapeHtml(status)];
     if (isLatest) classes.push('latest');
     if (shouldPulse) classes.push('pulse');
+
     if (!isCollapsible) {
-      return `<div class="${classes.join(' ')}">${renderRunStepIcon(icon)}<span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span></div>`;
+      htmlParts.push(`<div class="${classes.join(' ')}">${renderRunStepIcon(icon)}<span class="${labelClasses.join(' ')}">${renderInlineContent(entry.label || 'Step')}</span></div>`);
+      continue;
     }
+
     classes.push('collapsible');
     const key = getTimelineEntryKey(entry, index);
     const expanded = !!state.expandedTimelineEntries[key];
@@ -883,7 +1042,7 @@ function renderRunTimeline(run, fallbackText = '') {
     const detailsHtml = details
       .map((line) => `<li>${renderInlineContent(line)}</li>`)
       .join('');
-    return `
+    htmlParts.push(`
       <div class="${classes.join(' ')}">
         ${renderRunStepIcon(icon)}
         <div class="step-body">
@@ -897,8 +1056,12 @@ function renderRunTimeline(run, fallbackText = '') {
           ${expanded ? `<ul class="step-details">${detailsHtml}</ul>` : ''}
         </div>
       </div>
-    `;
-  }).join('')}
+    `);
+  }
+
+  return `
+    <div class="run-timeline">
+      ${htmlParts.join('')}
     </div>
   `;
 }
@@ -982,6 +1145,13 @@ function hydrateLocalImagePreviews() {
   }
 }
 
+function pinStreamingReasoningBodiesToLatest() {
+  if (!transcriptEl) return;
+  transcriptEl.querySelectorAll('.reasoning-body.streaming').forEach((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+}
+
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
@@ -1051,7 +1221,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
         <div class="msg-meta"><span class="msg-author">BrowserForce</span></div>
         <div class="msg-content-wrap">
           ${timelineHtml}
-          ${shouldShowThinking ? '<div class="thinking-bubble"><div class="spinner"></div><span>Thinking...</span></div>' : ''}
+          ${shouldShowThinking ? '<div class="thinking-bubble"><div class="spinner"></div><span class="thinking-label">Thinking...</span></div>' : ''}
         </div>
       </article>
     `);
@@ -1113,6 +1283,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
 
   bindTranscriptHandlers();
   hydrateLocalImagePreviews();
+  pinStreamingReasoningBodiesToLatest();
   if (Number.isFinite(preserveScrollTop)) {
     transcriptEl.scrollTop = preserveScrollTop;
   } else {
