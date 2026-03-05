@@ -19,6 +19,9 @@ const REASONING_PRESETS = [
 ];
 const BROWSERFORCE_AGENT_OPEN_REQUEST_KEY = 'browserforceAgentOpenRequest';
 const BROWSERFORCE_AGENT_OPEN_REQUEST_MAX_AGE_MS = 60_000;
+const STREAM_CHUNK_TARGET_CHARS = 24;
+const STREAM_CHUNK_LOOKAHEAD_CHARS = 14;
+const STREAM_CHUNK_INTERVAL_MS = 26;
 
 const state = {
   value: initialState,
@@ -41,6 +44,8 @@ const state = {
   sessionTitleDrafts: {},
   eventController: null,
   eventLoopToken: 0,
+  streamEventQueue: [],
+  streamEventTimer: null,
   sessionSelectionToken: 0,
   popover: 'none',
   startupIssue: null,
@@ -261,7 +266,7 @@ function dispatch(action) {
   render();
 }
 
-function dispatchEvent(evt) {
+function applyIncomingEvent(evt) {
   state.value = applyEvent(state.value, evt);
   if (evt?.event === 'run.started' && evt.sessionId && evt.runId) {
     state.currentRunBySession = assignSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
@@ -270,6 +275,112 @@ function dispatchEvent(evt) {
     state.currentRunBySession = clearSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
   }
   render();
+}
+
+function splitDeltaForDisplayStreaming(delta) {
+  const text = String(delta || '');
+  if (!text) return [];
+  if (text.length <= STREAM_CHUNK_TARGET_CHARS) return [text];
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    let end = Math.min(cursor + STREAM_CHUNK_TARGET_CHARS, text.length);
+    if (end < text.length) {
+      const lookahead = text.slice(end, Math.min(end + STREAM_CHUNK_LOOKAHEAD_CHARS, text.length));
+      const wsIndex = lookahead.search(/\s/);
+      if (wsIndex >= 0) {
+        end += wsIndex + 1;
+      }
+    }
+    if (end <= cursor) end = Math.min(cursor + STREAM_CHUNK_TARGET_CHARS, text.length);
+    chunks.push(text.slice(cursor, end));
+    cursor = end;
+  }
+  return chunks;
+}
+
+function resetStreamEventQueue() {
+  if (state.streamEventTimer) {
+    window.clearTimeout(state.streamEventTimer);
+    state.streamEventTimer = null;
+  }
+  state.streamEventQueue = [];
+}
+
+function scheduleStreamEventPump() {
+  if (state.streamEventTimer || state.streamEventQueue.length === 0) return;
+  state.streamEventTimer = window.setTimeout(() => {
+    state.streamEventTimer = null;
+    const next = state.streamEventQueue.shift();
+    if (next) {
+      applyIncomingEvent(next);
+    }
+    if (state.streamEventQueue.length > 0) {
+      scheduleStreamEventPump();
+    }
+  }, STREAM_CHUNK_INTERVAL_MS);
+}
+
+function flushStreamEventsForRun(sessionId, runId) {
+  if (!sessionId || !runId || state.streamEventQueue.length === 0) return;
+  const keep = [];
+  const flush = [];
+  for (const queued of state.streamEventQueue) {
+    if (queued?.sessionId === sessionId && queued?.runId === runId) {
+      flush.push(queued);
+    } else {
+      keep.push(queued);
+    }
+  }
+  state.streamEventQueue = keep;
+  if (flush.length > 0) {
+    for (const queued of flush) {
+      applyIncomingEvent(queued);
+    }
+  }
+  if (state.streamEventTimer) {
+    window.clearTimeout(state.streamEventTimer);
+    state.streamEventTimer = null;
+  }
+  if (state.streamEventQueue.length > 0) {
+    scheduleStreamEventPump();
+  }
+}
+
+function dispatchEvent(evt) {
+  if (!evt || typeof evt !== 'object') return;
+  const eventType = String(evt.event || '');
+  const isTextDeltaEvent = (
+    (eventType === 'chat.delta' || eventType === 'chat.commentary')
+    && typeof evt.payload?.delta === 'string'
+  );
+
+  if (!isTextDeltaEvent) {
+    flushStreamEventsForRun(evt.sessionId, evt.runId);
+    applyIncomingEvent(evt);
+    return;
+  }
+
+  const chunks = splitDeltaForDisplayStreaming(evt.payload.delta);
+  if (chunks.length <= 1) {
+    applyIncomingEvent(evt);
+    return;
+  }
+
+  const firstPayload = { ...(evt.payload || {}), delta: chunks[0] };
+  applyIncomingEvent({ ...evt, payload: firstPayload });
+
+  const bufferedPayload = { ...(evt.payload || {}) };
+  for (let index = 1; index < chunks.length; index += 1) {
+    state.streamEventQueue.push({
+      ...evt,
+      payload: {
+        ...bufferedPayload,
+        delta: chunks[index],
+      },
+    });
+  }
+  scheduleStreamEventPump();
 }
 
 function formatModelLabel(model) {
@@ -1408,6 +1519,7 @@ async function loadSessionMetadata(sessionId) {
 }
 
 async function selectSession(sessionId) {
+  resetStreamEventQueue();
   state.sessionSelectionToken += 1;
   const selectionToken = state.sessionSelectionToken;
   dispatch({ type: 'session.selected', sessionId });
@@ -1555,6 +1667,7 @@ async function consumeEventStream(body, loopToken) {
 }
 
 function connectEvents(sessionId) {
+  resetStreamEventQueue();
   state.eventLoopToken += 1;
   const loopToken = state.eventLoopToken;
   if (state.eventController) state.eventController.abort();
