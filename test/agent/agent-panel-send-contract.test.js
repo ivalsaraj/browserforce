@@ -159,10 +159,19 @@ test('text deltas are chunked into paced stream updates for visible incremental 
   assert.match(js, /scheduleStreamEventPump\(\)/);
 });
 
-test('latest running BrowserForce execute rows are treated as title rows with shimmer', () => {
-  assert.match(js, /const isExecuteTitle = isBrowserForceExecuteStep\(entry\)/);
-  assert.match(js, /const isTitleRow = isReasoningTitle \|\| isExecuteTitle/);
-  assert.match(js, /if \(isRunningTitle && isLatest\) \{/);
+test('reasoning titles render strategy icon and fixed-height commentary body blocks', () => {
+  assert.match(js, /function classifyReasoningTitleIcon\(label\)/);
+  assert.match(js, /function renderReasoningTitleIcon\(iconName/);
+  assert.match(js, /function collectReasoningBodyText\(timeline, startIndex\)/);
+  assert.match(js, /reasoning-step/);
+  assert.match(js, /class="reasoning-body/);
+  assert.match(js, /data-reasoning-streaming=/);
+});
+
+test('timeline normalization skips derived commentary heading when a reasoning step already exists above the text', () => {
+  assert.match(js, /const previousSource = source\[index - 1\]/);
+  assert.match(js, /previousSource\?\.type === 'step'/);
+  assert.match(js, /String\(previousSource\.kind \|\| ''\)\.toLowerCase\(\) === 'reasoning'/);
 });
 
 test('done tool-call icon renders animated svg check markup', () => {
