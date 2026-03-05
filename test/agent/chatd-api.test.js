@@ -395,6 +395,80 @@ test('POST /v1/runs persists run steps so reopened sessions can render them', as
   }
 });
 
+test('POST /v1/runs persists one keyed reasoning step across chunked commentary deltas', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent, onExit }) => {
+      setTimeout(() => {
+        onEvent({
+          event: 'chat.commentary',
+          runId,
+          sessionId,
+          payload: { delta: 'I found BUCKS in your Apps nav; next I’m opening it and checking its currency settings flow s' },
+        });
+      }, 5);
+      setTimeout(() => {
+        onEvent({
+          event: 'chat.commentary',
+          runId,
+          sessionId,
+          payload: { delta: "o I can give exact steps from your store's UI." },
+        });
+      }, 10);
+      setTimeout(() => {
+        onEvent({ event: 'tool.started', runId, sessionId, payload: { tool: 'execute', callId: 'call_1', stepKey: 'tool:call_1' } });
+      }, 15);
+      setTimeout(() => {
+        onEvent({ event: 'tool.final', runId, sessionId, payload: { callId: 'call_1', stepKey: 'tool:call_1' } });
+      }, 20);
+      setTimeout(() => {
+        onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'done' } });
+      }, 25);
+      setTimeout(() => onExit({ code: 0 }), 30);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Commentary chunks' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'hi' }),
+    });
+    assert.equal(runRes.status, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const messagesBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    const assistant = (messagesBody.messages || []).at(-1);
+    const timeline = assistant?.timeline || [];
+    const reasoningSteps = timeline.filter((item) => item?.type === 'step' && item?.kind === 'reasoning');
+
+    assert.equal(reasoningSteps.length, 1);
+    assert.equal(reasoningSteps[0]?.key, 'commentary:1');
+    assert.doesNotMatch(reasoningSteps[0]?.label || '', /\b[a-z]\.\.\.$/i);
+    assert.equal(timeline.some((item) => item?.type === 'text' && /give exact steps/i.test(item?.text || '')), true);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs persists execute tool details for collapsible timeline rows', async () => {
   const daemon = await startChatd({
     port: 0,

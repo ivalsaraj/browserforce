@@ -656,7 +656,12 @@ function reasoningHeadingFromText(text) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!heading) return '';
-  if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+  if (heading.length > 96) {
+    const clipped = heading.slice(0, 93).trimEnd();
+    const wordBoundary = clipped.lastIndexOf(' ');
+    const base = wordBoundary >= 56 ? clipped.slice(0, wordBoundary).trimEnd() : clipped;
+    heading = `${base}...`;
+  }
   return heading.charAt(0).toUpperCase() + heading.slice(1);
 }
 

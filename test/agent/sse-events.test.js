@@ -91,6 +91,33 @@ test('reasoning tool deltas use heading-style labels and collapse duplicates acr
   assert.equal(timeline[1]?.type, 'text');
 });
 
+test('chat.commentary chunks update one active reasoning heading instead of creating partial duplicates', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'chat.commentary',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { delta: 'I found BUCKS in your Apps nav; next I’m opening it and checking its currency settings flow s' },
+  });
+  const s3 = applyEvent(s2, {
+    event: 'chat.commentary',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { delta: "o I can give exact steps from your store's UI." },
+  });
+
+  const timeline = s3.runs.r1.timeline || [];
+  const reasoningSteps = timeline.filter((item) => item?.type === 'step' && item?.kind === 'reasoning');
+  const textEntries = timeline.filter((item) => item?.type === 'text');
+
+  assert.equal(reasoningSteps.length, 1);
+  assert.equal(reasoningSteps[0]?.key, 'commentary:1');
+  assert.match(reasoningSteps[0]?.label || '', /I found BUCKS/i);
+  assert.doesNotMatch(reasoningSteps[0]?.label || '', /\b[a-z]\.\.\.$/i);
+  assert.equal(textEntries.length, 1);
+  assert.match(textEntries[0]?.text || '', /give exact steps/i);
+});
+
 test('chat and tool events preserve inline timeline order', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, { event: 'chat.delta', runId: 'r1', sessionId: 's1', payload: { delta: 'First chunk. ' } });

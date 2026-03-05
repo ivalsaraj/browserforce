@@ -543,7 +543,12 @@ function commentaryHeadingFromDelta(delta) {
 
   if (!heading) return '';
   if (/^(browserforce|recovery action|error[:\s])/i.test(heading)) return '';
-  if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+  if (heading.length > 96) {
+    const clipped = heading.slice(0, 93).trimEnd();
+    const wordBoundary = clipped.lastIndexOf(' ');
+    const base = wordBoundary >= 56 ? clipped.slice(0, wordBoundary).trimEnd() : clipped;
+    heading = `${base}...`;
+  }
   return heading.charAt(0).toUpperCase() + heading.slice(1);
 }
 
@@ -712,6 +717,45 @@ function pushRunTimelineEntry(run, entry) {
   }
   if (timeline.length > 200) timeline.shift();
   run.timeline = timeline;
+}
+
+function applyRunCommentaryDelta(run, delta) {
+  if (!run || !delta) return;
+  const timeline = Array.isArray(run.timeline) ? run.timeline : [];
+  const hasActiveCommentary = !!run.activeCommentaryStepKey && timeline.at(-1)?.type === 'text';
+
+  if (!hasActiveCommentary) {
+    run.commentarySequence = Number.isInteger(run.commentarySequence) ? run.commentarySequence + 1 : 1;
+    run.activeCommentaryStepKey = `commentary:${run.commentarySequence}`;
+    const heading = commentaryHeadingFromDelta(delta);
+    if (heading) {
+      const step = {
+        kind: 'reasoning',
+        status: 'running',
+        key: run.activeCommentaryStepKey,
+        label: heading,
+      };
+      pushRunStep(run, step);
+      pushRunTimelineEntry(run, { type: 'step', ...step });
+    }
+    pushRunTimelineEntry(run, { type: 'text', text: delta });
+    return;
+  }
+
+  pushRunTimelineEntry(run, { type: 'text', text: delta });
+  const mergedText = Array.isArray(run.timeline) && run.timeline.at(-1)?.type === 'text'
+    ? run.timeline.at(-1)?.text || ''
+    : delta;
+  const heading = commentaryHeadingFromDelta(mergedText);
+  if (!heading) return;
+  const step = {
+    kind: 'reasoning',
+    status: 'running',
+    key: run.activeCommentaryStepKey,
+    label: heading,
+  };
+  pushRunStep(run, step);
+  pushRunTimelineEntry(run, { type: 'step', ...step });
 }
 
 function runTimelineHasText(run) {
@@ -1443,6 +1487,8 @@ export async function startChatd(opts = {}) {
           resumeRetryAttempted: false,
           resumeSessionId,
           reasoningEffort: runReasoningEffort,
+          activeCommentaryStepKey: '',
+          commentarySequence: 0,
         };
 
         const enqueue = (fn) => {
@@ -1468,6 +1514,7 @@ export async function startChatd(opts = {}) {
                 if (evt.event === 'chat.delta') {
                   const delta = evt.payload?.delta || '';
                   if (delta) {
+                    active.activeCommentaryStepKey = '';
                     active.assistantBuffer += delta;
                     pushRunTimelineEntry(active, { type: 'text', text: delta });
                     broadcast(buildEvent({ event: 'chat.delta', runId, sessionId, payload: { delta } }));
@@ -1478,13 +1525,14 @@ export async function startChatd(opts = {}) {
                 if (evt.event === 'chat.commentary') {
                   const delta = evt.payload?.delta || '';
                   if (delta) {
-                    pushRunTimelineEntry(active, { type: 'text', text: delta });
+                    applyRunCommentaryDelta(active, delta);
                     broadcast(buildEvent({ event: 'chat.commentary', runId, sessionId, payload: { delta } }));
                   }
                   return;
                 }
 
                 if (evt.event === 'chat.final') {
+                  active.activeCommentaryStepKey = '';
                   const text = evt.payload?.text || active.assistantBuffer || '';
                   await finalizeRun(active, text);
                   return;
@@ -1522,6 +1570,7 @@ export async function startChatd(opts = {}) {
                 }
 
                 if (evt.event === 'run.error') {
+                  active.activeCommentaryStepKey = '';
                   trackRunStep(active, evt);
                   active.lastError = evt.payload?.error || 'Run failed';
                   if (!active.resumeSessionId || active.resumeRetryAttempted) {
@@ -1534,6 +1583,7 @@ export async function startChatd(opts = {}) {
                   return;
                 }
 
+                active.activeCommentaryStepKey = '';
                 trackRunStep(active, evt);
                 broadcast(buildEvent({ event: evt.event, runId, sessionId, payload: evt.payload }));
               });

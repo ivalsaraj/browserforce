@@ -208,8 +208,66 @@ function commentaryHeadingFromDelta(delta) {
 
   if (!heading) return '';
   if (/^(browserforce|recovery action|error[:\s])/i.test(heading)) return '';
-  if (heading.length > 96) heading = `${heading.slice(0, 93).trimEnd()}...`;
+  if (heading.length > 96) {
+    const clipped = heading.slice(0, 93).trimEnd();
+    const wordBoundary = clipped.lastIndexOf(' ');
+    const base = wordBoundary >= 56 ? clipped.slice(0, wordBoundary).trimEnd() : clipped;
+    heading = `${base}...`;
+  }
   return heading.charAt(0).toUpperCase() + heading.slice(1);
+}
+
+function applyCommentaryDeltaToRun(run, delta) {
+  const sourceRun = run || {};
+  let steps = Array.isArray(sourceRun.steps) ? sourceRun.steps : [];
+  let timeline = Array.isArray(sourceRun.timeline) ? sourceRun.timeline : [];
+  let commentarySequence = Number.isInteger(sourceRun.commentarySequence) ? sourceRun.commentarySequence : 0;
+  let activeCommentaryStepKey = String(sourceRun.activeCommentaryStepKey || '');
+  const hasActiveCommentary = !!activeCommentaryStepKey && timeline.at(-1)?.type === 'text';
+
+  if (!hasActiveCommentary) {
+    commentarySequence += 1;
+    activeCommentaryStepKey = `commentary:${commentarySequence}`;
+    const heading = commentaryHeadingFromDelta(delta);
+    if (heading) {
+      const step = {
+        kind: 'reasoning',
+        status: 'running',
+        key: activeCommentaryStepKey,
+        label: heading,
+      };
+      steps = pushStep({ steps }, step);
+      timeline = pushTimelineEntry({ timeline }, { type: 'step', ...step });
+    }
+    timeline = pushTimelineEntry({ timeline }, { type: 'text', text: delta });
+    return {
+      steps,
+      timeline,
+      activeCommentaryStepKey,
+      commentarySequence,
+    };
+  }
+
+  timeline = pushTimelineEntry({ timeline }, { type: 'text', text: delta });
+  const mergedText = timeline.at(-1)?.type === 'text' ? timeline.at(-1)?.text || '' : delta;
+  const heading = commentaryHeadingFromDelta(mergedText);
+  if (heading) {
+    const step = {
+      kind: 'reasoning',
+      status: 'running',
+      key: activeCommentaryStepKey,
+      label: heading,
+    };
+    steps = pushStep({ steps }, step);
+    timeline = pushTimelineEntry({ timeline }, { type: 'step', ...step });
+  }
+
+  return {
+    steps,
+    timeline,
+    activeCommentaryStepKey,
+    commentarySequence,
+  };
 }
 
 function normalizeStep(step) {
@@ -753,6 +811,8 @@ export function applyEvent(state = initialState, evt = {}) {
         error: null,
         steps: [],
         timeline: [],
+        activeCommentaryStepKey: '',
+        commentarySequence: 0,
       }),
     };
   }
@@ -766,6 +826,7 @@ export function applyEvent(state = initialState, evt = {}) {
         sessionId: evt.sessionId,
         text: `${run.text || ''}${delta}`,
         timeline: pushTimelineEntry(run, { type: 'text', text: delta }),
+        activeCommentaryStepKey: '',
       }),
     };
   }
@@ -773,25 +834,15 @@ export function applyEvent(state = initialState, evt = {}) {
   if (evt.event === 'chat.commentary') {
     const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
     const delta = evt.payload?.delta || '';
-    const heading = commentaryHeadingFromDelta(delta);
-    const commentaryStep = heading
-      ? {
-        kind: 'reasoning',
-        status: 'running',
-        label: heading,
-      }
-      : null;
-    const timelineWithHeading = commentaryStep
-      ? pushTimelineEntry(run, { type: 'step', ...commentaryStep })
-      : (Array.isArray(run.timeline) ? run.timeline : []);
-    const nextSteps = commentaryStep ? pushStep(run, commentaryStep) : (Array.isArray(run.steps) ? run.steps : []);
-    const timeline = pushTimelineEntry({ timeline: timelineWithHeading }, { type: 'text', text: delta });
+    const commentaryState = applyCommentaryDeltaToRun(run, delta);
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {
         sessionId: evt.sessionId,
-        steps: nextSteps,
-        timeline,
+        steps: commentaryState.steps,
+        timeline: commentaryState.timeline,
+        activeCommentaryStepKey: commentaryState.activeCommentaryStepKey,
+        commentarySequence: commentaryState.commentarySequence,
       }),
     };
   }
@@ -824,6 +875,7 @@ export function applyEvent(state = initialState, evt = {}) {
         text: finalText,
         done: true,
         timeline,
+        activeCommentaryStepKey: '',
       }),
     };
   }
@@ -861,6 +913,7 @@ export function applyEvent(state = initialState, evt = {}) {
         error,
         steps: pushStep(run, step),
         timeline,
+        activeCommentaryStepKey: '',
       }),
     };
   }
@@ -901,6 +954,7 @@ export function applyEvent(state = initialState, evt = {}) {
         aborted: true,
         steps: pushStep(run, step),
         timeline,
+        activeCommentaryStepKey: '',
       }),
     };
   }
@@ -930,6 +984,7 @@ export function applyEvent(state = initialState, evt = {}) {
         done: false,
         steps: pushStep(run, step),
         timeline: pushTimelineEntry(run, { type: 'step', ...step }),
+        activeCommentaryStepKey: '',
       }),
     };
   }
@@ -955,6 +1010,7 @@ export function applyEvent(state = initialState, evt = {}) {
         done: false,
         steps: pushStep(run, step),
         timeline: pushTimelineEntry(run, { type: 'step', ...step }),
+        activeCommentaryStepKey: '',
       }),
     };
   }
