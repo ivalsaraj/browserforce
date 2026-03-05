@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"claude-session-resume-001","resumed":true}
+{"type":"assistant","message":{"id":"msg_resume_1","type":"message","role":"assistant","content":[{"type":"text","text":"Continuing from the previous thread."}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"claude-session-resume-001","result":"Continuing from the previous thread.","usage":{"input_tokens":210,"output_tokens":33,"cache_read_input_tokens":121}}

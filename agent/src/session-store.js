@@ -2,12 +2,16 @@ import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { PROVIDER_ALLOWLIST } from './provider-constants.js';
 
 const DEFAULT_STORAGE_ROOT = join(homedir(), '.browserforce', 'agent', 'sessions');
 const INDEX_FILE = 'index.json';
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const RUN_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const MODEL_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
+const PROVIDER_ID_RE = /^[A-Za-z0-9._:/-]{1,64}$/;
+const PROVIDER_SESSION_ID_RE = /^[A-Za-z0-9._:/-]{1,256}$/;
+export const SESSION_PROVIDERS = new Set(PROVIDER_ALLOWLIST);
 const REASONING_EFFORT_VALUES = new Set(['low', 'medium', 'high', 'xhigh']);
 const indexWriteQueues = new Map();
 
@@ -35,8 +39,18 @@ export function isValidModelId(model) {
   return typeof model === 'string' && MODEL_ID_RE.test(model);
 }
 
+export function isValidProviderId(provider) {
+  if (typeof provider !== 'string') return false;
+  const normalized = provider.trim().toLowerCase();
+  return !!normalized && PROVIDER_ID_RE.test(normalized) && SESSION_PROVIDERS.has(normalized);
+}
+
 export function isValidReasoningEffort(value) {
   return typeof value === 'string' && REASONING_EFFORT_VALUES.has(value.trim().toLowerCase());
+}
+
+export function isValidProviderSessionId(sessionId) {
+  return typeof sessionId === 'string' && PROVIDER_SESSION_ID_RE.test(sessionId);
 }
 
 function assertValidSessionId(sessionId, fnName) {
@@ -267,19 +281,34 @@ function normalizeReasoningEffort(reasoningEffort) {
   return trimmed;
 }
 
-function normalizeUsageNumber(value, fieldName) {
+function normalizeProvider(provider) {
+  if (provider == null) return null;
+  const trimmed = String(provider).trim().toLowerCase();
+  if (!trimmed) return null;
+  if (!isValidProviderId(trimmed)) {
+    throw new Error('provider must be one of: codex, claude');
+  }
+  return trimmed;
+}
+
+function providerStatePath(provider, suffix = '') {
+  const base = `providerState.${provider}`;
+  return suffix ? `${base}.${suffix}` : base;
+}
+
+function normalizeUsageNumber(value, fieldName, provider) {
   if (value == null) return null;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`providerState.codex.latestUsage.${fieldName} must be a non-negative number`);
+    throw new Error(`${providerStatePath(provider, `latestUsage.${fieldName}`)} must be a non-negative number`);
   }
   return Math.round(parsed);
 }
 
-function normalizeLatestUsage(latestUsage) {
+function normalizeLatestUsage(latestUsage, provider) {
   if (latestUsage == null) return null;
   if (!isObject(latestUsage)) {
-    throw new Error('providerState.codex.latestUsage must be an object');
+    throw new Error(`${providerStatePath(provider, 'latestUsage')} must be an object`);
   }
 
   const fields = [
@@ -294,34 +323,40 @@ function normalizeLatestUsage(latestUsage) {
   const normalized = {};
   for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(latestUsage, field)) continue;
-    const value = normalizeUsageNumber(latestUsage[field], field);
+    const value = normalizeUsageNumber(latestUsage[field], field, provider);
     if (value != null) normalized[field] = value;
   }
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
-function normalizeCodexProviderState(patchCodex, currentCodex) {
-  if (patchCodex == null) return null;
-  if (!isObject(patchCodex)) {
-    throw new Error('providerState.codex must be an object');
+function normalizeProviderStateEntry(provider, patchState, currentState) {
+  if (patchState == null) return null;
+  if (!isObject(patchState)) {
+    throw new Error(`${providerStatePath(provider)} must be an object`);
   }
 
-  const normalized = isObject(currentCodex) ? { ...currentCodex } : {};
+  const normalized = isObject(currentState) ? { ...currentState } : {};
 
-  if (Object.prototype.hasOwnProperty.call(patchCodex, 'sessionId')) {
-    if (patchCodex.sessionId == null || String(patchCodex.sessionId).trim() === '') {
+  if (Object.prototype.hasOwnProperty.call(patchState, 'sessionId')) {
+    if (patchState.sessionId == null || String(patchState.sessionId).trim() === '') {
       delete normalized.sessionId;
     } else {
-      const sessionId = String(patchCodex.sessionId).trim();
-      if (!isValidSessionId(sessionId)) {
-        throw new Error('providerState.codex.sessionId must be a safe session id');
+      const sessionId = String(patchState.sessionId).trim();
+      const validSessionId = provider === 'codex'
+        ? isValidSessionId(sessionId)
+        : isValidProviderSessionId(sessionId);
+      if (!validSessionId) {
+        const errorLabel = provider === 'codex'
+          ? 'safe session id'
+          : 'safe provider session id';
+        throw new Error(`${providerStatePath(provider, 'sessionId')} must be a ${errorLabel}`);
       }
       normalized.sessionId = sessionId;
     }
   }
 
-  if (Object.prototype.hasOwnProperty.call(patchCodex, 'latestUsage')) {
-    const latestUsage = normalizeLatestUsage(patchCodex.latestUsage);
+  if (Object.prototype.hasOwnProperty.call(patchState, 'latestUsage')) {
+    const latestUsage = normalizeLatestUsage(patchState.latestUsage, provider);
     if (latestUsage == null) delete normalized.latestUsage;
     else normalized.latestUsage = latestUsage;
   }
@@ -333,12 +368,20 @@ function normalizeProviderState(providerStatePatch, currentProviderState) {
   if (!isObject(providerStatePatch)) {
     throw new Error('providerState must be an object');
   }
-  const normalized = isObject(currentProviderState) ? { ...currentProviderState } : {};
+  const normalized = {};
+  for (const provider of SESSION_PROVIDERS) {
+    if (isObject(currentProviderState?.[provider])) {
+      normalized[provider] = { ...currentProviderState[provider] };
+    }
+  }
 
-  if (Object.prototype.hasOwnProperty.call(providerStatePatch, 'codex')) {
-    const codex = normalizeCodexProviderState(providerStatePatch.codex, normalized.codex);
-    if (codex == null) delete normalized.codex;
-    else normalized.codex = codex;
+  for (const provider of Object.keys(providerStatePatch)) {
+    if (!isValidProviderId(provider)) {
+      throw new Error(`${providerStatePath(provider)} is not supported`);
+    }
+    const nextState = normalizeProviderStateEntry(provider, providerStatePatch[provider], normalized[provider]);
+    if (nextState == null) delete normalized[provider];
+    else normalized[provider] = nextState;
   }
 
   return Object.keys(normalized).length > 0 ? normalized : null;
@@ -350,7 +393,13 @@ function sortSessionsNewestFirst(a, b) {
   return bTs - aTs;
 }
 
-export async function createSession({ title = 'New chat', model = null, reasoningEffort = null, storageRoot } = {}) {
+export async function createSession({
+  title = 'New chat',
+  model = null,
+  provider = null,
+  reasoningEffort = null,
+  storageRoot,
+} = {}) {
   const root = resolveStorageRoot(storageRoot);
   await ensureStorageRoot(root);
 
@@ -360,6 +409,7 @@ export async function createSession({ title = 'New chat', model = null, reasonin
     sessionId,
     title,
     model: normalizeModel(model),
+    provider: normalizeProvider(provider),
     reasoningEffort: normalizeReasoningEffort(reasoningEffort),
     createdAt: now,
     updatedAt: now,
@@ -414,6 +464,9 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'model')) {
       next.model = normalizeModel(patch.model);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'provider')) {
+      next.provider = normalizeProvider(patch.provider);
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'reasoningEffort')) {
       next.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort);

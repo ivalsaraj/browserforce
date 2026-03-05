@@ -119,6 +119,27 @@ test('updateSession persists per-session model and title', async () => {
   assert.equal(row?.reasoningEffort, 'high');
 });
 
+test('createSession persists provider when set', async () => {
+  const created = await createSession({ title: 'Claude chat', provider: 'claude', storageRoot });
+  assert.equal(created.provider, 'claude');
+
+  const rows = await listSessions({ limit: 10, storageRoot });
+  const row = rows.find((item) => item.sessionId === created.sessionId);
+  assert.equal(row?.provider, 'claude');
+});
+
+test('updateSession rejects unsupported provider ids', async () => {
+  const created = await createSession({ title: 'Provider validation', storageRoot });
+  await assert.rejects(
+    updateSession({
+      sessionId: created.sessionId,
+      patch: { provider: 'openai' },
+      storageRoot,
+    }),
+    /provider must be one of: codex, claude/i,
+  );
+});
+
 test('updateSession supports clearing reasoning effort back to config default', async () => {
   const created = await createSession({ title: 'Before', storageRoot });
   const updated = await updateSession({
@@ -155,6 +176,30 @@ test('updateSession persists codex provider session mapping', async () => {
   const row = rows.find((item) => item.sessionId === created.sessionId);
   assert.equal(row?.providerState?.codex?.sessionId, '019caa6f-8c63-7c81-a542-3dbcf922d065');
   assert.equal(row?.providerState?.codex?.latestUsage?.totalTokens, 128125);
+});
+
+test('updateSession persists claude provider session mapping and usage', async () => {
+  const created = await createSession({ title: 'Claude continuity', provider: 'claude', storageRoot });
+  const providerSessionId = 'claude:session/123';
+  const updated = await updateSession({
+    sessionId: created.sessionId,
+    patch: {
+      providerState: {
+        claude: {
+          sessionId: providerSessionId,
+          latestUsage: {
+            inputTokens: 77,
+            outputTokens: 31,
+          },
+        },
+      },
+    },
+    storageRoot,
+  });
+
+  assert.equal(updated?.providerState?.claude?.sessionId, providerSessionId);
+  assert.equal(updated?.providerState?.claude?.latestUsage?.inputTokens, 77);
+  assert.equal(updated?.providerState?.claude?.latestUsage?.outputTokens, 31);
 });
 
 test('listSessions fails fast on corrupted index metadata', async () => {
