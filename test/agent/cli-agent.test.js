@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -23,6 +23,13 @@ test('browserforce agent start allocates a non-conflicting port', async () => {
     assert.equal(body.started, true);
     assert.ok(Number.isInteger(body.port));
     assert.ok(Number.isInteger(body.pid));
+    const codexCwd = join(home, '.browserforce', 'agent-cwd');
+    const agentsPath = join(codexCwd, 'AGENTS.md');
+    assert.equal(existsSync(codexCwd), true);
+    assert.equal(existsSync(agentsPath), true);
+    const agentsBody = readFileSync(agentsPath, 'utf8');
+    assert.match(agentsBody, /BrowserForce managed AGENTS\.md/);
+    assert.match(agentsBody, /warm, practical, action-first browser assistant/i);
 
     await cli(['agent', 'stop', '--json'], { HOME: home });
   } finally {

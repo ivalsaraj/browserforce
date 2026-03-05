@@ -999,7 +999,10 @@ export async function startChatd(opts = {}) {
   const storageRoot = opts.storageRoot || ephemeralStorageRoot;
   const token = opts.token || process.env.BF_CHATD_TOKEN || randomBytes(32).toString('base64url');
   const chatdUrlPath = opts.chatdUrlPath || process.env.BF_CHATD_URL_PATH || CHATD_URL_PATH;
-  const runExecutor = opts.runExecutor || createDefaultRunExecutor({ codexCwd: opts.codexCwd || process.cwd() });
+  const envCodexCwd = String(process.env.BF_CHATD_CODEX_CWD || '').trim();
+  const runExecutor = opts.runExecutor || createDefaultRunExecutor({
+    codexCwd: opts.codexCwd || envCodexCwd || process.cwd(),
+  });
   const modelFetcher = opts.modelFetcher || (() => fetchCodexModelCatalog({
     command: opts.codexCommand || process.env.BF_CHATD_CODEX_COMMAND || 'codex',
     timeoutMs: Number(process.env.BF_CHATD_MODEL_LIST_TIMEOUT_MS || MODEL_LIST_TIMEOUT_MS),
