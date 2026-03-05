@@ -430,6 +430,30 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
   });
 }
 
+export async function deleteSession({ sessionId, storageRoot } = {}) {
+  assertValidSessionId(sessionId, 'deleteSession');
+  const root = resolveStorageRoot(storageRoot);
+  await ensureStorageRoot(root);
+
+  return withIndexWriteLock(root, async () => {
+    const sessions = await readIndex(root);
+    const idx = sessions.findIndex((row) => row.sessionId === sessionId);
+    if (idx === -1) return false;
+
+    sessions.splice(idx, 1);
+    await writeIndex(root, sessions);
+
+    const logPath = messageLogPath(root, sessionId);
+    try {
+      await fs.unlink(logPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+
+    return true;
+  });
+}
+
 export async function appendMessage({ sessionId, role, text, runId, steps, timeline, storageRoot } = {}) {
   assertValidSessionId(sessionId, 'appendMessage');
   if (!role) throw new Error('appendMessage requires role');

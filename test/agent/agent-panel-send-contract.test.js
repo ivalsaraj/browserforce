@@ -45,9 +45,12 @@ test('session labels fall back to session id when title is default', () => {
 test('session popover supports inline rename and saves via session patch endpoint', () => {
   assert.match(js, /data-session-edit-btn/);
   assert.match(js, /data-session-edit-form/);
+  assert.match(js, /data-session-delete-btn/);
   assert.match(js, /async function updateSessionTitle/);
+  assert.match(js, /async function deleteSession\(/);
   assert.match(js, /\/v1\/sessions\/\$\{encodeURIComponent\(sessionId\)\}/);
   assert.match(js, /method:\s*'PATCH'/);
+  assert.match(js, /method:\s*'DELETE'/);
   assert.match(js, /JSON\.stringify\(\{\s*title\s*:\s*title/);
 });
 

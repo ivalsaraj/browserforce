@@ -576,6 +576,14 @@ function renderSessions() {
               <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4 12.5-12.5z"></path>
             </svg>
           </button>
+          <button type="button" class="session-edit-btn session-delete-btn" data-session-delete-btn="${escapeHtml(session.sessionId)}" aria-label="Delete session" title="Delete session">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h18"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 6V4h8v2"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 6l-1 14H6L5 6"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10 11v6M14 11v6"></path>
+            </svg>
+          </button>
         </li>
       `;
     })
@@ -591,6 +599,16 @@ function renderSessions() {
   switchSessionListEl.querySelectorAll('button[data-session-edit-btn]').forEach((button) => {
     button.addEventListener('click', () => {
       beginSessionEdit(button.getAttribute('data-session-edit-btn') || '');
+    });
+  });
+
+  switchSessionListEl.querySelectorAll('button[data-session-delete-btn]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        await deleteSession(button.getAttribute('data-session-delete-btn') || '');
+      } catch (error) {
+        setStatus('error', error?.message || 'Unable to delete session');
+      }
     });
   });
 
@@ -1809,6 +1827,51 @@ async function updateSessionTitle(sessionId, rawTitle) {
 
   const activeSessionId = state.value.activeSessionId || sessionId;
   await loadSessions(activeSessionId);
+  setStatus('ready', 'Ready');
+}
+
+async function deleteSession(sessionId) {
+  if (!sessionId) return;
+  const session = state.value.sessions.find((item) => item.sessionId === sessionId);
+  if (!session) return;
+
+  const displayName = formatSessionDisplayName(session);
+  const confirmed = window.confirm(`Delete session "${displayName}"? This cannot be undone.`);
+  if (!confirmed) return;
+
+  const res = await api(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    headers: {},
+  });
+  if (!res.ok && res.status !== 204) {
+    const body = await readJsonOrEmpty(res);
+    throw new Error(body.error || 'Unable to delete session');
+  }
+
+  state.currentRunBySession = clearSessionRunId(state.currentRunBySession, sessionId);
+  if (state.editingSessionId === sessionId) {
+    state.editingSessionId = null;
+  }
+  const nextDrafts = { ...(state.sessionTitleDrafts || {}) };
+  delete nextDrafts[sessionId];
+  state.sessionTitleDrafts = nextDrafts;
+
+  const remainingSessionIds = state.value.sessions
+    .filter((item) => item.sessionId !== sessionId)
+    .map((item) => item.sessionId);
+
+  if (state.value.activeSessionId === sessionId) {
+    const fallbackSessionId = remainingSessionIds[0] || null;
+    if (fallbackSessionId) {
+      await loadSessions(fallbackSessionId);
+      await selectSession(fallbackSessionId);
+    } else {
+      await createSession();
+    }
+  } else {
+    await loadSessions(state.value.activeSessionId || null);
+  }
+
   setStatus('ready', 'Ready');
 }
 

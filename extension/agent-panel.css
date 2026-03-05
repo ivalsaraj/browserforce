@@ -1261,6 +1261,15 @@ body {
   color: #fff;
 }
 
+.session-delete-btn {
+  color: rgba(255, 173, 173, 0.72);
+}
+
+.session-delete-btn:hover {
+  background: rgba(255, 92, 92, 0.22);
+  color: #ffd6d6;
+}
+
 .session-edit-btn svg {
   width: 13px;
   height: 13px;

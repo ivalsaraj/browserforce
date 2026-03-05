@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createSession,
+  deleteSession,
   listSessions,
   appendMessage,
   readMessages,
@@ -127,6 +128,26 @@ test('updateSession supports clearing reasoning effort back to config default', 
     storageRoot,
   });
   assert.equal(updated?.reasoningEffort, null);
+});
+
+test('deleteSession removes session metadata and transcript log', async () => {
+  const created = await createSession({ title: 'Disposable', storageRoot });
+  await appendMessage({
+    sessionId: created.sessionId,
+    role: 'user',
+    text: 'hello',
+    storageRoot,
+  });
+
+  const removed = await deleteSession({
+    sessionId: created.sessionId,
+    storageRoot,
+  });
+  assert.equal(removed, true);
+
+  const rows = await listSessions({ limit: 50, storageRoot });
+  assert.equal(rows.some((row) => row.sessionId === created.sessionId), false);
+  assert.equal(existsSync(join(storageRoot, `${created.sessionId}.jsonl`)), false);
 });
 
 test('updateSession persists codex provider session mapping', async () => {

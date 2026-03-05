@@ -106,6 +106,40 @@ test('GET /v1/sessions/:id/messages rejects malformed encoded id', async () => {
   }
 });
 
+test('DELETE /v1/sessions/:id removes session and returns not found on reload', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Delete me' }),
+    }).then((res) => res.json());
+
+    const deleted = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(deleted.status, 204);
+
+    const listRes = await fetch(`${daemon.baseUrl}/v1/sessions`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(listRes.status, 200);
+    const listBody = await listRes.json();
+    assert.equal((listBody.sessions || []).some((row) => row.sessionId === created.sessionId), false);
+
+    const fetchDeleted = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(fetchDeleted.status, 404);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('GET /v1/local-file serves local image bytes for authenticated requests', async () => {
   const tempDir = mkdtempSync(join(tmpdir(), 'bf-chatd-local-image-'));
   const imagePath = join(tempDir, 'preview.png');

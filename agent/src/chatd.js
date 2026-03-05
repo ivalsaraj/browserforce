@@ -12,6 +12,7 @@ import { startCodexRun } from './codex-runner.js';
 import {
   appendMessage,
   createSession,
+  deleteSession,
   getSession,
   isValidModelId,
   isValidReasoningEffort,
@@ -1393,6 +1394,24 @@ export async function startChatd(opts = {}) {
         } catch (error) {
           json(res, 400, { error: error?.message || 'Invalid session patch' });
         }
+        return;
+      }
+
+      if (sessionMatch && req.method === 'DELETE') {
+        const decodedSessionId = safeDecodeComponent(sessionMatch[1]);
+        if (!decodedSessionId || !isValidSessionId(decodedSessionId)) {
+          json(res, 400, { error: 'Invalid sessionId' });
+          return;
+        }
+
+        const deleted = await deleteSession({ sessionId: decodedSessionId, storageRoot });
+        if (!deleted) {
+          json(res, 404, { error: 'Session not found' });
+          return;
+        }
+
+        res.statusCode = 204;
+        res.end();
         return;
       }
 
