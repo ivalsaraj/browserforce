@@ -220,6 +220,12 @@ function isCommentaryPhase(phase) {
   return normalized === 'commentary' || normalized === 'analysis' || normalized === 'thinking';
 }
 
+function classifyAssistantMessageEvent(phase) {
+  if (isFinalPhase(phase)) return 'chat.final';
+  if (isCommentaryPhase(phase)) return 'chat.commentary';
+  return 'chat.commentary';
+}
+
 function normalizeResponseItem({ runId, sessionId, payload }) {
   if (!payload || typeof payload !== 'object') return null;
   const itemType = String(payload.type || '').toLowerCase();
@@ -234,10 +240,11 @@ function normalizeResponseItem({ runId, sessionId, payload }) {
     ]);
     if (!text) return null;
     const phase = String(payload.phase || '').toLowerCase();
-    if (isFinalPhase(phase)) {
+    const eventType = classifyAssistantMessageEvent(phase);
+    if (eventType === 'chat.final') {
       return envelope({ event: 'chat.final', runId, sessionId, payload: { text, phase } });
     }
-    if (isCommentaryPhase(phase)) {
+    if (eventType === 'chat.commentary') {
       return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
     }
     return envelope({ event: 'chat.delta', runId, sessionId, payload: { delta: text, phase } });
@@ -330,10 +337,11 @@ function normalizeEventMsg({ runId, sessionId, payload }) {
     const text = firstString([payload.message, payload.text]);
     if (!text) return null;
     const phase = String(payload.phase || '').toLowerCase();
-    if (isFinalPhase(phase)) {
+    const eventType = classifyAssistantMessageEvent(phase);
+    if (eventType === 'chat.final') {
       return envelope({ event: 'chat.final', runId, sessionId, payload: { text, phase } });
     }
-    if (isCommentaryPhase(phase)) {
+    if (eventType === 'chat.commentary') {
       return envelope({ event: 'chat.commentary', runId, sessionId, payload: { delta: text, phase } });
     }
     return envelope({ event: 'chat.delta', runId, sessionId, payload: { delta: text, phase } });
