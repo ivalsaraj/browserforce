@@ -524,6 +524,16 @@ function stripInlineMarkdown(text) {
     .trim();
 }
 
+function clipHeadingAtClauseBoundary(text) {
+  const source = String(text || '').trim();
+  if (!source) return '';
+  const clauseMatch = source.match(
+    /^(.{24,}?)(?:\s*;\s+|\s*,\s*(?:then|so|because|while|after)\b|\s+(?:and then|and i['’]?ll|and i am|then|so that|so i can|so we can|in order to|while|after that)\b)/i,
+  );
+  if (!clauseMatch) return source;
+  return String(clauseMatch[1] || '').trim();
+}
+
 function commentaryHeadingFromDelta(delta) {
   const source = String(delta || '').trim();
   if (!source) return '';
@@ -536,15 +546,19 @@ function commentaryHeadingFromDelta(delta) {
   let heading = stripInlineMarkdown(firstLine)
     .replace(/^[\-*•\d.)\s]+/, '')
     .replace(/^\s*(?:i['’]?m|i am|i['’]?ll|i will)\s+/i, '')
+    .replace(/^\s*(?:going to|about to|trying to|plan(?:ning)? to|want to)\s+/i, '')
+    .replace(/^let me\s+/i, '')
     .replace(/^(?:next|now)\s*,?\s+/i, '')
     .replace(/[.?!:;,\s]+$/, '')
     .replace(/\s+/g, ' ')
     .trim();
 
+  heading = clipHeadingAtClauseBoundary(heading);
   if (!heading) return '';
   if (/^(browserforce|recovery action|error[:\s])/i.test(heading)) return '';
-  if (heading.length > 96) {
-    const clipped = heading.slice(0, 93).trimEnd();
+  if (/^[`'"]?\//.test(heading) || /^[a-z]:\\/i.test(heading)) return '';
+  if (heading.length > 72) {
+    const clipped = heading.slice(0, 69).trimEnd();
     const wordBoundary = clipped.lastIndexOf(' ');
     const base = wordBoundary >= 56 ? clipped.slice(0, wordBoundary).trimEnd() : clipped;
     heading = `${base}...`;

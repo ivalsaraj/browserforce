@@ -462,6 +462,8 @@ test('POST /v1/runs persists one keyed reasoning step across chunked commentary 
 
     assert.equal(reasoningSteps.length, 1);
     assert.equal(reasoningSteps[0]?.key, 'commentary:1');
+    assert.doesNotMatch(reasoningSteps[0]?.label || '', /\band checking\b/i);
+    assert.doesNotMatch(reasoningSteps[0]?.label || '', /\bso I can\b/i);
     assert.doesNotMatch(reasoningSteps[0]?.label || '', /\b[a-z]\.\.\.$/i);
     assert.equal(timeline.some((item) => item?.type === 'text' && /give exact steps/i.test(item?.text || '')), true);
   } finally {

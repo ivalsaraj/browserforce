@@ -113,6 +113,8 @@ test('chat.commentary chunks update one active reasoning heading instead of crea
   assert.equal(reasoningSteps.length, 1);
   assert.equal(reasoningSteps[0]?.key, 'commentary:1');
   assert.match(reasoningSteps[0]?.label || '', /I found BUCKS/i);
+  assert.doesNotMatch(reasoningSteps[0]?.label || '', /\band checking\b/i);
+  assert.doesNotMatch(reasoningSteps[0]?.label || '', /\bso I can\b/i);
   assert.doesNotMatch(reasoningSteps[0]?.label || '', /\b[a-z]\.\.\.$/i);
   assert.equal(textEntries.length, 1);
   assert.match(textEntries[0]?.text || '', /give exact steps/i);
