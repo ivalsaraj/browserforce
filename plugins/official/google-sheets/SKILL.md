@@ -1,10 +1,10 @@
 ---
 name: google-sheets
-description: Google Sheets helpers for reading, summarizing, formatting, and issue logging in the active sheet.
-when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Applying bullet splitting and sparse bold formatting across ranges", "Logging extraction or formatting failures for follow-up"]
+description: Google Sheets helpers for reading, selection-aware formatting, summarizing, and issue logging in the active sheet.
+when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Formatting the current cell or selection without guesswork", "Applying bullet splitting and sparse bold formatting across ranges", "Logging extraction or formatting failures for follow-up"]
 helper_prefix: gs
-helpers: ["gs__getMeta", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
-helper_aliases: ["gsGetMeta", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
+helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
+helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
 tools: []
 ---
 
@@ -18,12 +18,15 @@ Tool naming note:
 
 Available helpers:
 - `gs__getMeta()` → current spreadsheet id + gid + title + URL
+- `gs__getSelection()` → active cell/range as A1 notation without DOM guessing
 - `gs__gotoCell(cellRef)` → jump to a cell using the Sheets name box
 - `gs__readCell(cellRef, options?)` → read cell text through the in-cell editor
 - `gs__readContiguousRows(options?)` → detect used rows without hard-scanning arbitrary ranges
+- `gs__suggestBoldPhrases(rangeRef, options?)` → propose 1-2 emphasis phrases per cell without writing
 - `gs__summarizeSheet(options?)` → one-call summary payload (sheet meta + scan stats + preview rows)
 - `gs__splitBulletsInRange(rangeRef, options?)` → replace in-cell bullet separators with real new lines
 - `gs__rebalanceBoldInRange(rangeRef, options?)` → sparse bolding (default: max 1 bold segment per line)
+- `gs__formatCurrentSelection(options?)` → format the current selection using the existing range formatter
 - `gs__formatBulletsInRange(rangeRef, options?)` → split bullets + rebalance bold in one pass
 - `gs__logIssue(summary, details?, options?)` → append a JSONL issue entry
 - `gs__issueLogPath()` → return default issue log path
@@ -45,8 +48,12 @@ When the user says "summarize this page/sheet", "read this sheet", or equivalent
 - Always report `scannedRows`, `usedRowCount`, and `stopReason` when summarizing extraction.
 - For summary requests, prefer `gs__summarizeSheet()` over ad-hoc DOM probing loops.
 - `gs__summarizeSheet()` reuses a recent in-session scan by default; set `forceRefresh: true` when the user asks for a guaranteed fresh pull.
+- Use `gs__getSelection()` or `gs__formatCurrentSelection()` when the user refers to "this cell" or "current selection".
+- Use `gs__suggestBoldPhrases()` when phrase choice matters and you want a preview before writing.
 - Prefer `gs__formatBulletsInRange()` for multi-cell content cleanup tasks.
 - Use `dryRun: true` first for formatting helpers when changing many cells.
+- Formatting defaults to `executionMode: 'safe'` and `verifyMode: 'full'`.
+- Use `executionMode: 'parallel'` only when the user explicitly asks for speed or parallel execution.
 - Log every process failure or unexpected behavior with `gs__logIssue(...)`.
 
 ## Guardrails (Google Sheets)
@@ -101,4 +108,33 @@ const result = await gs__formatBulletsInRange('D2:D11', {
 });
 
 return result.summary || result;
+```
+
+## Example: Follow the Current Selection
+
+```js
+const selection = await gs__getSelection();
+const suggestions = await gs__suggestBoldPhrases(selection.rangeRef, {
+  maxPhrasesPerLine: 1,
+  strategy: 'signal'
+});
+
+return { selection, suggestions };
+```
+
+## Example: Explicit Parallel Formatting
+
+```js
+const result = await gs__formatBulletsInRange('D2:D20', {
+  executionMode: 'parallel',
+  verifyMode: 'sample',
+  maxConcurrentWorkers: 3
+});
+
+return {
+  executionModeRequested: result.executionModeRequested,
+  executionModeUsed: result.executionModeUsed,
+  fallbackTriggered: result.fallbackTriggered,
+  peakConcurrentWorkers: result.peakConcurrentWorkers
+};
 ```

@@ -140,14 +140,39 @@ function createPageMarkdownPage(content = 'Markdown content line', options = {})
   };
 }
 
-function createGoogleSheetsMockPage(cellValues = {}) {
-  let activeRef = 'A1';
+function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
+  let activeRef = String(options.activeRef || 'A1').toUpperCase();
   let editorReadCount = 0;
+  let selection;
+  if (Object.prototype.hasOwnProperty.call(options, 'selection')) {
+    selection = options.selection
+      ? {
+          anchorCell: String(options.selection.anchorCell || activeRef).toUpperCase(),
+          rangeRef: String(options.selection.rangeRef || options.selection.anchorCell || activeRef).toUpperCase(),
+          multiCell: options.selection.multiCell === true,
+          activeSheetTitle: options.selection.activeSheetTitle || 'Mock Sheet',
+        }
+      : null;
+  } else {
+    selection = {
+      anchorCell: activeRef,
+      rangeRef: activeRef,
+      multiCell: false,
+      activeSheetTitle: 'Mock Sheet',
+    };
+  }
+  const boldRangesByCell = options.boldRangesByCell || {};
+  const failWriteRefs = new Set((options.failWriteRefs || []).map((ref) => String(ref).toUpperCase()));
+  const pageUrl = options.pageUrl || 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit#gid=1';
+  let currentUrl = pageUrl;
 
   const page = {
     isClosed: () => false,
-    url: () => 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit#gid=1',
+    url: () => currentUrl,
     title: async () => 'Mock Sheet',
+    goto: async (url) => {
+      currentUrl = url;
+    },
     locator: (selector) => {
       assert.equal(selector, '#t-name-box');
       return {
@@ -158,14 +183,29 @@ function createGoogleSheetsMockPage(cellValues = {}) {
       };
     },
     keyboard: {
-      press: async () => {},
+      press: async (key) => {
+        if (key === 'Enter') {
+          selection = {
+            anchorCell: activeRef,
+            rangeRef: activeRef,
+            multiCell: false,
+            activeSheetTitle: selection?.activeSheetTitle || 'Mock Sheet',
+          };
+        }
+      },
     },
     waitForTimeout: async () => {},
     evaluate: async (fn, arg) => {
       const source = String(fn);
       if (arg && typeof arg === 'object' && typeof arg.textValue === 'string') {
+        if (failWriteRefs.has(activeRef)) {
+          return { after: `${arg.textValue} [mismatch]`, lineCount: arg.textValue.split('\n').length };
+        }
         cellValues[activeRef] = arg.textValue;
         return { after: arg.textValue, lineCount: arg.textValue.split('\n').length };
+      }
+      if (source.includes('#t-name-box') && source.includes('activeSheetTitle')) {
+        return selection ? { ...selection } : null;
       }
       if (source.includes('createTreeWalker(editor, NodeFilter.SHOW_TEXT)')) {
         const text = Object.prototype.hasOwnProperty.call(cellValues, activeRef)
@@ -174,7 +214,7 @@ function createGoogleSheetsMockPage(cellValues = {}) {
         return {
           text,
           baseStyle: '',
-          boldRanges: [],
+          boldRanges: Array.isArray(boldRangesByCell[activeRef]) ? boldRangesByCell[activeRef] : [],
           lineCount: text.split('\n').length,
         };
       }
@@ -191,6 +231,7 @@ function createGoogleSheetsMockPage(cellValues = {}) {
   return {
     page,
     getEditorReadCount: () => editorReadCount,
+    getSelection: () => selection,
   };
 }
 
@@ -286,6 +327,18 @@ test('official plugin canonical helper names remain available alongside aliases'
   const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
   const { default: highlightPlugin } = await import('../../plugins/official/highlight/index.js');
 
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__getSelection, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsGetSelection, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__getSelection, googleSheetsPlugin.helpers.gsGetSelection);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__suggestBoldPhrases, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsSuggestBoldPhrases, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__suggestBoldPhrases, googleSheetsPlugin.helpers.gsSuggestBoldPhrases);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__formatCurrentSelection, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsFormatCurrentSelection, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__formatCurrentSelection, googleSheetsPlugin.helpers.gsFormatCurrentSelection);
+
   assert.equal(typeof googleSheetsPlugin.helpers.gs__summarizeSheet, 'function');
   assert.equal(typeof googleSheetsPlugin.helpers.gsSummarizeSheet, 'function');
   assert.equal(googleSheetsPlugin.helpers.gs__summarizeSheet, googleSheetsPlugin.helpers.gsSummarizeSheet);
@@ -293,6 +346,218 @@ test('official plugin canonical helper names remain available alongside aliases'
   assert.equal(typeof highlightPlugin.helpers.hl__highlight, 'function');
   assert.equal(typeof highlightPlugin.helpers.highlight, 'function');
   assert.equal(highlightPlugin.helpers.hl__highlight, highlightPlugin.helpers.highlight);
+});
+
+test('gsGetSelection returns current single-cell selection from the Sheets name box', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const getSelection = googleSheetsPlugin.helpers.gsGetSelection;
+  const { page } = createGoogleSheetsMockPage({}, {
+    selection: {
+      anchorCell: 'D4',
+      rangeRef: 'D4',
+      multiCell: false,
+      activeSheetTitle: 'Mock Sheet',
+    },
+  });
+
+  const result = await getSelection(page, null, {});
+
+  assert.deepEqual(result, {
+    anchorCell: 'D4',
+    rangeRef: 'D4',
+    multiCell: false,
+    activeSheetTitle: 'Mock Sheet',
+    spreadsheetId: 'test-sheet-id',
+    gid: '1',
+  });
+});
+
+test('gsGetSelection returns current multi-cell selection from the Sheets name box', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const getSelection = googleSheetsPlugin.helpers.gsGetSelection;
+  const { page } = createGoogleSheetsMockPage({}, {
+    selection: {
+      anchorCell: 'F2',
+      rangeRef: 'F2:L11',
+      multiCell: true,
+      activeSheetTitle: 'Mock Sheet',
+    },
+  });
+
+  const result = await getSelection(page, null, {});
+
+  assert.equal(result.anchorCell, 'F2');
+  assert.equal(result.rangeRef, 'F2:L11');
+  assert.equal(result.multiCell, true);
+});
+
+test('gsGetSelection fails clearly when the selection cannot be resolved', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const getSelection = googleSheetsPlugin.helpers.gsGetSelection;
+  const { page } = createGoogleSheetsMockPage({}, { selection: null });
+
+  await assert.rejects(
+    () => getSelection(page, null, {}),
+    /could not resolve the current Google Sheets selection/i,
+  );
+});
+
+test('gsSuggestBoldPhrases suggests short signal phrases without mutating cells', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const suggestBoldPhrases = googleSheetsPlugin.helpers.gsSuggestBoldPhrases;
+  const cells = {
+    D2: '- Owns delivery milestones - Closes QA with evidence',
+    D3: '- Gives clear status updates',
+  };
+  const { page } = createGoogleSheetsMockPage(cells);
+
+  const result = await suggestBoldPhrases(page, null, {}, 'D2:D3', {
+    maxPhrasesPerLine: 1,
+    maxWordsPerPhrase: 4,
+  });
+
+  assert.equal(result.rangeRef, 'D2:D3');
+  assert.deepEqual(result.suggestionsByCell.D2, ['Owns delivery milestones']);
+  assert.deepEqual(result.suggestionsByCell.D3, ['Gives clear status updates']);
+  assert.equal(cells.D2, '- Owns delivery milestones - Closes QA with evidence');
+  assert.equal(cells.D3, '- Gives clear status updates');
+});
+
+test('gsSuggestBoldPhrases can prefer existing bold ranges first', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const suggestBoldPhrases = googleSheetsPlugin.helpers.gsSuggestBoldPhrases;
+  const { page } = createGoogleSheetsMockPage({
+    D2: 'Owns delivery milestones',
+  }, {
+    boldRangesByCell: {
+      D2: [{ start: 0, end: 5 }],
+    },
+  });
+
+  const result = await suggestBoldPhrases(page, null, {}, 'D2:D2', {
+    strategy: 'existing-bold-first',
+  });
+
+  assert.deepEqual(result.suggestionsByCell.D2, ['Owns']);
+});
+
+test('gsFormatCurrentSelection delegates to gsFormatBulletsInRange using the resolved range', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const formatCurrentSelection = googleSheetsPlugin.helpers.gsFormatCurrentSelection;
+  const { page } = createGoogleSheetsMockPage({
+    D2: 'Alpha - Beta',
+    E2: 'Gamma - Delta',
+  }, {
+    selection: {
+      anchorCell: 'D2',
+      rangeRef: 'D2:E2',
+      multiCell: true,
+      activeSheetTitle: 'Mock Sheet',
+    },
+  });
+
+  const result = await formatCurrentSelection(page, { pages: () => [page] }, {}, {
+    verifyMode: 'none',
+  });
+
+  assert.equal(result.selection.rangeRef, 'D2:E2');
+  assert.equal(result.rangeRef, 'D2:E2');
+  assert.equal(result.executionModeRequested, 'safe');
+  assert.equal(result.executionModeUsed, 'safe');
+});
+
+test('gsFormatBulletsInRange defaults to safe execution and full verification', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const formatBullets = googleSheetsPlugin.helpers.gsFormatBulletsInRange;
+  const { page } = createGoogleSheetsMockPage({
+    D2: 'Alpha - Beta',
+  });
+
+  const result = await formatBullets(page, { pages: () => [page] }, {}, 'D2:D2');
+
+  assert.equal(result.executionModeRequested, 'safe');
+  assert.equal(result.executionModeUsed, 'safe');
+  assert.equal(result.verifyMode, 'full');
+});
+
+test('gsFormatBulletsInRange rejects invalid executionMode and verifyMode values', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const formatBullets = googleSheetsPlugin.helpers.gsFormatBulletsInRange;
+  const { page } = createGoogleSheetsMockPage({
+    D2: 'Alpha - Beta',
+  });
+
+  await assert.rejects(
+    () => formatBullets(page, { pages: () => [page] }, {}, 'D2:D2', { executionMode: 'fastest' }),
+    /executionMode must be one of: safe, parallel/i,
+  );
+
+  await assert.rejects(
+    () => formatBullets(page, { pages: () => [page] }, {}, 'D2:D2', { verifyMode: 'smart' }),
+    /verifyMode must be one of: full, sample, none/i,
+  );
+});
+
+test('gsFormatBulletsInRange parallel mode uses separate worker pages when explicitly requested', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const formatBullets = googleSheetsPlugin.helpers.gsFormatBulletsInRange;
+  const sharedCells = {
+    D2: 'Alpha - Beta',
+    D3: 'Gamma - Delta',
+  };
+  const base = createGoogleSheetsMockPage(sharedCells);
+  let newPageCalls = 0;
+  const ctx = {
+    pages: () => [base.page],
+    newPage: async () => {
+      newPageCalls += 1;
+      return createGoogleSheetsMockPage(sharedCells).page;
+    },
+  };
+
+  const result = await formatBullets(base.page, ctx, {}, 'D2:D3', {
+    executionMode: 'parallel',
+    verifyMode: 'none',
+    maxConcurrentWorkers: 2,
+  });
+
+  assert.equal(result.executionModeRequested, 'parallel');
+  assert.equal(result.executionModeUsed, 'parallel');
+  assert.ok(newPageCalls >= 2);
+  assert.ok(result.peakConcurrentWorkers >= 2);
+});
+
+test('gsFormatBulletsInRange parallel mode falls back to safe mode after a worker mismatch', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const formatBullets = googleSheetsPlugin.helpers.gsFormatBulletsInRange;
+  const sharedCells = {
+    D2: 'Alpha - Beta',
+    D3: 'Gamma - Delta',
+    D4: 'Epsilon - Zeta',
+  };
+  const base = createGoogleSheetsMockPage(sharedCells);
+  let newPageCalls = 0;
+  const ctx = {
+    pages: () => [base.page],
+    newPage: async () => {
+      newPageCalls += 1;
+      return createGoogleSheetsMockPage(sharedCells, {
+        failWriteRefs: ['D2'],
+      }).page;
+    },
+  };
+
+  const result = await formatBullets(base.page, ctx, {}, 'D2:D4', {
+    executionMode: 'parallel',
+    verifyMode: 'none',
+    maxConcurrentWorkers: 2,
+  });
+
+  assert.equal(result.executionModeRequested, 'parallel');
+  assert.equal(result.executionModeUsed, 'safe');
+  assert.equal(result.fallbackTriggered, true);
+  assert.match(result.fallbackReason, /text_mismatch_after_write/i);
+  assert.ok(newPageCalls >= 2);
 });
 
 test('runCode uses execute-scope console shim instead of global console', async () => {

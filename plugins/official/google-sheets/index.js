@@ -5,11 +5,15 @@ import { homedir } from 'node:os';
 const DEFAULT_SCAN_MAX_ROWS = 30;
 const DEFAULT_EMPTY_STREAK_STOP = 2;
 const DEFAULT_EDITOR_WAIT_MS = 35;
+const DEFAULT_MAX_PARALLEL_WORKERS = 4;
 const DEFAULT_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
 const SUMMARY_CACHE_MAX_ENTRIES = 24;
 const SUMMARY_CACHE_STATE_KEY = '__gsSummaryCache';
 const DEFAULT_LOG_PATH = join(homedir(), '.browserforce', 'logs', 'google-sheets-issues.jsonl');
 const SHEETS_URL_RE = /^https:\/\/docs\.google\.com\/spreadsheets\//;
+const DEFAULT_SUGGESTION_STOPWORDS = [
+  'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'of', 'on', 'or', 'the', 'to', 'with', 'without',
+];
 
 function assertPage(page, helperName) {
   if (!page || typeof page.url !== 'function') {
@@ -257,6 +261,162 @@ function splitBulletsText(text, options = {}) {
   const replacement = options.replacement || '\n- ';
   const re = new RegExp(pattern, flags);
   return String(text || '').replace(re, replacement);
+}
+
+function normalizeExecutionMode(value) {
+  if (value === undefined || value === null || value === '') return 'safe';
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'safe' || normalized === 'parallel') return normalized;
+  throw new Error('executionMode must be one of: safe, parallel');
+}
+
+function normalizeVerifyMode(options = {}) {
+  if (options.verifyMode === undefined || options.verifyMode === null || options.verifyMode === '') {
+    return options.verify === false ? 'none' : 'full';
+  }
+  const normalized = String(options.verifyMode).trim().toLowerCase();
+  if (normalized === 'full' || normalized === 'sample' || normalized === 'none') return normalized;
+  throw new Error('verifyMode must be one of: full, sample, none');
+}
+
+function normalizeSuggestionStrategy(value) {
+  if (value === undefined || value === null || value === '') return 'signal';
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'signal' || normalized === 'existing-bold-first') return normalized;
+  throw new Error('strategy must be one of: signal, existing-bold-first');
+}
+
+function normalizeStopwords(stopwords) {
+  const values = Array.isArray(stopwords) && stopwords.length > 0 ? stopwords : DEFAULT_SUGGESTION_STOPWORDS;
+  return new Set(values.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+}
+
+function cleanPhraseToken(word) {
+  return String(word || '').replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}/+%↔-]+$/gu, '');
+}
+
+function trimStopwordEdges(words, stopwords) {
+  const out = [...words];
+  while (out.length && stopwords.has(String(out[0] || '').toLowerCase())) out.shift();
+  while (out.length && stopwords.has(String(out[out.length - 1] || '').toLowerCase())) out.pop();
+  return out;
+}
+
+function compactWhitespace(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function truncatePhraseToWordLimit(text, maxWordsPerPhrase, stopwords) {
+  const words = compactWhitespace(text)
+    .split(/\s+/)
+    .map(cleanPhraseToken)
+    .filter(Boolean);
+  const trimmed = trimStopwordEdges(words, stopwords);
+  if (trimmed.length === 0) return null;
+  return trimmed.slice(0, maxWordsPerPhrase).join(' ');
+}
+
+function getTextForRange(text, range) {
+  return String(text || '').slice(range.start, range.end);
+}
+
+function getSignalPhraseForLine(lineText, maxWordsPerPhrase, stopwords) {
+  let segment = compactWhitespace(lineText).replace(/^[-•]\s*/, '').trim();
+  if (!segment) return null;
+
+  for (const token of [' - ', ' — ', '. ', '; ', ': ']) {
+    const idx = segment.indexOf(token);
+    if (idx !== -1) {
+      segment = segment.slice(0, idx).trim();
+      break;
+    }
+  }
+
+  return truncatePhraseToWordLimit(segment, maxWordsPerPhrase, stopwords);
+}
+
+function suggestBoldPhrasesForText(text, existingRanges = [], options = {}) {
+  const strategy = normalizeSuggestionStrategy(options.strategy);
+  const maxPhrasesPerLine = Number.isInteger(options.maxPhrasesPerLine) && options.maxPhrasesPerLine > 0
+    ? options.maxPhrasesPerLine
+    : 1;
+  const maxWordsPerPhrase = Number.isInteger(options.maxWordsPerPhrase) && options.maxWordsPerPhrase > 0
+    ? options.maxWordsPerPhrase
+    : 4;
+  const stopwords = normalizeStopwords(options.stopwords);
+  const lines = splitLinesWithOffsets(String(text || ''));
+  const mergedExisting = mergeRanges(existingRanges || []);
+  const suggestions = [];
+  const seen = new Set();
+
+  for (const line of lines) {
+    const lineSuggestions = [];
+
+    if (strategy === 'existing-bold-first') {
+      for (const range of getRangesWithinLine(mergedExisting, line)) {
+        const phrase = truncatePhraseToWordLimit(getTextForRange(text, range), maxWordsPerPhrase, stopwords);
+        if (!phrase) continue;
+        const key = phrase.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        lineSuggestions.push(phrase);
+        if (lineSuggestions.length >= maxPhrasesPerLine) break;
+      }
+    }
+
+    if (lineSuggestions.length < maxPhrasesPerLine) {
+      const phrase = getSignalPhraseForLine(line.text, maxWordsPerPhrase, stopwords);
+      if (phrase) {
+        const key = phrase.toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          lineSuggestions.push(phrase);
+        }
+      }
+    }
+
+    suggestions.push(...lineSuggestions.slice(0, maxPhrasesPerLine));
+  }
+
+  return suggestions;
+}
+
+async function readCurrentSelection(page) {
+  const raw = await page.evaluate(() => {
+    const nameBox = document.querySelector('#t-name-box');
+    const rawValue = nameBox
+      ? (nameBox.value || nameBox.getAttribute('value') || nameBox.textContent || '')
+      : '';
+    return {
+      rawValue: String(rawValue || '').trim(),
+      activeSheetTitle: document.title || '',
+    };
+  });
+
+  const rangeRefCandidate = raw && typeof raw === 'object' && raw.rangeRef
+    ? String(raw.rangeRef || '').trim().toUpperCase()
+    : String(raw?.rawValue || raw || '').trim().toUpperCase();
+
+  if (!rangeRefCandidate || !/^([A-Z]+[1-9][0-9]*)(?::([A-Z]+[1-9][0-9]*))?$/.test(rangeRefCandidate)) {
+    throw new Error('gsGetSelection() could not resolve the current Google Sheets selection');
+  }
+
+  const parsed = parseA1Range(rangeRefCandidate);
+  const anchorCell = raw && typeof raw === 'object' && raw.anchorCell
+    ? normalizeCellRef(raw.anchorCell)
+    : `${parsed.startCol}${parsed.startRow}`;
+  const activeSheetTitle = raw && typeof raw === 'object' && raw.activeSheetTitle
+    ? String(raw.activeSheetTitle || '').trim()
+    : '';
+
+  return {
+    anchorCell,
+    rangeRef: rangeRefCandidate,
+    multiCell: raw && typeof raw === 'object' && typeof raw.multiCell === 'boolean'
+      ? raw.multiCell
+      : rangeRefCandidate.includes(':'),
+    activeSheetTitle,
+  };
 }
 
 function defaultStyle() {
@@ -610,6 +770,214 @@ function clearSummaryCache(state) {
   if (cache) cache.clear();
 }
 
+function buildFormatRunConfig(options = {}) {
+  return {
+    dryRun: options.dryRun === true,
+    executionMode: normalizeExecutionMode(options.executionMode),
+    verifyMode: normalizeVerifyMode(options),
+    waitMs: Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS,
+    maxBoldPerLine: Number.isInteger(options.maxBoldPerLine) && options.maxBoldPerLine > 0 ? options.maxBoldPerLine : 1,
+    keepExistingFallback: options.keepExistingFallback !== false,
+    preferredGlobal: Array.isArray(options.preferredPhrases) ? options.preferredPhrases : [],
+    preferredByCell: options.preferredPhrasesByCell && typeof options.preferredPhrasesByCell === 'object'
+      ? options.preferredPhrasesByCell
+      : {},
+    maxConcurrentWorkers: Number.isInteger(options.maxConcurrentWorkers) && options.maxConcurrentWorkers > 0
+      ? options.maxConcurrentWorkers
+      : DEFAULT_MAX_PARALLEL_WORKERS,
+  };
+}
+
+function shouldVerifyCell(runConfig, verificationState, changed) {
+  if (!changed || runConfig.dryRun) return false;
+  if (runConfig.verifyMode === 'none') return false;
+  if (runConfig.verifyMode === 'full') return true;
+  if (verificationState.sampledCount >= 1) return false;
+  verificationState.sampledCount += 1;
+  return true;
+}
+
+async function formatBulletsCell(page, ref, options = {}, runConfig, verificationState) {
+  await openEditorAtCell(page, ref, runConfig.waitMs);
+  const snapshot = await readEditorSnapshot(page);
+  const transformed = splitBulletsText(snapshot.text, options);
+  const postSplitBaseRanges = transformed.length === snapshot.text.length ? snapshot.boldRanges : [];
+  const preferredLocal = Array.isArray(runConfig.preferredByCell[ref]) ? runConfig.preferredByCell[ref] : runConfig.preferredGlobal;
+  const targetRanges = selectSparseBoldRanges(
+    transformed,
+    postSplitBaseRanges,
+    preferredLocal,
+    runConfig.maxBoldPerLine,
+    runConfig.keepExistingFallback
+  );
+
+  const textChanged = transformed !== snapshot.text;
+  const boldChanged = !rangesEqual(snapshot.boldRanges, targetRanges);
+  const changed = textChanged || boldChanged;
+
+  if (!changed) {
+    await closeEditor(page, false);
+    return { ref, status: 'unchanged', changed: false, beforeLines: snapshot.lineCount, afterLines: snapshot.lineCount };
+  }
+
+  if (runConfig.dryRun) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'dry_run',
+      changed: true,
+      textChanged,
+      boldChanged,
+      beforeLines: snapshot.lineCount,
+      afterLines: transformed.split('\n').length,
+      beforeBoldSegments: snapshot.boldRanges.length,
+      afterBoldSegments: targetRanges.length,
+    };
+  }
+
+  const write = await writeEditorWithRanges(page, transformed, targetRanges, snapshot.baseStyle);
+  if (write.after !== transformed) {
+    await closeEditor(page, false);
+    return { ref, status: 'error', changed: true, error: 'text_mismatch_after_write' };
+  }
+
+  await closeEditor(page, true);
+
+  const shouldVerify = shouldVerifyCell(runConfig, verificationState, true);
+  let verifyOk = true;
+  if (shouldVerify) {
+    await openEditorAtCell(page, ref, runConfig.waitMs);
+    const verifySnapshot = await readEditorSnapshot(page);
+    await closeEditor(page, false);
+    verifyOk = verifySnapshot.text === transformed && rangesEqual(verifySnapshot.boldRanges, targetRanges);
+  }
+
+  return {
+    ref,
+    status: verifyOk ? 'ok' : 'verify_failed',
+    changed: true,
+    textChanged,
+    boldChanged,
+    verified: shouldVerify,
+    beforeLines: snapshot.lineCount,
+    afterLines: transformed.split('\n').length,
+    beforeBoldSegments: snapshot.boldRanges.length,
+    afterBoldSegments: targetRanges.length,
+    ...(verifyOk ? {} : { error: 'verify_failed' }),
+  };
+}
+
+async function runSequentialFormatting(page, cells, options, runConfig) {
+  const verificationState = { sampledCount: 0 };
+  const results = [];
+  for (const ref of cells) {
+    try {
+      results.push(await formatBulletsCell(page, ref, options, runConfig, verificationState));
+    } catch (err) {
+      try { await closeEditor(page, false); } catch { /* ignore */ }
+      results.push({ ref, status: 'error', changed: false, error: String(err?.message || err) });
+    }
+  }
+  return {
+    results,
+    executionModeUsed: 'safe',
+    peakConcurrentWorkers: 1,
+    fallbackTriggered: false,
+    fallbackReason: null,
+  };
+}
+
+async function syncWorkerPage(workerPage, sourcePage) {
+  if (!workerPage || workerPage === sourcePage) return;
+  if (typeof workerPage.url === 'function' && typeof workerPage.goto === 'function' && workerPage.url() !== sourcePage.url()) {
+    await workerPage.goto(sourcePage.url());
+  }
+}
+
+async function closeWorkerPages(workerPages, sourcePage) {
+  for (const workerPage of workerPages) {
+    if (!workerPage || workerPage === sourcePage) continue;
+    if (typeof workerPage.close === 'function') {
+      try { await workerPage.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
+async function runParallelFormatting(page, ctx, cells, options, runConfig) {
+  if (!ctx || typeof ctx.newPage !== 'function' || cells.length < 2) {
+    const sequential = await runSequentialFormatting(page, cells, options, { ...runConfig, executionMode: 'safe' });
+    return {
+      ...sequential,
+      fallbackTriggered: runConfig.executionMode === 'parallel',
+      fallbackReason: runConfig.executionMode === 'parallel' ? 'parallel mode unavailable' : null,
+    };
+  }
+
+  const workerCount = Math.max(2, Math.min(runConfig.maxConcurrentWorkers, DEFAULT_MAX_PARALLEL_WORKERS, cells.length));
+  const workerPages = [];
+  for (let i = 0; i < workerCount; i += 1) {
+    const workerPage = await ctx.newPage();
+    await syncWorkerPage(workerPage, page);
+    workerPages.push(workerPage);
+  }
+
+  let nextIndex = 0;
+  let fallbackReason = null;
+  const resultsByRef = new Map();
+  const failedRefs = new Set();
+
+  const workerLoops = workerPages.map(async (workerPage) => {
+    const verificationState = { sampledCount: 0 };
+    while (!fallbackReason) {
+      const idx = nextIndex;
+      nextIndex += 1;
+      if (idx >= cells.length) return;
+
+      const ref = cells[idx];
+      let result;
+      try {
+        result = await formatBulletsCell(workerPage, ref, options, runConfig, verificationState);
+      } catch (err) {
+        result = { ref, status: 'error', changed: false, error: String(err?.message || err) };
+      }
+      resultsByRef.set(ref, result);
+
+      if (result.status === 'error' || result.status === 'verify_failed') {
+        fallbackReason = String(result.error || result.status);
+        failedRefs.add(ref);
+        return;
+      }
+    }
+  });
+
+  await Promise.all(workerLoops);
+  await closeWorkerPages(workerPages, page);
+
+  if (!fallbackReason) {
+    return {
+      results: cells.map((ref) => resultsByRef.get(ref)).filter(Boolean),
+      executionModeUsed: 'parallel',
+      peakConcurrentWorkers: workerCount,
+      fallbackTriggered: false,
+      fallbackReason: null,
+    };
+  }
+
+  const rerunRefs = cells.filter((ref) => failedRefs.has(ref) || !resultsByRef.has(ref));
+  const sequential = await runSequentialFormatting(page, rerunRefs, options, { ...runConfig, executionMode: 'safe' });
+  for (const result of sequential.results) {
+    resultsByRef.set(result.ref, result);
+  }
+
+  return {
+    results: cells.map((ref) => resultsByRef.get(ref)).filter(Boolean),
+    executionModeUsed: 'safe',
+    peakConcurrentWorkers: workerCount,
+    fallbackTriggered: true,
+    fallbackReason,
+  };
+}
+
 function buildSummaryResult(sheet, columns, scanResult, options = {}) {
   const includeRows = options.includeRows === true;
   const previewRows = Number.isInteger(options.previewRows) && options.previewRows > 0 ? options.previewRows : 8;
@@ -640,6 +1008,17 @@ const helpers = {
       return { ...meta, title };
     },
 
+    gsGetSelection: async (page) => {
+      assertGoogleSheet(page, 'gsGetSelection');
+      const selection = await readCurrentSelection(page);
+      const meta = parseSheetMeta(page.url());
+      return {
+        ...selection,
+        spreadsheetId: meta.spreadsheetId,
+        gid: meta.gid,
+      };
+    },
+
     gsGotoCell: async (page, ctx, state, cellRef) => {
       assertGoogleSheet(page, 'gsGotoCell');
       const ref = await gotoCell(page, cellRef);
@@ -655,6 +1034,33 @@ const helpers = {
     gsReadContiguousRows: async (page, ctx, state, options = {}) => {
       assertGoogleSheet(page, 'gsReadContiguousRows');
       return scanContiguousRows(page, options);
+    },
+
+    gsSuggestBoldPhrases: async (page, ctx, state, rangeRef, options = {}) => {
+      assertGoogleSheet(page, 'gsSuggestBoldPhrases');
+      const strategy = normalizeSuggestionStrategy(options.strategy);
+      const cells = expandA1Range(rangeRef);
+      const suggestionsByCell = {};
+
+      for (const ref of cells) {
+        await openEditorAtCell(page, ref, Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS);
+        try {
+          const snapshot = await readEditorSnapshot(page);
+          suggestionsByCell[ref] = suggestBoldPhrasesForText(snapshot.text, snapshot.boldRanges, {
+            ...options,
+            strategy,
+          });
+        } finally {
+          await closeEditor(page, false);
+        }
+      }
+
+      return {
+        rangeRef: String(rangeRef).toUpperCase(),
+        total: cells.length,
+        strategy,
+        suggestionsByCell,
+      };
     },
 
     gsSummarizeSheet: async (page, ctx, state, options = {}) => {
@@ -885,104 +1291,40 @@ const helpers = {
       };
     },
 
+    gsFormatCurrentSelection: async (page, ctx, state, options = {}) => {
+      assertGoogleSheet(page, 'gsFormatCurrentSelection');
+      const selection = await helpers.gsGetSelection(page, ctx, state, options);
+      const result = await helpers.gsFormatBulletsInRange(page, ctx, state, selection.rangeRef, options);
+      return {
+        ...result,
+        selection,
+      };
+    },
+
     gsFormatBulletsInRange: async (page, ctx, state, rangeRef, options = {}) => {
       assertGoogleSheet(page, 'gsFormatBulletsInRange');
       const cells = expandA1Range(rangeRef);
-      const dryRun = options.dryRun === true;
-      const verify = options.verify !== false;
-      const waitMs = Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS;
-      const maxBoldPerLine = Number.isInteger(options.maxBoldPerLine) && options.maxBoldPerLine > 0 ? options.maxBoldPerLine : 1;
-      const keepExistingFallback = options.keepExistingFallback !== false;
-      const preferredGlobal = Array.isArray(options.preferredPhrases) ? options.preferredPhrases : [];
-      const preferredByCell = options.preferredPhrasesByCell && typeof options.preferredPhrasesByCell === 'object'
-        ? options.preferredPhrasesByCell
-        : {};
-
-      const results = [];
-      for (const ref of cells) {
-        try {
-          await openEditorAtCell(page, ref, waitMs);
-          const snapshot = await readEditorSnapshot(page);
-          const transformed = splitBulletsText(snapshot.text, options);
-          const postSplitBaseRanges = transformed.length === snapshot.text.length ? snapshot.boldRanges : [];
-          const preferredLocal = Array.isArray(preferredByCell[ref]) ? preferredByCell[ref] : preferredGlobal;
-          const targetRanges = selectSparseBoldRanges(
-            transformed,
-            postSplitBaseRanges,
-            preferredLocal,
-            maxBoldPerLine,
-            keepExistingFallback
-          );
-
-          const textChanged = transformed !== snapshot.text;
-          const boldChanged = !rangesEqual(snapshot.boldRanges, targetRanges);
-          const changed = textChanged || boldChanged;
-
-          if (!changed) {
-            await closeEditor(page, false);
-            results.push({ ref, status: 'unchanged', changed: false, beforeLines: snapshot.lineCount, afterLines: snapshot.lineCount });
-            continue;
-          }
-
-          if (dryRun) {
-            await closeEditor(page, false);
-            results.push({
-              ref,
-              status: 'dry_run',
-              changed: true,
-              textChanged,
-              boldChanged,
-              beforeLines: snapshot.lineCount,
-              afterLines: transformed.split('\n').length,
-              beforeBoldSegments: snapshot.boldRanges.length,
-              afterBoldSegments: targetRanges.length,
-            });
-            continue;
-          }
-
-          const write = await writeEditorWithRanges(page, transformed, targetRanges, snapshot.baseStyle);
-          if (write.after !== transformed) {
-            await closeEditor(page, false);
-            results.push({ ref, status: 'error', changed: true, error: 'text_mismatch_after_write' });
-            continue;
-          }
-
-          await closeEditor(page, true);
-
-          let verifyOk = true;
-          if (verify) {
-            await openEditorAtCell(page, ref, waitMs);
-            const verifySnapshot = await readEditorSnapshot(page);
-            await closeEditor(page, false);
-            verifyOk = verifySnapshot.text === transformed && rangesEqual(verifySnapshot.boldRanges, targetRanges);
-          }
-
-          results.push({
-            ref,
-            status: verifyOk ? 'ok' : 'verify_failed',
-            changed: true,
-            textChanged,
-            boldChanged,
-            beforeLines: snapshot.lineCount,
-            afterLines: transformed.split('\n').length,
-            beforeBoldSegments: snapshot.boldRanges.length,
-            afterBoldSegments: targetRanges.length,
-          });
-        } catch (err) {
-          try { await closeEditor(page, false); } catch { /* ignore */ }
-          results.push({ ref, status: 'error', changed: false, error: String(err?.message || err) });
-        }
-      }
+      const runConfig = buildFormatRunConfig(options);
+      const runResult = runConfig.executionMode === 'parallel'
+        ? await runParallelFormatting(page, ctx, cells, options, runConfig)
+        : await runSequentialFormatting(page, cells, options, runConfig);
+      const results = runResult.results;
 
       const changedCount = results.filter((r) => r.changed).length;
       const unchangedCount = results.filter((r) => r.status === 'unchanged').length;
       const okCount = results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length;
       const failedCount = results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length;
 
-      if (!dryRun && changedCount > 0) clearSummaryCache(state);
+      if (!runConfig.dryRun && changedCount > 0) clearSummaryCache(state);
 
       return {
         rangeRef: String(rangeRef),
+        executionModeRequested: runConfig.executionMode,
+        executionModeUsed: runResult.executionModeUsed,
+        verifyMode: runConfig.verifyMode,
+        peakConcurrentWorkers: runResult.peakConcurrentWorkers,
+        fallbackTriggered: runResult.fallbackTriggered,
+        fallbackReason: runResult.fallbackReason,
         total: results.length,
         changed: changedCount,
         unchanged: unchangedCount,
@@ -995,19 +1337,22 @@ const helpers = {
 
 // Canonical helper naming convention: <prefix>__<action>.
 helpers.gs__getMeta = helpers.gsGetMeta;
+helpers.gs__getSelection = helpers.gsGetSelection;
 helpers.gs__gotoCell = helpers.gsGotoCell;
 helpers.gs__readCell = helpers.gsReadCell;
 helpers.gs__readContiguousRows = helpers.gsReadContiguousRows;
+helpers.gs__suggestBoldPhrases = helpers.gsSuggestBoldPhrases;
 helpers.gs__summarizeSheet = helpers.gsSummarizeSheet;
 helpers.gs__splitBulletsInRange = helpers.gsSplitBulletsInRange;
 helpers.gs__rebalanceBoldInRange = helpers.gsRebalanceBoldInRange;
+helpers.gs__formatCurrentSelection = helpers.gsFormatCurrentSelection;
 helpers.gs__formatBulletsInRange = helpers.gsFormatBulletsInRange;
 helpers.gs__logIssue = helpers.gsLogIssue;
 helpers.gs__issueLogPath = helpers.gsIssueLogPath;
 
 export default {
   name: 'google-sheets',
-  description: 'Google Sheets helpers for reliable row scanning, cell reads, and issue logging',
+  description: 'Google Sheets helpers for selection-aware formatting, row scanning, cell reads, and issue logging',
   version: '1.0.0',
   helpers,
 };
