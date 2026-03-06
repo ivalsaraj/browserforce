@@ -138,6 +138,114 @@ function isSafeRenderableUrl(url) {
   );
 }
 
+const GOOGLE_SHEETS_URL_RE = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[^/]+\/edit/i;
+const GOOGLE_SHEETS_MAX_COLUMN_INDEX = 18278; // ZZZ
+const GOOGLE_SHEETS_MAX_ROW = 1048576;
+const GOOGLE_SHEETS_REF_RE = /([a-z]{1,4}\d{1,7}(?::[a-z]{1,4}\d{1,7})?|[a-z]{1,4}:[a-z]{1,4}|\d{1,7}:\d{1,7})/gi;
+
+function columnToIndex(column) {
+  let value = 0;
+  for (const ch of String(column || '').toUpperCase()) {
+    const code = ch.charCodeAt(0);
+    if (code < 65 || code > 90) return null;
+    value = (value * 26) + (code - 64);
+  }
+  return value || null;
+}
+
+function isValidRowValue(value) {
+  const row = Number(value);
+  return Number.isInteger(row) && row >= 1 && row <= GOOGLE_SHEETS_MAX_ROW;
+}
+
+function isValidColumnValue(value) {
+  const index = columnToIndex(value);
+  return Number.isInteger(index) && index >= 1 && index <= GOOGLE_SHEETS_MAX_COLUMN_INDEX;
+}
+
+function normalizeGoogleSheetsRangeRef(value) {
+  const ref = String(value || '').trim();
+  if (!ref) return null;
+
+  const cellRangeMatch = ref.match(/^([a-z]{1,4})(\d{1,7})(?::([a-z]{1,4})(\d{1,7}))?$/i);
+  if (cellRangeMatch) {
+    const startColumn = cellRangeMatch[1].toUpperCase();
+    const startRow = Number(cellRangeMatch[2]);
+    const endColumn = (cellRangeMatch[3] || startColumn).toUpperCase();
+    const endRow = Number(cellRangeMatch[4] || startRow);
+    if (!isValidColumnValue(startColumn) || !isValidColumnValue(endColumn)) return null;
+    if (!isValidRowValue(startRow) || !isValidRowValue(endRow)) return null;
+    return cellRangeMatch[3] ? `${startColumn}${startRow}:${endColumn}${endRow}` : `${startColumn}${startRow}`;
+  }
+
+  const columnRangeMatch = ref.match(/^([a-z]{1,4}):([a-z]{1,4})$/i);
+  if (columnRangeMatch) {
+    const startColumn = columnRangeMatch[1].toUpperCase();
+    const endColumn = columnRangeMatch[2].toUpperCase();
+    if (!isValidColumnValue(startColumn) || !isValidColumnValue(endColumn)) return null;
+    return `${startColumn}:${endColumn}`;
+  }
+
+  const rowRangeMatch = ref.match(/^(\d{1,7}):(\d{1,7})$/);
+  if (rowRangeMatch) {
+    const startRow = Number(rowRangeMatch[1]);
+    const endRow = Number(rowRangeMatch[2]);
+    if (!isValidRowValue(startRow) || !isValidRowValue(endRow)) return null;
+    return `${startRow}:${endRow}`;
+  }
+
+  return null;
+}
+
+function isSheetRefBoundaryChar(value) {
+  return /[A-Za-z0-9_/-]/.test(String(value || ''));
+}
+
+function shouldLinkGoogleSheetsRef(text, startIndex, rawMatch) {
+  const previousChar = startIndex > 0 ? text[startIndex - 1] : '';
+  const nextChar = text[startIndex + rawMatch.length] || '';
+  const nextNextChar = text[startIndex + rawMatch.length + 1] || '';
+  if (isSheetRefBoundaryChar(previousChar) || isSheetRefBoundaryChar(nextChar)) return false;
+  const normalized = normalizeGoogleSheetsRangeRef(rawMatch);
+  if (!normalized) return false;
+  if (/^\d+:\d+$/.test(normalized) && nextChar === ':') return false;
+  if (/^[A-Z]+\d+(?::[A-Z]+\d+)?$/i.test(rawMatch) && nextChar === '.' && /\d/.test(nextNextChar)) return false;
+  return true;
+}
+
+function renderInlineGoogleSheetsRefs(text, store) {
+  return String(text || '').replace(GOOGLE_SHEETS_REF_RE, (rawMatch, _capture, offset, source) => {
+    if (!shouldLinkGoogleSheetsRef(source, offset, rawMatch)) return rawMatch;
+    const normalized = normalizeGoogleSheetsRangeRef(rawMatch);
+    if (!normalized) return rawMatch;
+    return store.put(
+      `<a class="inline-link inline-sheet-ref" href="#" data-sheet-range-ref="${escapeHtml(normalized)}">${escapeHtml(rawMatch)}</a>`,
+    );
+  });
+}
+
+export function buildGoogleSheetsRangeUrl(activeTabUrl, rangeRef) {
+  const normalizedRange = normalizeGoogleSheetsRangeRef(rangeRef);
+  if (!normalizedRange) return null;
+
+  let url;
+  try {
+    url = new URL(String(activeTabUrl || ''));
+  } catch {
+    return null;
+  }
+
+  if (!GOOGLE_SHEETS_URL_RE.test(url.toString())) return null;
+
+  const currentHashParams = new URLSearchParams(url.hash.startsWith('#') ? url.hash.slice(1) : url.hash);
+  const gid = Number.parseInt(currentHashParams.get('gid') || '', 10);
+  const nextHashParams = new URLSearchParams();
+  nextHashParams.set('gid', Number.isInteger(gid) && gid >= 0 ? String(gid) : '0');
+  nextHashParams.set('range', normalizedRange);
+  url.hash = nextHashParams.toString();
+  return url.toString();
+}
+
 function createMarkdownTokenStore() {
   const tokens = [];
   return {
@@ -200,7 +308,8 @@ export function renderInlineContent(value) {
     return `${prefix}${store.put(`<a class="inline-link" href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`)}`;
   });
 
-  const escaped = escapeHtml(withAutolinks);
+  const withSheetRefs = renderInlineGoogleSheetsRefs(withAutolinks, store);
+  const escaped = escapeHtml(withSheetRefs);
   const withEmphasis = escaped
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/~~([^~]+)~~/g, '<del>$1</del>')

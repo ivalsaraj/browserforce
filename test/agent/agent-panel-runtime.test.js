@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assignSessionRunId,
+  buildGoogleSheetsRangeUrl,
   buildFinalResponseMarkdownExport,
   buildFinalResponsePrintDocument,
   classifyRunStepIcon,
@@ -82,9 +83,69 @@ test('renders non-image markdown links as clickable anchors', () => {
   assert.match(rendered, /href="https:\/\/github\.com\/ivalsaraj\/browserforce"/);
 });
 
+test('renders standalone google sheets refs as clickable anchors', () => {
+  const rendered = renderInlineContent('Check D4, d5, F2:L11, A:A, and 1:1 next.');
+  assert.match(rendered, /data-sheet-range-ref="D4"[^>]*>D4<\/a>/);
+  assert.match(rendered, /data-sheet-range-ref="D5"[^>]*>d5<\/a>/);
+  assert.match(rendered, /data-sheet-range-ref="F2:L11"[^>]*>F2:L11<\/a>/);
+  assert.match(rendered, /data-sheet-range-ref="A:A"[^>]*>A:A<\/a>/);
+  assert.match(rendered, /data-sheet-range-ref="1:1"[^>]*>1:1<\/a>/);
+});
+
+test('does not render google sheets refs inside markdown links, code spans, or fenced code blocks', () => {
+  const inlineRendered = renderInlineContent('Keep [D4](https://example.com) plain and `F2:L11` literal.');
+  assert.doesNotMatch(inlineRendered, /data-sheet-range-ref="D4"/);
+  assert.doesNotMatch(inlineRendered, /data-sheet-range-ref="F2:L11"/);
+
+  const blockRendered = renderMarkdownContent([
+    '```txt',
+    'D4',
+    '2:11',
+    '```',
+  ].join('\n'));
+  assert.doesNotMatch(blockRendered, /data-sheet-range-ref=/);
+});
+
+test('avoids false positives for google sheets refs inside technical tokens and timestamps', () => {
+  const rendered = renderInlineContent('I18N B2B E2E API-D4 v2.11 fooA1bar 2:11:30 should stay plain.');
+  assert.doesNotMatch(rendered, /data-sheet-range-ref=/);
+});
+
+test('rejects out-of-bounds google sheets refs', () => {
+  const rendered = renderInlineContent('Ignore AAAA1 and 1048577:1048577, but keep ZZZ1048576.');
+  assert.doesNotMatch(rendered, /data-sheet-range-ref="AAAA1"/);
+  assert.doesNotMatch(rendered, /data-sheet-range-ref="1048577:1048577"/);
+  assert.match(rendered, /data-sheet-range-ref="ZZZ1048576"[^>]*>ZZZ1048576<\/a>/);
+});
+
 test('does not render unsafe markdown link protocols as HTML anchors', () => {
   const rendered = renderInlineContent('[bad](javascript:alert(1))');
   assert.equal(rendered, '[bad](javascript:alert(1))');
+});
+
+test('buildGoogleSheetsRangeUrl rewrites google sheets fragments safely', () => {
+  assert.equal(
+    buildGoogleSheetsRangeUrl('https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=123', 'd4'),
+    'https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=123&range=D4',
+  );
+  assert.equal(
+    buildGoogleSheetsRangeUrl('https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=123&range=A1', 'F2:L11'),
+    'https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=123&range=F2%3AL11',
+  );
+  assert.equal(
+    buildGoogleSheetsRangeUrl('https://docs.google.com/spreadsheets/d/test-sheet/edit#range=A1', 'A:A'),
+    'https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=0&range=A%3AA',
+  );
+});
+
+test('buildGoogleSheetsRangeUrl defaults invalid gid values and rejects invalid inputs', () => {
+  assert.equal(
+    buildGoogleSheetsRangeUrl('https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=foo', '1:1'),
+    'https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=0&range=1%3A1',
+  );
+  assert.equal(buildGoogleSheetsRangeUrl('https://example.com/not-a-sheet', 'D4'), null);
+  assert.equal(buildGoogleSheetsRangeUrl('https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=1', 'AAAA1'), null);
+  assert.equal(buildGoogleSheetsRangeUrl('https://docs.google.com/spreadsheets/d/test-sheet/edit#gid=1', '1048577:1048577'), null);
 });
 
 test('renders markdown blocks for headings, emphasis, list, quote, and hr', () => {
