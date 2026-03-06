@@ -61,12 +61,18 @@ test('agent panel composer matches compact/expanded shell structure', () => {
   assert.match(html, /id="bf-queued-text"/);
   assert.match(html, /id="bf-queued-steer"/);
   assert.match(html, /id="bf-queued-delete"/);
+  assert.match(html, /id="bf-upload-row"/);
+  assert.match(html, /id="bf-upload-text"/);
+  assert.match(html, /id="bf-upload-clear"/);
   assert.match(html, /id="bf-image-upload-input"/);
   assert.match(html, /id="bf-image-upload-btn"/);
   assert.match(html, /id="bf-stop-run"[\s\S]*icon-stop/);
   assert.match(html, /id="bf-send-btn"/);
   assert.match(css, /\.queued-row/);
   assert.match(css, /\.queued-row-text/);
+  assert.match(css, /\.upload-row/);
+  assert.match(css, /\.upload-row-text/);
+  assert.match(css, /\.upload-clear-btn/);
   assert.match(css, /\.queued-steer-btn/);
   assert.match(css, /\.queued-delete-btn/);
   assert.match(css, /\.composer-box\.is-multiline/);
@@ -80,6 +86,7 @@ test('agent panel composer matches compact/expanded shell structure', () => {
 test('composer action buttons respect hidden attribute for send/stop swapping', () => {
   assert.match(css, /\.composer-actions button\[hidden\][\s\S]*display:\s*none/);
   assert.match(css, /\.queued-row\[hidden\][\s\S]*display:\s*none/);
+  assert.match(css, /\.upload-row\[hidden\][\s\S]*display:\s*none/);
 });
 
 test('reasoning title rows use shimmer and enter transition treatment', () => {

@@ -71,17 +71,29 @@
             </button>
           </div>
         </div>
+        <div id="bf-upload-row" class="upload-row" hidden>
+          <div class="upload-row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path stroke-linecap="round" stroke-linejoin="round" d="m21.44 11.05-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.2a3 3 0 1 1 4.24 4.25L9.41 17.4a1 1 0 0 1-1.42-1.41l8.49-8.48"></path>
+            </svg>
+          </div>
+          <p id="bf-upload-text" class="upload-row-text"></p>
+          <div class="upload-row-actions">
+            <button id="bf-upload-clear" type="button" class="upload-clear-btn" aria-label="Clear selected images" title="Clear selected images">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" d="m6 6 12 12"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
         <div class="composer-box">
           <textarea id="bf-chat-input" class="composer-textarea" rows="1" placeholder="Ask anything"></textarea>
           <input id="bf-image-upload-input" type="file" accept="image/*" multiple hidden>
           <div class="composer-actions">
             <button id="bf-image-upload-btn" type="button" class="btn-upload" aria-label="Upload images" title="Upload images">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="3" y="5" width="18" height="14" rx="2"></rect>
-                <circle cx="9" cy="10" r="1.5"></circle>
-                <path d="m21 15-4.2-4.2a1.6 1.6 0 0 0-2.2 0L9 16.4"></path>
-                <path d="M18 3v4"></path>
-                <path d="M16 5h4"></path>
+                <path d="m21.44 11.05-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.2a3 3 0 1 1 4.24 4.25L9.41 17.4a1 1 0 0 1-1.42-1.41l8.49-8.48"></path>
               </svg>
             </button>
             <button id="bf-stop-run" type="button" class="btn-stop" aria-label="Stop" title="Stop" disabled hidden>

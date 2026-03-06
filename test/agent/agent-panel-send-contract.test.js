@@ -12,7 +12,7 @@ test('sendMessage validates run creation response status', () => {
 
 test('submit handler preserves draft on send failure', () => {
   assert.match(js, /chatFormEl\.addEventListener\('submit'/);
-  assert.match(js, /try\s*\{\s*await sendMessage\(text\);[\s\S]*chatInputEl\.value = '';/);
+  assert.match(js, /try\s*\{[\s\S]*resolveMessageWithPendingUploads\(\{\s*sessionId,\s*text\s*,?\s*\}\);[\s\S]*await sendMessage\(outbound\);[\s\S]*chatInputEl\.value = '';/);
   assert.match(js, /catch\s*\(\w+\)\s*\{[\s\S]*chatInputEl\.value = text;/);
 });
 
@@ -114,16 +114,27 @@ test('local screenshot markdown images hydrate through authenticated chatd fetch
   assert.match(js, /hydrateLocalImagePreviews\(\);/);
 });
 
-test('composer supports image upload and inserts markdown image links', () => {
+test('composer supports queued image uploads from picker and paste before send', () => {
   assert.match(js, /const imageUploadBtn = document\.getElementById\('bf-image-upload-btn'\)/);
   assert.match(js, /const imageUploadInputEl = document\.getElementById\('bf-image-upload-input'\)/);
+  assert.match(js, /const uploadRowEl = document\.getElementById\('bf-upload-row'\)/);
+  assert.match(js, /const uploadTextEl = document\.getElementById\('bf-upload-text'\)/);
+  assert.match(js, /const uploadClearBtn = document\.getElementById\('bf-upload-clear'\)/);
   assert.match(js, /MAX_IMAGE_UPLOAD_BYTES/);
+  assert.match(js, /function getPendingImageUploads\(/);
+  assert.match(js, /function queuePendingImageUploads\(/);
+  assert.match(js, /function collectClipboardImageFiles\(/);
+  assert.match(js, /function syncUploadSelectionRow\(/);
+  assert.match(js, /async function resolveMessageWithPendingUploads\(/);
   assert.match(js, /async function uploadImageFileToSession\(file, sessionId\)/);
   assert.match(js, /\/v1\/uploads\/image/);
-  assert.match(js, /function appendComposerImageMarkdown\(/);
+  assert.match(js, /function buildMarkdownImageLink\(/);
   assert.match(js, /!\[\$\{alt\}\]\(\$\{path\}\)/);
+  assert.match(js, /ready to send/);
+  assert.match(js, /chatInputEl\.addEventListener\('paste'/);
   assert.match(js, /imageUploadInputEl\.addEventListener\('change'/);
-  assert.match(js, /handleComposerImageUploadSelection\(files\)/);
+  assert.match(js, /queuePendingImageUploads\(files,\s*\{\s*source:\s*'upload'\s*\}\)/);
+  assert.match(js, /resolveMessageWithPendingUploads\(\{\s*sessionId,\s*text\s*\}\)/);
 });
 
 test('context usage renderer hides element when unavailable and only shows formatted values', () => {
