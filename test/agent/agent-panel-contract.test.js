@@ -119,7 +119,11 @@ test('reasoning timeline uses icon-led blocks with fixed-height commentary body'
 test('completed-run summary row exposes dedicated collapse styling hooks', () => {
   assert.match(css, /\.run-summary-block/);
   assert.match(css, /\.run-summary-toggle/);
+  assert.match(css, /\.run-summary-toggle-main/);
+  assert.match(css, /\.run-summary-toggle-center/);
+  assert.match(css, /\.run-summary-divider/);
   assert.match(css, /\.run-summary-label/);
+  assert.match(css, /\.run-summary-label[\s\S]*font-size:\s*16px/);
   assert.match(css, /\.run-summary-preview/);
   assert.match(css, /\.run-summary-expanded/);
   assert.match(css, /\.run-summary-final-reasoning::before/);

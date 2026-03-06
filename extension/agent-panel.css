@@ -627,31 +627,51 @@ body {
 .run-summary-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: 6px;
+  gap: 12px;
+  margin: 4px 0 8px;
 }
 
 .run-summary-toggle {
   width: 100%;
   border: 0;
   background: transparent;
-  padding: 0;
+  padding: 4px 0;
   color: inherit;
   cursor: pointer;
-  text-align: left;
+  text-align: center;
 }
 
 .run-summary-toggle-main {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.run-summary-toggle-center {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.run-summary-divider {
+  flex: 1 1 0;
+  min-width: 20px;
+  height: 1px;
+  background: rgba(107, 99, 88, 0.26);
 }
 
 .run-summary-label {
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-subtle);
+  font-size: 16px;
+  line-height: 1.2;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: rgba(46, 36, 25, 0.82);
+  white-space: nowrap;
 }
 
 .run-summary-preview,
@@ -661,8 +681,27 @@ body {
   gap: 10px;
 }
 
+.run-summary-toggle:hover .run-summary-label,
+.run-summary-toggle:focus-visible .run-summary-label {
+  color: var(--text);
+}
+
+.run-summary-toggle:hover .run-summary-divider,
+.run-summary-toggle:focus-visible .run-summary-divider {
+  background: rgba(107, 99, 88, 0.34);
+}
+
+.run-summary-toggle:focus-visible {
+  outline: none;
+}
+
 .run-summary-block.expanded .step-caret::before {
   transform: rotate(90deg);
+}
+
+.run-summary-toggle .step-caret::before {
+  font-size: 18px;
+  color: rgba(107, 99, 88, 0.74);
 }
 
 .run-summary-final-reasoning::before {

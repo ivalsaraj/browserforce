@@ -1752,8 +1752,12 @@ function renderCollapsedRunSummary({ msg, messageRun, messages, messageIndex }) 
       <div class="run-summary-block expanded">
         <button type="button" class="run-summary-toggle" data-step-key="${escapeHtml(collapseKey)}" aria-expanded="true">
           <span class="run-summary-toggle-main">
-            <span class="run-summary-label">${escapeHtml(workedForLabel)}</span>
-            <span class="step-caret" aria-hidden="true"></span>
+            <span class="run-summary-divider" aria-hidden="true"></span>
+            <span class="run-summary-toggle-center">
+              <span class="run-summary-label">${escapeHtml(workedForLabel)}</span>
+              <span class="step-caret" aria-hidden="true"></span>
+            </span>
+            <span class="run-summary-divider" aria-hidden="true"></span>
           </span>
         </button>
         ${historyTimeline.length > 0 ? `<div class="run-summary-expanded">${renderTimelineEntries(messageRun, historyTimeline)}</div>` : ''}
@@ -1766,8 +1770,12 @@ function renderCollapsedRunSummary({ msg, messageRun, messages, messageIndex }) 
     <div class="run-summary-block">
       <button type="button" class="run-summary-toggle" data-step-key="${escapeHtml(collapseKey)}" aria-expanded="false">
         <span class="run-summary-toggle-main">
-          <span class="run-summary-label">${escapeHtml(workedForLabel)}</span>
-          <span class="step-caret" aria-hidden="true"></span>
+          <span class="run-summary-divider" aria-hidden="true"></span>
+          <span class="run-summary-toggle-center">
+            <span class="run-summary-label">${escapeHtml(workedForLabel)}</span>
+            <span class="step-caret" aria-hidden="true"></span>
+          </span>
+          <span class="run-summary-divider" aria-hidden="true"></span>
         </span>
       </button>
       ${previewHtml}
