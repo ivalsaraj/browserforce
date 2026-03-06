@@ -176,3 +176,9 @@ test('plugin popover rows include enabled-state styling hooks', () => {
   assert.match(css, /\.plugin-item/);
   assert.match(css, /\.plugin-item\.active/);
 });
+
+test('google sheets transcript refs have dedicated inline styling hooks', () => {
+  assert.match(css, /\.inline-sheet-ref/);
+  assert.match(css, /\.inline-sheet-ref:hover/);
+  assert.match(css, /\.inline-sheet-ref:focus-visible/);
+});

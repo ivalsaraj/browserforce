@@ -681,6 +681,28 @@ body {
   color: var(--crail-press);
 }
 
+.inline-sheet-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--crail) 18%, var(--line) 82%);
+  background: color-mix(in srgb, var(--crail-soft) 50%, #fff 50%);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.inline-sheet-ref:hover {
+  border-color: color-mix(in srgb, var(--crail) 38%, var(--line) 62%);
+  background: color-mix(in srgb, var(--crail-soft) 68%, #fff 32%);
+}
+
+.inline-sheet-ref:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--crail) 55%, #fff 45%);
+  outline-offset: 1px;
+}
+
 .inline-image-link {
   display: block;
   width: 100%;
