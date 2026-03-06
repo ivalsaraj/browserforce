@@ -393,3 +393,14 @@ test('transcript handler supports final-response copy and export actions', () =>
   assert.match(js, /Copy as Markdown/);
   assert.match(js, /Copied/);
 });
+
+test('transcript handler supports clicking google sheets refs in assistant messages', () => {
+  assert.match(js, /buildGoogleSheetsRangeUrl/);
+  assert.match(js, /closest\('\[data-sheet-range-ref\]'\)/);
+  assert.match(js, /getAttribute\('data-sheet-range-ref'\)/);
+  assert.match(js, /chrome\.tabs\.query\(\{\s*active:\s*true,\s*currentWindow:\s*true\s*\}\)/);
+  assert.match(js, /chrome\.tabs\.update\(/);
+  assert.match(js, /Active tab is not a Google Sheet/);
+  assert.match(js, /No active tab available for Google Sheets navigation/);
+  assert.match(js, /Failed to open Google Sheets selection/);
+});

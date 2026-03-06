@@ -1,6 +1,7 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
   assignSessionRunId,
+  buildGoogleSheetsRangeUrl,
   buildFinalResponseMarkdownExport,
   buildFinalResponsePrintDocument,
   classifyRunStepIcon,
@@ -2143,6 +2144,31 @@ function setFinalResponseCopyFeedback(actionKey) {
   renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
 }
 
+async function navigateActiveGoogleSheetToRange(rangeRef) {
+  if (!chrome?.tabs?.query || !chrome?.tabs?.update) {
+    setStatus('error', 'Google Sheets navigation is unavailable');
+    return;
+  }
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || typeof tab.id !== 'number') {
+    setStatus('error', 'No active tab available for Google Sheets navigation');
+    return;
+  }
+
+  const nextUrl = buildGoogleSheetsRangeUrl(tab.url || '', rangeRef);
+  if (!nextUrl) {
+    setStatus('error', 'Active tab is not a Google Sheet');
+    return;
+  }
+
+  try {
+    await chrome.tabs.update(tab.id, { url: nextUrl });
+  } catch {
+    setStatus('error', 'Failed to open Google Sheets selection');
+  }
+}
+
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
@@ -2231,6 +2257,15 @@ function bindTranscriptHandlers() {
         return;
       }
       setCopyButtonFeedback(copyBtn);
+      return;
+    }
+
+    const sheetRefLink = event.target.closest('[data-sheet-range-ref]');
+    if (sheetRefLink && transcriptEl.contains(sheetRefLink)) {
+      event.preventDefault();
+      const rangeRef = sheetRefLink.getAttribute('data-sheet-range-ref');
+      if (!rangeRef) return;
+      await navigateActiveGoogleSheetToRange(rangeRef);
       return;
     }
 
