@@ -899,10 +899,9 @@ class RelayServer {
       this.childSessions.delete(params.sessionId);
     }
 
-    // Route: child session events go under the parent's sessionId
-    const outerSessionId = childSessionId
-      ? (this.childSessions.get(childSessionId)?.parentSessionId || sessionId)
-      : sessionId;
+    // Route: child-session events must preserve the child session id so
+    // Playwright can bind frame/OOPIF execution contexts to the right target.
+    const outerSessionId = childSessionId || sessionId;
 
     this._logCdp({
       direction: 'from-extension',

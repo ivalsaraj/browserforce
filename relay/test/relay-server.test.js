@@ -1359,6 +1359,99 @@ describe('CDP Event Forwarding', () => {
     ext.close();
     await sleep(100);
   });
+
+  it('preserves child session id for child-session CDP events', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id !== undefined) {
+        if (msg.method === 'listTabs') {
+          ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
+        } else if (msg.method === 'createTab') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: {
+              tabId: 30, targetId: 'real-target-30', sessionId: msg.params.sessionId,
+              targetInfo: { targetId: 'real-target-30', type: 'page', title: 'Child Session Test', url: msg.params.url || 'about:blank' },
+            },
+          }));
+        }
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const events = [];
+    cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://test-child.com' } }));
+    await sleep(300);
+
+    const attached = events.find((m) => m.method === 'Target.attachedToTarget');
+    assert.ok(attached, 'Should have attachedToTarget event');
+    const parentSessionId = attached.params.sessionId;
+
+    // Child target attach event comes on parent session.
+    ext.send(JSON.stringify({
+      method: 'cdpEvent',
+      params: {
+        tabId: 30,
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'child-session-1',
+          targetInfo: {
+            targetId: 'child-target-1',
+            type: 'iframe',
+            title: '',
+            url: 'https://example-iframe.test/',
+            attached: true,
+            parentFrameId: 'frame-parent-1',
+            browserContextId: 'bf-default-context',
+          },
+          waitingForDebugger: false,
+        },
+      },
+    }));
+    await sleep(100);
+
+    const childAttach = events.find(
+      (m) => m.method === 'Target.attachedToTarget' && m.params?.sessionId === 'child-session-1',
+    );
+    assert.ok(childAttach, 'Should receive child Target.attachedToTarget event');
+    assert.equal(childAttach.sessionId, parentSessionId);
+
+    // Child-session runtime event must be emitted on the child session id.
+    ext.send(JSON.stringify({
+      method: 'cdpEvent',
+      params: {
+        tabId: 30,
+        method: 'Runtime.executionContextCreated',
+        params: {
+          context: {
+            id: 101,
+            origin: 'https://example-iframe.test',
+            name: '',
+            auxData: { isDefault: true, type: 'default' },
+          },
+        },
+        childSessionId: 'child-session-1',
+      },
+    }));
+    await sleep(150);
+
+    const childRuntime = events.find(
+      (m) => m.method === 'Runtime.executionContextCreated' && m.params?.context?.id === 101,
+    );
+    assert.ok(childRuntime, 'Should receive child Runtime.executionContextCreated event');
+    assert.equal(childRuntime.sessionId, 'child-session-1');
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
 });
 
 // ─── CDP JSONL Logging ──────────────────────────────────────────────────────
