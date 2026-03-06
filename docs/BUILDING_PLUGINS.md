@@ -408,6 +408,54 @@ async hl__highlight(page, selector) {
 
 **Test against a real browser.** Plugins interact with a live Chrome session. Integration test on real pages, not mocks.
 
+### Make the Plugin Super Smart: Session Postmortems
+
+When you are building or testing a plugin with an agent and it gets stuck, keep the BrowserForce agent `sessionId`. That session is the best artifact for improving the plugin because it shows the exact retries, tool drift, and fallback behavior that wasted time.
+
+Use this workflow:
+
+1. Reproduce the issue once and capture the `sessionId`.
+2. Ask another agent to analyze that session and answer four things:
+   - what was the real root cause
+   - what helper or instruction was missing
+   - what is the smallest reusable fix
+   - what test would have caught it
+3. Filter the answer hard. Do not add verbose prompt text, narrow one-off helpers, or lots of tiny JS functions just because they match that single session.
+4. Only land a change if it helps the next similar case too, not just the exact wording or sheet the user had open that day.
+5. Prefer the smallest durable fix:
+   - add one helper if the agent lacked a safe primitive
+   - add one guardrail if the helper already existed and the agent drifted away from it
+   - add one test that proves the new path works
+6. Update the plugin's `SKILL.md` and any issue log or troubleshooting note so the improvement is visible to future agents and maintainers.
+
+Good outcomes from a session postmortem:
+
+- replacing ad-hoc DOM probing with a helper
+- turning a flaky manual sequence into a verified helper call
+- adding a "stop here and log the issue" rule instead of stacking retries
+- adding one cache, selection, write, or verification helper that multiple users will benefit from
+
+Bad outcomes from a session postmortem:
+
+- giant prompt blocks that explain one bug in story form
+- helper names tied to one sheet, one customer, or one wording pattern
+- retry ladders that keep mutating the page after verification already failed
+- formula, DOM, or clipboard hacks when the plugin should expose a first-class helper instead
+
+Short prompt template for session analysis:
+
+```text
+Analyze BrowserForce session <session-id>.
+
+Tell me:
+1. the root cause
+2. the missing helper or missing instruction
+3. the smallest reusable change that would prevent this next time
+4. the exact test to add
+
+Do not optimize for this one user only. Recommend only changes that will help similar cases too.
+```
+
 ---
 
 ## 6. Testing Your Plugin
