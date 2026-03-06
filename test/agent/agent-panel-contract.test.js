@@ -130,6 +130,15 @@ test('completed-run summary row exposes dedicated collapse styling hooks', () =>
   assert.match(css, /\.run-summary-final-reasoning::before/);
 });
 
+test('final response export actions expose dedicated menu and table-scroll styling hooks', () => {
+  assert.match(css, /\.final-response-shell/);
+  assert.match(css, /\.final-response-menu-trigger/);
+  assert.match(css, /\.final-response-menu/);
+  assert.match(css, /\.final-response-menu-btn/);
+  assert.match(css, /\.md-table-wrap/);
+  assert.match(css, /\.md-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
+});
+
 test('done step icon uses branded animated svg check treatment', () => {
   assert.match(css, /\.run-step-icon\.icon-done/);
   assert.match(css, /\.run-step-icon-done-svg/);

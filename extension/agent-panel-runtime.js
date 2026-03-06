@@ -306,7 +306,7 @@ function renderMarkdownTableBlock(lines, startIndex) {
   )).join('');
 
   return {
-    html: `<table class="md-table"><thead>${headHtml}</thead>${bodyRows.length ? `<tbody>${bodyHtml}</tbody>` : ''}</table>`,
+    html: `<div class="md-table-wrap"><table class="md-table"><thead>${headHtml}</thead>${bodyRows.length ? `<tbody>${bodyHtml}</tbody>` : ''}</table></div>`,
     nextIndex: index,
   };
 }
@@ -488,4 +488,214 @@ export function formatContextUsage({ totalTokens, modelContextWindow } = {}) {
   if (total == null || windowSize == null) return null;
   const percent = ((total / windowSize) * 100).toFixed(1);
   return `${total.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)`;
+}
+
+function slugifyFilePart(value, fallback = 'browserforce-response') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || fallback;
+}
+
+function formatFileTimestamp(value) {
+  const date = new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return 'export';
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}-${hours}${minutes}`;
+}
+
+export function isCompletedFinalResponseActionable({
+  role = 'assistant',
+  done = false,
+  isFinalVisibleResponse = false,
+  text = '',
+} = {}) {
+  return (
+    String(role || '').toLowerCase() === 'assistant'
+    && !!done
+    && !!isFinalVisibleResponse
+    && String(text || '').trim().length > 0
+  );
+}
+
+export function buildFinalResponseMarkdownExport({
+  markdown = '',
+  sessionTitle = '',
+  createdAt = null,
+} = {}) {
+  const content = String(markdown ?? '');
+  return {
+    fileName: `${slugifyFilePart(sessionTitle)}-${formatFileTimestamp(createdAt)}.md`,
+    content,
+    mimeType: 'text/markdown;charset=utf-8',
+  };
+}
+
+export function buildFinalResponsePrintDocument({
+  markdown = '',
+  sessionTitle = '',
+  createdAt = null,
+} = {}) {
+  const printableTitle = String(sessionTitle || 'BrowserForce Response').trim() || 'BrowserForce Response';
+  const timestamp = createdAt ? formatMessageTimestampForHover(createdAt) : null;
+  const bodyHtml = renderMarkdownContent(markdown);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(printableTitle)}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bf-text: #2e2419;
+      --bf-muted: #6b6358;
+      --bf-line: #ddd8cf;
+      --bf-line-soft: #ede9e2;
+      --bf-linen: #f9f7f4;
+      --bf-sand: #eae6de;
+      --bf-crail-dark: #a34e30;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      color: var(--bf-text);
+      background: #fff;
+    }
+    .export-shell {
+      max-width: 840px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .export-header {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      border-bottom: 1px solid var(--bf-line);
+      padding-bottom: 12px;
+    }
+    .export-title {
+      font-size: 22px;
+      line-height: 1.2;
+      font-weight: 700;
+      margin: 0;
+    }
+    .export-meta {
+      font-size: 12px;
+      color: var(--bf-muted);
+      margin: 0;
+    }
+    .md-content {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .md-content p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6 {
+      margin: 0;
+      line-height: 1.28;
+      color: var(--bf-text);
+    }
+    .md-content .md-h1 { font-size: 24px; font-weight: 700; }
+    .md-content .md-h2 { font-size: 20px; font-weight: 700; }
+    .md-content .md-h3 { font-size: 17px; font-weight: 650; }
+    .md-content .md-h4, .md-content .md-h5, .md-content .md-h6 { font-size: 15px; font-weight: 650; }
+    .md-content .md-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+    .md-content .md-blockquote {
+      margin: 0;
+      padding: 8px 12px;
+      border-left: 3px solid var(--bf-line);
+      background: var(--bf-linen);
+      border-radius: 0 8px 8px 0;
+    }
+    .md-content .md-pre {
+      margin: 0;
+      padding: 14px;
+      border-radius: 10px;
+      border: 1px solid var(--bf-line);
+      background: #f6f4ef;
+      overflow: hidden;
+      white-space: pre-wrap;
+    }
+    .md-content .md-pre code {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .md-content .md-copy-btn { display: none !important; }
+    .md-content .md-table-wrap {
+      overflow-x: auto;
+      max-width: 100%;
+    }
+    .md-content .md-table {
+      width: max-content;
+      min-width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--bf-line);
+      font-size: 12px;
+    }
+    .md-content .md-table th,
+    .md-content .md-table td {
+      border: 1px solid var(--bf-line);
+      padding: 6px 8px;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .md-content .md-table th {
+      background: var(--bf-linen);
+      font-weight: 600;
+    }
+    .md-content code {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 12px;
+      background: var(--bf-sand);
+      color: var(--bf-crail-dark);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .md-content .inline-image,
+    .md-content .inline-local-image {
+      max-width: 100%;
+      height: auto;
+      border-radius: 10px;
+      border: 1px solid var(--bf-line-soft);
+    }
+    .md-content .md-hr {
+      border: 0;
+      border-top: 1px solid var(--bf-line);
+      margin: 4px 0;
+    }
+    @page { margin: 16mm; }
+    @media print {
+      body { padding: 0; }
+      .export-shell { max-width: none; }
+      .md-content .md-table-wrap { overflow: visible; }
+    }
+  </style>
+</head>
+<body>
+  <main class="export-shell">
+    <header class="export-header">
+      <h1 class="export-title">${escapeHtml(printableTitle)}</h1>
+      ${timestamp ? `<p class="export-meta">${escapeHtml(timestamp)}</p>` : ''}
+    </header>
+    ${bodyHtml}
+  </main>
+</body>
+</html>`;
 }

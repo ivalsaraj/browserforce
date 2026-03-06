@@ -2,11 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assignSessionRunId,
+  buildFinalResponseMarkdownExport,
+  buildFinalResponsePrintDocument,
   classifyRunStepIcon,
   formatMessageTimestampForHover,
   clearSessionRunId,
   formatContextUsage,
   getLatestInFlightStepIndex,
+  isCompletedFinalResponseActionable,
   getSessionRunId,
   renderMarkdownContent,
   renderInlineContent,
@@ -123,9 +126,54 @@ test('renders fenced code blocks and table markdown', () => {
   assert.match(rendered, /data-md-copy-code/);
   assert.match(rendered, /language-js/);
   assert.match(rendered, /const ok = true;/);
+  assert.match(rendered, /class="md-table-wrap"/);
   assert.match(rendered, /class="md-table"/);
   assert.match(rendered, /<th style="text-align:left;">Name<\/th>/);
   assert.match(rendered, /<th style="text-align:right;">Value<\/th>/);
+});
+
+test('identifies actionable completed final responses only', () => {
+  assert.equal(
+    isCompletedFinalResponseActionable({ role: 'assistant', done: true, isFinalVisibleResponse: true, text: '# Final' }),
+    true,
+  );
+  assert.equal(
+    isCompletedFinalResponseActionable({ role: 'assistant', done: false, isFinalVisibleResponse: true, text: '# Final' }),
+    false,
+  );
+  assert.equal(
+    isCompletedFinalResponseActionable({ role: 'assistant', done: true, isFinalVisibleResponse: false, text: '# Interim' }),
+    false,
+  );
+  assert.equal(
+    isCompletedFinalResponseActionable({ role: 'user', done: true, isFinalVisibleResponse: true, text: 'hi' }),
+    false,
+  );
+});
+
+test('builds markdown export payload from raw final response text', () => {
+  const payload = buildFinalResponseMarkdownExport({
+    markdown: '# Report\n\n- item',
+    sessionTitle: 'Bucks Review',
+    createdAt: '2026-03-06T12:30:00.000Z',
+  });
+  assert.equal(payload.content, '# Report\n\n- item');
+  assert.match(payload.fileName, /bucks-review/i);
+  assert.match(payload.fileName, /\.md$/);
+  assert.equal(payload.mimeType, 'text/markdown;charset=utf-8');
+});
+
+test('builds printable html document for final response export', () => {
+  const html = buildFinalResponsePrintDocument({
+    markdown: '# Heading\n\n| Name | Value |\n| --- | --- |\n| foo | 42 |',
+    sessionTitle: 'Bucks Review',
+    createdAt: '2026-03-06T12:30:00.000Z',
+  });
+  assert.match(html, /<title>Bucks Review/);
+  assert.match(html, /class="md-content"/);
+  assert.match(html, /class="md-table-wrap"/);
+  assert.match(html, /class="md-table"/);
+  assert.match(html, /@media print/);
 });
 
 test('escapes raw html inside markdown blocks', () => {

@@ -88,7 +88,7 @@ test('in-flight thinking state keeps inline timeline visible above the thinking 
 test('assistant transcript prefers ordered run timeline over grouped run steps', () => {
   assert.match(js, /function normalizeRunTimeline\(run, fallbackText = ''\)/);
   assert.match(js, /if \(Array\.isArray\(run\.timeline\) && run\.timeline\.length > 0\)/);
-  assert.match(js, /function renderCollapsedRunSummary\(\{ msg, messageRun, messages, messageIndex \}\)/);
+  assert.match(js, /function renderCollapsedRunSummary\(\{ msg, messageRun, messages, messageIndex, finalResponseActionKey = '' \}\)/);
   assert.match(js, /const collapsedSummaryHtml = renderCollapsedRunSummary\(/);
   assert.match(js, /const timelineHtml = collapsedSummaryHtml \|\| renderRunTimeline\(messageRun, msg\.text \|\| ''\)/);
 });
@@ -97,6 +97,16 @@ test('assistant transcript renders message bodies with markdown block renderer',
   assert.match(js, /renderMarkdownContent/);
   assert.match(js, /function renderContent\(value\)\s*\{\s*return renderMarkdownContent\(value\);\s*\}/);
   assert.match(js, /<div class="bubble-assistant">\$\{renderContent\(entry\.text \|\| ''\)\}<\/div>/);
+});
+
+test('completed final assistant responses render export action menu hooks', () => {
+  assert.match(js, /finalResponseExportByKey:\s*\{\}/);
+  assert.match(js, /function renderFinalResponseBubble\(/);
+  assert.match(js, /data-final-response-key=/);
+  assert.match(js, /data-final-response-menu-trigger/);
+  assert.match(js, /data-final-response-action="copy-md"/);
+  assert.match(js, /data-final-response-action="export-md"/);
+  assert.match(js, /data-final-response-action="export-pdf"/);
 });
 
 test('message author labels expose sent time in hover tooltip', () => {
@@ -350,4 +360,13 @@ test('startup error card supports retry and refresh connection actions', () => {
   assert.match(js, /msgAction === 'retry'/);
   assert.match(js, /msgAction === 'refresh-connection'/);
   assert.match(js, /runtimeMessage\(\{\s*type:\s*'updateRelayUrl'/);
+});
+
+test('transcript handler supports final-response copy and export actions', () => {
+  assert.match(js, /closest\('button\[data-final-response-action\]'\)/);
+  assert.match(js, /function downloadTextFile\(/);
+  assert.match(js, /function exportFinalResponsePdf\(/);
+  assert.match(js, /finalResponseAction === 'copy-md'/);
+  assert.match(js, /finalResponseAction === 'export-md'/);
+  assert.match(js, /finalResponseAction === 'export-pdf'/);
 });

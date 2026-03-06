@@ -1,11 +1,14 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
   assignSessionRunId,
+  buildFinalResponseMarkdownExport,
+  buildFinalResponsePrintDocument,
   classifyRunStepIcon,
   clearSessionRunId,
   formatContextUsage,
   formatMessageTimestampForHover,
   getSessionRunId,
+  isCompletedFinalResponseActionable,
   renderMarkdownContent,
   renderInlineContent,
   shouldShowBottomScrollFade,
@@ -57,6 +60,9 @@ const state = {
   pendingImageUploadsBySession: {},
   queuedMessageBySession: {},
   queuedSendInFlightBySession: {},
+  finalResponseExportByKey: {},
+  finalResponseRenderContextByRunId: {},
+  openFinalResponseMenuKey: null,
   sessionSelectionToken: 0,
   popover: 'none',
   startupIssue: null,
@@ -1461,6 +1467,12 @@ function renderTimelineEntries(run, timeline) {
   const pluginHelperLookup = buildPluginHelperLookup(state.pluginCatalog);
   const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
   const latestReasoningIndex = getLatestReasoningTimelineStepIndex(run, timeline);
+  const finalResponseRenderContext = run?.runId
+    ? state.finalResponseRenderContextByRunId?.[run.runId] || null
+    : null;
+  const finalResponseTimelineIndex = finalResponseRenderContext
+    ? getLastTextTimelineEntryIndex(timeline)
+    : -1;
   const getTimelineEntryKey = (entry, index) => {
     const runId = String(run?.runId || 'run');
     const stableKey = String(entry?.key || '').trim();
@@ -1474,7 +1486,19 @@ function renderTimelineEntries(run, timeline) {
   for (let index = 0; index < timeline.length; index += 1) {
     const entry = timeline[index];
     if (entry.type === 'text') {
-      htmlParts.push(`<div class="bubble-assistant">${renderContent(entry.text || '')}</div>`);
+      if (
+        finalResponseRenderContext
+        && run?.done
+        && index === finalResponseTimelineIndex
+        && String(entry.text || '').trim()
+      ) {
+        htmlParts.push(renderFinalResponseBubble({
+          markdownText: finalResponseRenderContext.markdownText || entry.text || '',
+          actionKey: finalResponseRenderContext.actionKey,
+        }));
+      } else {
+        htmlParts.push(`<div class="bubble-assistant">${renderContent(entry.text || '')}</div>`);
+      }
       continue;
     }
 
@@ -1708,7 +1732,74 @@ function getCollapsedRunPreviewResponseText(msg, timeline, finalResponseIndex) {
   return finalEntry?.type === 'text' ? String(finalEntry.text || '').trim() : '';
 }
 
-function renderCollapsedRunSummary({ msg, messageRun, messages, messageIndex }) {
+function buildFinalResponseActionKey(sessionId, msg, messageIndex) {
+  const scope = String(sessionId || 'session').trim() || 'session';
+  const stable = String(msg?.runId || msg?.id || msg?.createdAt || messageIndex || 'final').trim() || 'final';
+  return `final-response:${scope}:${stable}`;
+}
+
+function getMessageFinalResponseText(msg, messageRun) {
+  const timeline = normalizeRunTimeline(messageRun, msg?.text || '');
+  const finalResponseIndex = getLastTextTimelineEntryIndex(timeline);
+  return getCollapsedRunPreviewResponseText(msg, timeline, finalResponseIndex);
+}
+
+function registerFinalResponseExport(actionKey, payload) {
+  if (!actionKey) return;
+  const markdown = String(payload?.markdown || '').trim();
+  if (!markdown) return;
+  state.finalResponseExportByKey = {
+    ...(state.finalResponseExportByKey || {}),
+    [actionKey]: {
+      markdown,
+      sessionTitle: String(payload?.sessionTitle || '').trim(),
+      createdAt: payload?.createdAt || null,
+    },
+  };
+}
+
+function getFinalResponseExportPayload(actionKey) {
+  if (!actionKey) return null;
+  return state.finalResponseExportByKey?.[actionKey] || null;
+}
+
+function renderFinalResponseBubble({ markdownText = '', actionKey = '' } = {}) {
+  const content = String(markdownText || '').trim();
+  if (!content) return '';
+  if (!actionKey) return `<div class="bubble-assistant">${renderContent(content)}</div>`;
+  const menuOpen = state.openFinalResponseMenuKey === actionKey;
+  return `
+    <div class="final-response-shell" data-final-response-key="${escapeHtml(actionKey)}">
+      <div class="final-response-actions">
+        <button
+          type="button"
+          class="final-response-menu-trigger"
+          data-final-response-key="${escapeHtml(actionKey)}"
+          data-final-response-menu-trigger
+          aria-expanded="${menuOpen ? 'true' : 'false'}"
+          aria-label="Response actions"
+          title="Response actions"
+        >
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+            <circle cx="6" cy="12" r="1.6"></circle>
+            <circle cx="12" cy="12" r="1.6"></circle>
+            <circle cx="18" cy="12" r="1.6"></circle>
+          </svg>
+        </button>
+        ${menuOpen ? `
+          <div class="final-response-menu" role="menu">
+            <button type="button" class="final-response-menu-btn" role="menuitem" data-final-response-action="copy-md" data-final-response-key="${escapeHtml(actionKey)}">Copy as Markdown</button>
+            <button type="button" class="final-response-menu-btn" role="menuitem" data-final-response-action="export-md" data-final-response-key="${escapeHtml(actionKey)}">Download .md</button>
+            <button type="button" class="final-response-menu-btn" role="menuitem" data-final-response-action="export-pdf" data-final-response-key="${escapeHtml(actionKey)}">Export PDF</button>
+          </div>
+        ` : ''}
+      </div>
+      <div class="bubble-assistant">${renderContent(content)}</div>
+    </div>
+  `;
+}
+
+function renderCollapsedRunSummary({ msg, messageRun, messages, messageIndex, finalResponseActionKey = '' }) {
   if (!messageRun?.done) return '';
   const timeline = normalizeRunTimeline(messageRun, msg.text || '');
   if (countReasoningTimelineSteps(timeline) < 2) return '';
@@ -1732,9 +1823,10 @@ function renderCollapsedRunSummary({ msg, messageRun, messages, messageIndex }) 
   const title = normalizeReasoningTitleLabel(finalReasoning.label || '');
   const iconName = classifyReasoningTitleIcon(title);
   const previewResponseText = getCollapsedRunPreviewResponseText(msg, timeline, finalResponseIndex);
-  const responseHtml = previewResponseText
-    ? `<div class="bubble-assistant">${renderContent(previewResponseText)}</div>`
-    : '';
+  const responseHtml = renderFinalResponseBubble({
+    markdownText: previewResponseText,
+    actionKey: finalResponseActionKey,
+  });
   const previewHtml = `
     <div class="run-summary-preview">
       <div class="step-item timeline-step reasoning-step run-summary-final-reasoning">
@@ -1930,6 +2022,49 @@ async function copyTextToClipboard(text) {
   return copied;
 }
 
+function downloadTextFile({ fileName, text, mimeType = 'text/plain;charset=utf-8' } = {}) {
+  const content = String(text ?? '');
+  const name = String(fileName || '').trim();
+  if (!content || !name) return false;
+  const blob = new Blob([content], { type: mimeType });
+  const blobUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = blobUrl;
+  anchor.download = name;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+  return true;
+}
+
+async function exportFinalResponsePdf(payload) {
+  const html = buildFinalResponsePrintDocument(payload);
+  const printWindow = window.open('', '_blank', 'noopener,noreferrer');
+  if (!printWindow) return false;
+  printWindow.document.open();
+  printWindow.document.write(html);
+  printWindow.document.close();
+
+  const localImages = Array.from(printWindow.document.querySelectorAll('img.inline-local-image[data-local-path]'));
+  await Promise.all(localImages.map(async (img) => {
+    const localPath = String(img.getAttribute('data-local-path') || '').trim();
+    if (!localPath) return;
+    const blobUrl = await loadLocalImageBlobUrl(localPath);
+    if (blobUrl) img.setAttribute('src', blobUrl);
+  }));
+
+  // Give the popup a moment to apply layout and any hydrated local images
+  // before invoking the print dialog.
+  await new Promise((resolve) => {
+    printWindow.setTimeout(resolve, 80);
+  });
+  printWindow.focus();
+  printWindow.print();
+  return true;
+}
+
 function clearCopyButtonFeedback(button) {
   if (!(button instanceof HTMLButtonElement)) return;
   const timeoutId = Number.parseInt(button.dataset.copyResetTimeout || '', 10);
@@ -1957,6 +2092,74 @@ function setCopyButtonFeedback(button) {
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
+    const finalResponseActionBtn = event.target.closest('button[data-final-response-action]');
+    if (finalResponseActionBtn && transcriptEl.contains(finalResponseActionBtn)) {
+      event.preventDefault();
+      const finalResponseAction = finalResponseActionBtn.getAttribute('data-final-response-action');
+      const actionKey = finalResponseActionBtn.getAttribute('data-final-response-key');
+      const payload = getFinalResponseExportPayload(actionKey);
+      if (!payload) {
+        setStatus('error', 'Final response export is unavailable');
+        return;
+      }
+      if (finalResponseAction === 'copy-md') {
+        const copied = await copyTextToClipboard(payload.markdown);
+        if (!copied) {
+          setStatus('error', 'Failed to copy markdown');
+          return;
+        }
+        state.openFinalResponseMenuKey = null;
+        setStatus('ready', 'Copied markdown');
+        renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+        return;
+      }
+      if (finalResponseAction === 'export-md') {
+        const file = buildFinalResponseMarkdownExport(payload);
+        const downloaded = downloadTextFile({
+          fileName: file.fileName,
+          text: file.content,
+          mimeType: file.mimeType,
+        });
+        if (!downloaded) {
+          setStatus('error', 'Failed to export markdown');
+          return;
+        }
+        state.openFinalResponseMenuKey = null;
+        setStatus('ready', 'Downloaded markdown');
+        renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+        return;
+      }
+      if (finalResponseAction === 'export-pdf') {
+        const exported = await exportFinalResponsePdf(payload);
+        if (!exported) {
+          setStatus('error', 'Failed to export PDF');
+          return;
+        }
+        state.openFinalResponseMenuKey = null;
+        setStatus('ready', 'Opened PDF print dialog');
+        renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+        return;
+      }
+    }
+
+    const finalResponseMenuTriggerBtn = event.target.closest('button[data-final-response-menu-trigger]');
+    if (finalResponseMenuTriggerBtn && transcriptEl.contains(finalResponseMenuTriggerBtn)) {
+      event.preventDefault();
+      const actionKey = finalResponseMenuTriggerBtn.getAttribute('data-final-response-key');
+      state.openFinalResponseMenuKey = state.openFinalResponseMenuKey === actionKey ? null : actionKey;
+      renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+      return;
+    }
+
+    if (state.openFinalResponseMenuKey) {
+      const insideFinalResponseShell = event.target.closest('.final-response-shell');
+      if (!insideFinalResponseShell) {
+        state.openFinalResponseMenuKey = null;
+        renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+        return;
+      }
+    }
+
     const copyBtn = event.target.closest('button[data-md-copy-code]');
     if (copyBtn && transcriptEl.contains(copyBtn)) {
       event.preventDefault();
@@ -2005,6 +2208,18 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
   const sessionId = state.value.activeSessionId;
   const sessionRunId = getSessionRunId(state.currentRunBySession, sessionId);
   const run = sessionRunId ? state.value.runs[sessionRunId] : null;
+  const lastAssistantMessageIndex = (() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (String(messages[index]?.role || '').toLowerCase() === 'assistant') return index;
+    }
+    return -1;
+  })();
+  // These maps are rebuilt from the rendered transcript so action bindings stay
+  // aligned with the currently visible final response only.
+  state.finalResponseExportByKey = {};
+  state.finalResponseRenderContextByRunId = {};
+  const activeSession = getActiveSession();
+  const sessionTitle = formatSessionDisplayName(activeSession);
 
   const chunks = messages.map((msg, messageIndex) => {
     const role = msg.role || 'assistant';
@@ -2021,14 +2236,41 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
     }
 
     const messageRun = msg.runId ? state.value.runs[msg.runId] : null;
+    const finalResponseText = getMessageFinalResponseText(msg, messageRun);
+    const finalResponseActionKey = isCompletedFinalResponseActionable({
+      role,
+      done: !!messageRun?.done,
+      isFinalVisibleResponse: messageIndex === lastAssistantMessageIndex,
+      text: finalResponseText,
+    })
+      ? buildFinalResponseActionKey(sessionId, msg, messageIndex)
+      : '';
+    registerFinalResponseExport(finalResponseActionKey, {
+      markdown: finalResponseText,
+      sessionTitle,
+      createdAt: msg?.createdAt || messageRun?.updatedAt || null,
+    });
+    if (messageRun?.runId && finalResponseActionKey) {
+      state.finalResponseRenderContextByRunId = {
+        ...(state.finalResponseRenderContextByRunId || {}),
+        [messageRun.runId]: {
+          actionKey: finalResponseActionKey,
+          markdownText: finalResponseText,
+        },
+      };
+    }
     const collapsedSummaryHtml = renderCollapsedRunSummary({
       msg,
       messageRun,
       messages,
       messageIndex,
+      finalResponseActionKey,
     });
     const timelineHtml = collapsedSummaryHtml || renderRunTimeline(messageRun, msg.text || '');
-    const fallbackHtml = `<div class="bubble-assistant">${renderContent(msg.text || '')}</div>`;
+    const fallbackHtml = renderFinalResponseBubble({
+      markdownText: finalResponseText || msg.text || '',
+      actionKey: finalResponseActionKey,
+    }) || `<div class="bubble-assistant">${renderContent(msg.text || '')}</div>`;
     return `
       <article class="message assistant">
         <div class="msg-meta"><span class="msg-author"${assistantAuthorTitle}>BrowserForce</span></div>
