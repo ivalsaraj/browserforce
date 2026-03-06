@@ -1037,6 +1037,277 @@ test('POST /v1/runs includes active tab context in runExecutor prompt', async ()
   }
 });
 
+test('POST /v1/runs injects hidden first-turn title prompt and persists first-message tab metadata', async () => {
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, message, onEvent, onExit }) => {
+      seenRuns.push({ runId, sessionId, message });
+      setTimeout(() => {
+        onEvent({
+          event: 'chat.delta',
+          runId,
+          sessionId,
+          payload: { delta: '[[BF_SE' },
+        });
+      }, 5);
+      setTimeout(() => {
+        onEvent({
+          event: 'chat.delta',
+          runId,
+          sessionId,
+          payload: { delta: 'SSION_TITLE]] Sidebar Session Titles\n\nVisible ' },
+        });
+      }, 10);
+      setTimeout(() => {
+        onEvent({
+          event: 'chat.final',
+          runId,
+          sessionId,
+          payload: { text: '[[BF_SESSION_TITLE]] Sidebar Session Titles\n\nVisible answer' },
+        });
+      }, 15);
+      setTimeout(() => onExit({ code: 0 }), 20);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'New chat' }),
+    }).then((res) => res.json());
+
+    const events = [];
+    const eventRes = await fetch(`${daemon.baseUrl}/v1/events?sessionId=${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    const reader = eventRes.body.getReader();
+    const decoder = new TextDecoder();
+    const eventLoop = (async () => {
+      let buffer = '';
+      while (events.length < 3) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() || '';
+        for (const chunk of chunks) {
+          const line = chunk.split('\n').find((entry) => entry.startsWith('data: '));
+          if (!line) continue;
+          events.push(JSON.parse(line.slice(6)));
+        }
+      }
+    })();
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        message: 'make the session list clearer',
+        browserContext: {
+          tabId: 42,
+          title: 'Pricing',
+          url: 'https://example.com/pricing',
+          favIconUrl: 'https://example.com/favicon.ico',
+        },
+      }),
+    });
+    assert.equal(runRes.status, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    reader.cancel().catch(() => {});
+    await eventLoop;
+
+    const prompt = seenRuns.at(-1)?.message || '';
+    assert.match(prompt, /\[\[BF_SESSION_TITLE\]\]/);
+    assert.match(prompt, /based only on the user request/i);
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.predictedTitle, 'Sidebar Session Titles');
+    assert.equal(sessionBody.firstMessageTab?.tabId, 42);
+    assert.equal(sessionBody.firstMessageTab?.title, 'Pricing');
+    assert.equal(sessionBody.firstMessageTab?.url, 'https://example.com/pricing');
+    assert.equal(sessionBody.firstMessageTab?.favIconUrl, 'https://example.com/favicon.ico');
+
+    const messagesBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    const assistant = (messagesBody.messages || []).findLast((entry) => entry.role === 'assistant');
+    assert.equal(assistant?.text, 'Visible answer');
+    assert.equal(assistant?.text.includes('[[BF_SESSION_TITLE]]'), false);
+
+    const visibleChatEvents = events.filter((evt) => evt.event === 'chat.delta' || evt.event === 'chat.final');
+    assert.equal(visibleChatEvents.some((evt) => String(evt.payload?.delta || evt.payload?.text || '').includes('[[BF_SESSION_TITLE]]')), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/runs does not overwrite predicted title or first-message tab after first run', async () => {
+  const seenRuns = [];
+  let invocationCount = 0;
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, message, onEvent, onExit }) => {
+      invocationCount += 1;
+      seenRuns.push({ runId, sessionId, message });
+      if (invocationCount === 1) {
+        setTimeout(() => onEvent({
+          event: 'chat.final',
+          runId,
+          sessionId,
+          payload: { text: '[[BF_SESSION_TITLE]] Sidebar Session Titles\n\nFirst answer' },
+        }), 5);
+      } else {
+        setTimeout(() => onEvent({
+          event: 'chat.final',
+          runId,
+          sessionId,
+          payload: { text: 'Second answer' },
+        }), 5);
+      }
+      setTimeout(() => onExit({ code: 0 }), 10);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'New chat' }),
+    }).then((res) => res.json());
+
+    const runOneRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        message: 'first request',
+        browserContext: {
+          tabId: 42,
+          title: 'Pricing',
+          url: 'https://example.com/pricing',
+          favIconUrl: 'https://example.com/favicon.ico',
+        },
+      }),
+    });
+    assert.equal(runOneRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const runTwoRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        message: 'second request',
+        browserContext: {
+          tabId: 77,
+          title: 'Docs',
+          url: 'https://example.com/docs',
+          favIconUrl: 'https://example.com/docs.ico',
+        },
+      }),
+    });
+    assert.equal(runTwoRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.match(seenRuns[0]?.message || '', /\[\[BF_SESSION_TITLE\]\]/);
+    assert.doesNotMatch(seenRuns[1]?.message || '', /\[\[BF_SESSION_TITLE\]\]/);
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.predictedTitle, 'Sidebar Session Titles');
+    assert.equal(sessionBody.firstMessageTab?.tabId, 42);
+    assert.equal(sessionBody.firstMessageTab?.title, 'Pricing');
+    assert.equal(sessionBody.firstMessageTab?.url, 'https://example.com/pricing');
+    assert.equal(sessionBody.firstMessageTab?.favIconUrl, 'https://example.com/favicon.ico');
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/runs degrades cleanly when model omits hidden title prefix', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent, onExit }) => {
+      setTimeout(() => onEvent({
+        event: 'chat.final',
+        runId,
+        sessionId,
+        payload: { text: 'Plain visible answer' },
+      }), 5);
+      setTimeout(() => onExit({ code: 0 }), 10);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'New chat' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'plain run' }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.predictedTitle, undefined);
+
+    const messagesBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    const assistant = (messagesBody.messages || []).findLast((entry) => entry.role === 'assistant');
+    assert.equal(assistant?.text, 'Plain visible answer');
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs injects AGENTS.md content as system instructions', async () => {
   const codexCwd = mkdtempSync(join(tmpdir(), 'bf-chatd-codex-cwd-'));
   writeFileSync(join(codexCwd, 'AGENTS.md'), '# Agent Rules\nAlways be explicit.', 'utf8');

@@ -708,6 +708,8 @@ function formatSessionDisplayName(session) {
   if (!session) return 'Session';
   const title = String(session.title || '').trim();
   if (!isDefaultSessionTitle(title)) return title;
+  const predictedTitle = String(session.predictedTitle || '').trim();
+  if (predictedTitle) return predictedTitle;
   return session.sessionId || 'Session';
 }
 
@@ -715,7 +717,23 @@ function formatSessionLabel(session) {
   if (!session) return 'Session';
   const title = String(session.title || '').trim();
   if (!isDefaultSessionTitle(title)) return title;
+  const predictedTitle = String(session.predictedTitle || '').trim();
+  if (predictedTitle) return predictedTitle;
   return formatShortSessionId(session.sessionId);
+}
+
+function resolveSessionFaviconSrc(session) {
+  const favIconUrl = String(session?.firstMessageTab?.favIconUrl || '').trim();
+  if (
+    favIconUrl.startsWith('data:')
+    || favIconUrl.startsWith('chrome://')
+    || favIconUrl.startsWith('chrome-extension://')
+  ) {
+    return favIconUrl;
+  }
+  const pageUrl = String(session?.firstMessageTab?.url || '').trim();
+  if (!pageUrl) return '';
+  return `chrome://favicon2/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`;
 }
 
 function formatSessionTimestamp(session) {
@@ -981,6 +999,7 @@ function renderSessions() {
       const displayName = formatSessionDisplayName(session);
       const timestamp = formatSessionTimestamp(session);
       const shortId = formatShortSessionId(session.sessionId);
+      const faviconSrc = resolveSessionFaviconSrc(session);
       const editing = session.sessionId === state.editingSessionId;
       const draftTitle = Object.prototype.hasOwnProperty.call(state.sessionTitleDrafts, session.sessionId)
         ? state.sessionTitleDrafts[session.sessionId]
@@ -1007,8 +1026,13 @@ function renderSessions() {
       return `
         <li class="session-row">
           <button type="button" data-session-id="${escapeHtml(session.sessionId)}" class="popover-item session-item ${active}">
-            <span class="session-main">${escapeHtml(displayName)}</span>
-            <span class="session-meta">${escapeHtml(`${shortId} · ${timestamp}`)}</span>
+            <span class="session-favicon">${faviconSrc
+              ? `<img class="session-favicon-image" src="${escapeHtml(faviconSrc)}" alt="">`
+              : '<span class="session-favicon-fallback" aria-hidden="true">•</span>'}</span>
+            <span class="session-copy">
+              <span class="session-main">${escapeHtml(displayName)}</span>
+              <span class="session-meta">${escapeHtml(`${shortId} · ${timestamp}`)}</span>
+            </span>
           </button>
           <button type="button" class="session-edit-btn" data-session-edit-btn="${escapeHtml(session.sessionId)}" aria-label="Rename session" title="Rename session">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -2659,10 +2683,11 @@ async function getActiveTabContext() {
     if (!tab || typeof tab.id !== 'number') return null;
     const title = String(tab.title || '').trim().slice(0, 180);
     const url = String(tab.url || '').trim();
+    const favIconUrl = String(tab.favIconUrl || '').trim();
     if (!isTabAttachableUrl(url)) {
-      return { tabId: tab.id, title, url: null };
+      return { tabId: tab.id, title, url: null, favIconUrl };
     }
-    return { tabId: tab.id, title, url: url.slice(0, 500) };
+    return { tabId: tab.id, title, url: url.slice(0, 500), favIconUrl };
   } catch {
     return null;
   }

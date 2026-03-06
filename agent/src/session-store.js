@@ -11,6 +11,10 @@ const MODEL_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
 const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
 const REASONING_EFFORT_VALUES = new Set(['low', 'medium', 'high', 'xhigh']);
 const indexWriteQueues = new Map();
+const SESSION_PREDICTED_TITLE_MAX_LEN = 120;
+const SESSION_TAB_TITLE_MAX_LEN = 180;
+const SESSION_TAB_URL_MAX_LEN = 500;
+const SESSION_TAB_FAVICON_MAX_LEN = 2000;
 
 function isObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -258,6 +262,53 @@ function normalizeModel(model) {
   return trimmed;
 }
 
+function normalizeSessionText(value, maxLen) {
+  if (value == null) return null;
+  const normalized = String(value).replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+  return normalized.length > maxLen ? `${normalized.slice(0, maxLen - 3)}...` : normalized;
+}
+
+function normalizePredictedTitle(value) {
+  return normalizeSessionText(value, SESSION_PREDICTED_TITLE_MAX_LEN);
+}
+
+function normalizeFirstMessageTab(firstMessageTabPatch, currentFirstMessageTab) {
+  if (firstMessageTabPatch == null) return null;
+  if (!isObject(firstMessageTabPatch)) {
+    throw new Error('firstMessageTab must be an object');
+  }
+
+  const normalized = isObject(currentFirstMessageTab) ? { ...currentFirstMessageTab } : {};
+  if (Object.prototype.hasOwnProperty.call(firstMessageTabPatch, 'tabId')) {
+    const tabId = Number(firstMessageTabPatch.tabId);
+    if (!Number.isInteger(tabId) || tabId < 0) {
+      throw new Error('firstMessageTab.tabId must be a non-negative integer');
+    }
+    normalized.tabId = tabId;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(firstMessageTabPatch, 'title')) {
+    const title = normalizeSessionText(firstMessageTabPatch.title, SESSION_TAB_TITLE_MAX_LEN);
+    if (title == null) delete normalized.title;
+    else normalized.title = title;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(firstMessageTabPatch, 'url')) {
+    const url = normalizeSessionText(firstMessageTabPatch.url, SESSION_TAB_URL_MAX_LEN);
+    if (url == null) delete normalized.url;
+    else normalized.url = url;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(firstMessageTabPatch, 'favIconUrl')) {
+    const favIconUrl = normalizeSessionText(firstMessageTabPatch.favIconUrl, SESSION_TAB_FAVICON_MAX_LEN);
+    if (favIconUrl == null) delete normalized.favIconUrl;
+    else normalized.favIconUrl = favIconUrl;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
 function normalizeReasoningEffort(reasoningEffort) {
   if (reasoningEffort == null) return null;
   const trimmed = String(reasoningEffort).trim().toLowerCase();
@@ -444,6 +495,16 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
       const enabledPlugins = normalizeEnabledPlugins(patch.enabledPlugins);
       if (enabledPlugins == null) delete next.enabledPlugins;
       else next.enabledPlugins = enabledPlugins;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'predictedTitle')) {
+      const predictedTitle = normalizePredictedTitle(patch.predictedTitle);
+      if (predictedTitle == null) delete next.predictedTitle;
+      else next.predictedTitle = predictedTitle;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'firstMessageTab')) {
+      const firstMessageTab = normalizeFirstMessageTab(patch.firstMessageTab, current.firstMessageTab);
+      if (firstMessageTab == null) delete next.firstMessageTab;
+      else next.firstMessageTab = firstMessageTab;
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'providerState')) {
       const providerState = normalizeProviderState(patch.providerState, current.providerState);

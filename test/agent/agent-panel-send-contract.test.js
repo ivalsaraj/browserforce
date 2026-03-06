@@ -24,6 +24,7 @@ test('sidepanel auto-attaches current tab and sends browserContext with runs', (
   assert.match(js, /attachCurrentTabBtn\.addEventListener\('click'/);
   assert.match(js, /await ensureCurrentTabAttached\(\);/);
   assert.match(js, /const browserContext = await getActiveTabContext\(\);/);
+  assert.match(js, /const favIconUrl = String\(tab\.favIconUrl \|\| ''\)\.trim\(\)/);
   assert.match(js, /JSON\.stringify\(\{\s*sessionId,\s*message:\s*text,\s*browserContext\s*\}\)/);
 });
 
@@ -34,12 +35,21 @@ test('enter key submits composer and shift+enter keeps newline', () => {
   assert.match(js, /chatFormEl\.requestSubmit\(\);/);
 });
 
-test('session labels fall back to session id when title is default', () => {
+test('session labels prefer predicted title before falling back to session id', () => {
   assert.match(js, /function isDefaultSessionTitle\(title\)/);
   assert.match(js, /new session/);
   assert.match(js, /new chat/);
   assert.match(js, /function formatSessionDisplayName\(session\)/);
+  assert.match(js, /session\.predictedTitle/);
   assert.match(js, /session\.sessionId/);
+});
+
+test('session popover renders first-message favicon before the title', () => {
+  assert.match(js, /function resolveSessionFaviconSrc\(session\)/);
+  assert.match(js, /firstMessageTab/);
+  assert.match(js, /chrome:\/\/favicon2\/\?pageUrl=/);
+  assert.match(js, /class="session-favicon"/);
+  assert.match(js, /<img class="session-favicon-image"/);
 });
 
 test('session popover supports inline rename and saves via session patch endpoint', () => {

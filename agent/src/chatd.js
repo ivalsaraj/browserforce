@@ -49,6 +49,8 @@ const LOCAL_IMAGE_EXTENSION_BY_CONTENT_TYPE = Object.entries(LOCAL_IMAGE_CONTENT
   if (!acc[type]) acc[type] = ext;
   return acc;
 }, {});
+const SESSION_TITLE_MARKER = '[[BF_SESSION_TITLE]]';
+const MAX_SESSION_TITLE_PREFIX_BUFFER = 200;
 
 function parseTopLevelTomlString(raw, key) {
   const lines = String(raw || '').split(/\r?\n/);
@@ -609,13 +611,104 @@ function sanitizeContextText(value, maxLen = 320) {
   return normalized.length > maxLen ? `${normalized.slice(0, maxLen - 3)}...` : normalized;
 }
 
+function isDefaultSessionTitle(title) {
+  const lowered = String(title || '').trim().toLowerCase();
+  return !lowered || lowered === 'new session' || lowered === 'new chat';
+}
+
+function normalizePredictedTitle(value) {
+  return sanitizeContextText(value, 120);
+}
+
 function normalizeBrowserContext(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const tabId = Number.isInteger(raw.tabId) ? raw.tabId : null;
   const title = sanitizeContextText(raw.title, 180);
   const url = sanitizeContextText(raw.url, 500);
-  if (tabId == null && !title && !url) return null;
-  return { tabId, title, url };
+  const favIconUrl = sanitizeContextText(raw.favIconUrl, 2000);
+  if (tabId == null && !title && !url && !favIconUrl) return null;
+  return { tabId, title, url, favIconUrl };
+}
+
+function shouldPredictSessionTitle(session) {
+  return !!session && isDefaultSessionTitle(session.title) && !normalizePredictedTitle(session.predictedTitle);
+}
+
+function buildSessionTitlePromptInstruction() {
+  return [
+    'Hidden session-title task: Begin your final user-facing answer with exactly one line in this format:',
+    `${SESSION_TITLE_MARKER} <short title>`,
+    '',
+    'Use 3-8 words based only on the user request. After that blank line, continue with the normal answer. Do not mention the hidden title line.',
+  ].join('\n');
+}
+
+function buildFirstMessageTabPatch(browserContext) {
+  if (!browserContext) return null;
+  const patch = {};
+  if (browserContext.tabId != null) patch.tabId = browserContext.tabId;
+  if (browserContext.title) patch.title = browserContext.title;
+  if (browserContext.url) patch.url = browserContext.url;
+  if (browserContext.favIconUrl) patch.favIconUrl = browserContext.favIconUrl;
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function consumeSessionTitlePrefix(buffer, { force = false } = {}) {
+  const text = String(buffer || '');
+  if (!text) return { pending: !force, predictedTitle: '', visibleText: '' };
+
+  const prefixLength = Math.min(text.length, SESSION_TITLE_MARKER.length);
+  const prefixCheck = text.slice(0, prefixLength);
+  if (!text.startsWith(SESSION_TITLE_MARKER)) {
+    if (!force && SESSION_TITLE_MARKER.startsWith(prefixCheck) && text.length < SESSION_TITLE_MARKER.length) {
+      return { pending: true, predictedTitle: '', visibleText: '' };
+    }
+    return { pending: false, predictedTitle: '', visibleText: text };
+  }
+
+  const newlineIndex = text.indexOf('\n');
+  if (newlineIndex === -1) {
+    if (!force && text.length < MAX_SESSION_TITLE_PREFIX_BUFFER) {
+      return { pending: true, predictedTitle: '', visibleText: '' };
+    }
+    return {
+      pending: false,
+      predictedTitle: '',
+      visibleText: text.replace(/^\[\[BF_SESSION_TITLE\]\]\s*/, ''),
+    };
+  }
+
+  const rawLine = text.slice(0, newlineIndex).replace(/\r$/, '');
+  const predictedTitle = normalizePredictedTitle(rawLine.slice(SESSION_TITLE_MARKER.length).trim());
+  let visibleText = text.slice(newlineIndex + 1);
+  if (visibleText.startsWith('\r\n')) visibleText = visibleText.slice(2);
+  else if (visibleText.startsWith('\n')) visibleText = visibleText.slice(1);
+  return { pending: false, predictedTitle, visibleText };
+}
+
+function sanitizeRunDelta(run, delta) {
+  const text = String(delta || '');
+  const prediction = run?.sessionTitlePrediction;
+  if (!prediction?.active) {
+    return { predictedTitle: '', visibleText: text };
+  }
+  prediction.buffer += text;
+  const result = consumeSessionTitlePrefix(prediction.buffer, { force: false });
+  if (result.pending) return { predictedTitle: '', visibleText: '' };
+  prediction.active = false;
+  prediction.buffer = '';
+  return result;
+}
+
+function sanitizeRunFinalText(run, finalText) {
+  const prediction = run?.sessionTitlePrediction;
+  const source = String(finalText || '') || `${prediction?.active ? prediction.buffer : ''}${String(run?.assistantBuffer || '')}`;
+  const result = consumeSessionTitlePrefix(source, { force: true });
+  if (prediction) {
+    prediction.active = false;
+    prediction.buffer = '';
+  }
+  return result;
 }
 
 function normalizeUsageNumber(value) {
@@ -1387,8 +1480,15 @@ function trackRunStep(run, evt) {
   }
 }
 
-function buildRunPrompt({ message, browserContext }) {
-  if (!browserContext) return message;
+function buildRunPrompt({ message, browserContext, predictSessionTitle = false }) {
+  if (!browserContext) {
+    if (!predictSessionTitle) return message;
+    return [
+      buildSessionTitlePromptInstruction(),
+      '',
+      `User request: ${message}`,
+    ].join('\n');
+  }
 
   const lines = [
     'BrowserForce active tab context:',
@@ -1406,6 +1506,10 @@ function buildRunPrompt({ message, browserContext }) {
   lines.push('Do not infer page contents from title/URL/tab metadata, cached logs, or web search when live inspection fails.');
   lines.push('After reporting the error, provide one concrete recovery action focused on MCP/relay health.');
   lines.push('If the request is still ambiguous after inspecting, ask one focused clarifying question.');
+  if (predictSessionTitle) {
+    lines.push('');
+    lines.push(buildSessionTitlePromptInstruction());
+  }
   lines.push('');
   lines.push(`User request: ${message}`);
   return lines.join('\n');
@@ -1429,8 +1533,9 @@ function buildPromptWithAgents({
   browserContext,
   agentsInstructions,
   enabledPlugins = [],
+  predictSessionTitle = false,
 }) {
-  const prompt = buildRunPrompt({ message, browserContext });
+  const prompt = buildRunPrompt({ message, browserContext, predictSessionTitle });
   const agents = String(agentsInstructions || '').trim();
   const pluginContext = buildPluginPromptContext(enabledPlugins);
   if (!agents && !pluginContext) return prompt;
@@ -1469,8 +1574,13 @@ function buildPromptWithAgents({
   ].join('\n');
 }
 
-function buildPromptWithAgentsReminder({ message, browserContext, enabledPlugins = [] }) {
-  const prompt = buildRunPrompt({ message, browserContext });
+function buildPromptWithAgentsReminder({
+  message,
+  browserContext,
+  enabledPlugins = [],
+  predictSessionTitle = false,
+}) {
+  const prompt = buildRunPrompt({ message, browserContext, predictSessionTitle });
   const pluginContext = buildPluginPromptContext(enabledPlugins);
   if (!pluginContext) {
     return [
@@ -1588,6 +1698,21 @@ export async function startChatd(opts = {}) {
       }
     }
   };
+
+  async function persistPredictedTitle(run, predictedTitle) {
+    const normalized = normalizePredictedTitle(predictedTitle);
+    if (!normalized || !run?.sessionTitlePrediction || run.sessionTitlePrediction.persisted) return;
+    run.sessionTitlePrediction.persisted = true;
+    try {
+      await updateSession({
+        sessionId: run.sessionId,
+        patch: { predictedTitle: normalized },
+        storageRoot,
+      });
+    } catch {
+      run.sessionTitlePrediction.persisted = false;
+    }
+  }
 
   async function finalizeRun(run, finalText) {
     if (!run || run.status !== 'running' || run.finalSent) return;
@@ -1960,17 +2085,36 @@ export async function startChatd(opts = {}) {
           return;
         }
         const browserContext = normalizeBrowserContext(body?.browserContext);
+        const predictSessionTitle = shouldPredictSessionTitle(session);
+        const firstMessageTab = !session.firstMessageTab ? buildFirstMessageTabPatch(browserContext) : null;
+        if (firstMessageTab) {
+          try {
+            await updateSession({
+              sessionId,
+              patch: { firstMessageTab },
+              storageRoot,
+            });
+          } catch {
+            // best-effort metadata only
+          }
+        }
         const enabledPlugins = normalizeEnabledPluginsList(session.enabledPlugins);
         const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
           ? session.providerState.codex.sessionId
           : null;
         const promptMessage = resumeSessionId
-          ? buildPromptWithAgentsReminder({ message, browserContext, enabledPlugins })
+          ? buildPromptWithAgentsReminder({
+            message,
+            browserContext,
+            enabledPlugins,
+            predictSessionTitle,
+          })
           : buildPromptWithAgents({
             message,
             browserContext,
             agentsInstructions: await loadAgentsInstructions(codexCwd),
             enabledPlugins,
+            predictSessionTitle,
           });
         const runReasoningEffort = resolveEffectiveReasoningEffort(
           session.reasoningEffort,
@@ -1994,6 +2138,9 @@ export async function startChatd(opts = {}) {
           reasoningEffort: runReasoningEffort,
           activeCommentaryStepKey: '',
           commentarySequence: 0,
+          sessionTitlePrediction: predictSessionTitle
+            ? { active: true, buffer: '', persisted: false }
+            : null,
         };
 
         const enqueue = (fn) => {
@@ -2019,10 +2166,13 @@ export async function startChatd(opts = {}) {
                 if (evt.event === 'chat.delta') {
                   const delta = evt.payload?.delta || '';
                   if (delta) {
+                    const sanitized = sanitizeRunDelta(active, delta);
+                    await persistPredictedTitle(active, sanitized.predictedTitle);
+                    if (!sanitized.visibleText) return;
                     active.activeCommentaryStepKey = '';
-                    active.assistantBuffer += delta;
-                    pushRunTimelineEntry(active, { type: 'text', text: delta });
-                    broadcast(buildEvent({ event: 'chat.delta', runId, sessionId, payload: { delta } }));
+                    active.assistantBuffer += sanitized.visibleText;
+                    pushRunTimelineEntry(active, { type: 'text', text: sanitized.visibleText });
+                    broadcast(buildEvent({ event: 'chat.delta', runId, sessionId, payload: { delta: sanitized.visibleText } }));
                   }
                   return;
                 }
@@ -2038,8 +2188,9 @@ export async function startChatd(opts = {}) {
 
                 if (evt.event === 'chat.final') {
                   active.activeCommentaryStepKey = '';
-                  const text = evt.payload?.text || active.assistantBuffer || '';
-                  await finalizeRun(active, text);
+                  const sanitized = sanitizeRunFinalText(active, evt.payload?.text || '');
+                  await persistPredictedTitle(active, sanitized.predictedTitle);
+                  await finalizeRun(active, sanitized.visibleText);
                   return;
                 }
 
@@ -2118,12 +2269,16 @@ export async function startChatd(opts = {}) {
                 }
 
                 if (active.assistantBuffer) {
-                  await finalizeRun(active, active.assistantBuffer);
+                  const sanitized = sanitizeRunFinalText(active, active.assistantBuffer);
+                  await persistPredictedTitle(active, sanitized.predictedTitle);
+                  await finalizeRun(active, sanitized.visibleText);
                   return;
                 }
 
                 if (code === 0) {
-                  await finalizeRun(active, '');
+                  const sanitized = sanitizeRunFinalText(active, '');
+                  await persistPredictedTitle(active, sanitized.predictedTitle);
+                  await finalizeRun(active, sanitized.visibleText);
                   return;
                 }
 

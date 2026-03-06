@@ -204,6 +204,37 @@ test('updateSession persists codex provider session mapping', async () => {
   assert.equal(row?.providerState?.codex?.latestUsage?.totalTokens, 128125);
 });
 
+test('updateSession persists predicted title and first-message tab metadata', async () => {
+  const created = await createSession({ title: 'New chat', storageRoot });
+  const updated = await updateSession({
+    sessionId: created.sessionId,
+    patch: {
+      predictedTitle: 'Sidebar Session Titles',
+      firstMessageTab: {
+        tabId: 42,
+        title: 'Pricing',
+        url: 'https://example.com/pricing',
+        favIconUrl: 'https://example.com/favicon.ico',
+      },
+    },
+    storageRoot,
+  });
+
+  assert.equal(updated?.predictedTitle, 'Sidebar Session Titles');
+  assert.equal(updated?.firstMessageTab?.tabId, 42);
+  assert.equal(updated?.firstMessageTab?.title, 'Pricing');
+  assert.equal(updated?.firstMessageTab?.url, 'https://example.com/pricing');
+  assert.equal(updated?.firstMessageTab?.favIconUrl, 'https://example.com/favicon.ico');
+
+  const rows = await listSessions({ limit: 10, storageRoot });
+  const row = rows.find((item) => item.sessionId === created.sessionId);
+  assert.equal(row?.predictedTitle, 'Sidebar Session Titles');
+  assert.equal(row?.firstMessageTab?.tabId, 42);
+  assert.equal(row?.firstMessageTab?.title, 'Pricing');
+  assert.equal(row?.firstMessageTab?.url, 'https://example.com/pricing');
+  assert.equal(row?.firstMessageTab?.favIconUrl, 'https://example.com/favicon.ico');
+});
+
 test('listSessions fails fast on corrupted index metadata', async () => {
   writeFileSync(join(storageRoot, 'index.json'), '{this-is-not-json\n', 'utf8');
   await assert.rejects(
