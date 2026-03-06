@@ -456,7 +456,7 @@ Plugin `SKILL.md` content is no longer fully inlined into the default `execute` 
 | Plugin      | What it adds                                                                                   | Install                                 |
 | ----------- | ---------------------------------------------------------------------------------------------- | --------------------------------------- |
 | `highlight` | `highlight(selector, color?)` — outlines matching elements; `clearHighlights()` — removes them | `browserforce plugin install highlight` |
-| `google-sheets` | `gsSummarizeSheet()`; `gsReadContiguousRows()`; `gsFormatBulletsInRange()`; `gsSplitBulletsInRange()`; `gsRebalanceBoldInRange()`; `gsLogIssue()` | `browserforce plugin install google-sheets` |
+| `google-sheets` | `gsGetSelection()`; `gsSuggestBoldPhrases()`; `gsFormatCurrentSelection()`; `gsSummarizeSheet()`; `gsReadContiguousRows()`; `gsFormatBulletsInRange()`; `gsSplitBulletsInRange()`; `gsRebalanceBoldInRange()`; `gsLogIssue()` | `browserforce plugin install google-sheets` |
 | `openclaw`  | OpenClaw-specific BrowserForce tab policy (skill text only, no helper functions)              | Auto-installed by `browserforce setup openclaw` |
 
 
