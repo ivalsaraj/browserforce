@@ -44,6 +44,11 @@ const LOCAL_IMAGE_CONTENT_TYPES = {
   '.svg': 'image/svg+xml',
   '.avif': 'image/avif',
 };
+const LOCAL_IMAGE_CONTENT_TYPE_SET = new Set(Object.values(LOCAL_IMAGE_CONTENT_TYPES));
+const LOCAL_IMAGE_EXTENSION_BY_CONTENT_TYPE = Object.entries(LOCAL_IMAGE_CONTENT_TYPES).reduce((acc, [ext, type]) => {
+  if (!acc[type]) acc[type] = ext;
+  return acc;
+}, {});
 
 function parseTopLevelTomlString(raw, key) {
   const lines = String(raw || '').split(/\r?\n/);
@@ -521,6 +526,36 @@ function normalizeLocalFilePath(value) {
 function localImageContentTypeForPath(path) {
   const extension = extname(String(path || '')).toLowerCase();
   return LOCAL_IMAGE_CONTENT_TYPES[extension] || null;
+}
+
+function normalizeUploadImageContentType(value) {
+  const normalized = String(value || '').trim().toLowerCase().split(';')[0];
+  if (!normalized || !LOCAL_IMAGE_CONTENT_TYPE_SET.has(normalized)) return null;
+  return normalized;
+}
+
+function sanitizeUploadImageStem(filename) {
+  const stem = String(filename || 'image')
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .trim();
+  return stem ? stem.slice(0, 64) : 'image';
+}
+
+function resolveUploadImageExtension({ filename, contentType }) {
+  const extension = extname(String(filename || '')).toLowerCase();
+  if (LOCAL_IMAGE_CONTENT_TYPES[extension] === contentType) return extension;
+  return LOCAL_IMAGE_EXTENSION_BY_CONTENT_TYPE[contentType] || null;
+}
+
+function decodeUploadImageBase64(value) {
+  const text = String(value || '').replace(/\s+/g, '');
+  if (!text) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(text) || (text.length % 4) === 1) return null;
+  const data = Buffer.from(text, 'base64');
+  if (data.length === 0) return null;
+  return data;
 }
 
 function sanitizeContextText(value, maxLen = 320) {
@@ -1622,6 +1657,66 @@ export async function startChatd(opts = {}) {
         res.setHeader('content-type', contentType);
         res.setHeader('cache-control', 'no-store');
         res.end(data);
+        return;
+      }
+
+      if (url.pathname === '/v1/uploads/image' && req.method === 'POST') {
+        let body;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          json(res, 400, { error: 'Invalid JSON body' });
+          return;
+        }
+
+        const sessionId = String(body?.sessionId || '').trim();
+        if (!sessionId || !isValidSessionId(sessionId)) {
+          json(res, 400, { error: 'sessionId is invalid' });
+          return;
+        }
+        const session = await getSession({ sessionId, storageRoot });
+        if (!session) {
+          json(res, 404, { error: 'Session not found' });
+          return;
+        }
+
+        const contentType = normalizeUploadImageContentType(body?.contentType);
+        if (!contentType) {
+          json(res, 415, { error: 'Unsupported image content type' });
+          return;
+        }
+
+        const data = decodeUploadImageBase64(body?.dataBase64);
+        if (!data) {
+          json(res, 400, { error: 'dataBase64 is required' });
+          return;
+        }
+        if (data.length > LOCAL_FILE_MAX_BYTES) {
+          json(res, 413, { error: 'File too large' });
+          return;
+        }
+
+        const extension = resolveUploadImageExtension({
+          filename: body?.filename,
+          contentType,
+        });
+        if (!extension) {
+          json(res, 415, { error: 'Unsupported file type' });
+          return;
+        }
+
+        const stem = sanitizeUploadImageStem(body?.filename);
+        const uploadDir = join(storageRoot, 'uploads', sessionId);
+        await fs.mkdir(uploadDir, { recursive: true });
+        const fileName = `${Date.now()}-${randomBytes(4).toString('hex')}-${stem}${extension}`;
+        const localPath = join(uploadDir, fileName);
+        await fs.writeFile(localPath, data, { mode: 0o600 });
+
+        json(res, 201, {
+          path: localPath,
+          bytes: data.length,
+          contentType,
+        });
         return;
       }
 

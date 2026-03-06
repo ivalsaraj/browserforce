@@ -276,6 +276,81 @@ test('GET /v1/local-file rejects unsupported extensions', async () => {
   }
 });
 
+test('POST /v1/uploads/image stores image bytes and returns a local path', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Upload target' }),
+    }).then((res) => res.json());
+
+    const dataBase64 = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64');
+    const uploadRes = await fetch(`${daemon.baseUrl}/v1/uploads/image`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        filename: 'panel-shot.png',
+        contentType: 'image/png',
+        dataBase64,
+      }),
+    });
+    assert.equal(uploadRes.status, 201);
+    const uploaded = await uploadRes.json();
+    assert.equal(typeof uploaded.path, 'string');
+    assert.equal(uploaded.path.includes(`/uploads/${created.sessionId}/`), true);
+    assert.equal(uploaded.contentType, 'image/png');
+    assert.equal(uploaded.bytes > 0, true);
+    assert.equal(existsSync(uploaded.path), true);
+
+    const localFileRes = await fetch(`${daemon.baseUrl}/v1/local-file?path=${encodeURIComponent(uploaded.path)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(localFileRes.status, 200);
+    assert.equal(localFileRes.headers.get('content-type'), 'image/png');
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/uploads/image rejects unsupported image content type', async () => {
+  const daemon = await startChatd({ port: 0, writeChatdUrl: false });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Upload reject' }),
+    }).then((res) => res.json());
+
+    const uploadRes = await fetch(`${daemon.baseUrl}/v1/uploads/image`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        filename: 'bad.txt',
+        contentType: 'text/plain',
+        dataBase64: Buffer.from('not-image', 'utf8').toString('base64'),
+      }),
+    });
+    assert.equal(uploadRes.status, 415);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs rejects unsafe sessionId', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
