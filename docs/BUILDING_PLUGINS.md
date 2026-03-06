@@ -415,7 +415,7 @@ When you are building or testing a plugin with an agent and it gets stuck, keep 
 Use this workflow:
 
 1. Reproduce the issue once and capture the `sessionId`.
-2. Ask another agent to analyze that session and answer four things:
+2. Ask the AI coding agent to analyze that session and answer four things:
    - what was the real root cause
    - what helper or instruction was missing
    - what is the smallest reusable fix
