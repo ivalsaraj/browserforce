@@ -385,27 +385,65 @@ async function listInstalledPlugins({ pluginsDir = BF_PLUGINS_DIR } = {}) {
     const name = normalizePluginId(entry.name);
     if (!name) continue;
 
+    const pluginDir = join(pluginsDir, entry.name);
+    const indexPath = join(pluginDir, 'index.js');
+    const skillPath = join(pluginDir, 'SKILL.md');
+
     let meta = {};
+    let skillRaw = '';
     try {
-      const skillPath = join(pluginsDir, entry.name, 'SKILL.md');
-      const skillRaw = await fs.readFile(skillPath, 'utf8');
+      skillRaw = await fs.readFile(skillPath, 'utf8');
       meta = parsePluginSkillFrontmatter(skillRaw);
     } catch {
       meta = {};
     }
 
+    const [indexSource, indexStat, skillStat] = await Promise.all([
+      fs.readFile(indexPath, 'utf8').catch(() => null),
+      fs.stat(indexPath).catch(() => null),
+      fs.stat(skillPath).catch(() => null),
+    ]);
+
     const helpers = normalizePluginHelperNames(meta.helpers);
     const helperAliases = normalizePluginHelperNames(meta.helper_aliases);
     const helperPrefix = normalizePluginHelperPrefix(meta.helper_prefix);
+    const updatedAtMs = Math.max(
+      indexStat?.mtimeMs || 0,
+      skillStat?.mtimeMs || 0,
+    ) || null;
     rows.push({
       name,
       installed: true,
+      indexLineCount: typeof indexSource === 'string' ? countLines(indexSource) : null,
+      skillLineCount: skillRaw ? countLines(skillRaw) : null,
+      updatedAtMs,
       ...(helperPrefix ? { helperPrefix } : {}),
       ...(helpers.length > 0 ? { helpers } : {}),
       ...(helperAliases.length > 0 ? { helperAliases } : {}),
     });
   }
   return rows;
+}
+
+function countLines(text) {
+  if (typeof text !== 'string' || text.length === 0) return 0;
+  const normalized = text.replace(/\r\n/g, '\n');
+  const withoutTrailingNewline = normalized.endsWith('\n')
+    ? normalized.slice(0, -1)
+    : normalized;
+  return withoutTrailingNewline.split('\n').length;
+}
+
+function normalizeNullableCount(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function normalizeNullableTimestamp(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
 }
 
 function normalizePluginCatalogRows(rows) {
@@ -428,6 +466,9 @@ function normalizePluginCatalogRows(rows) {
     const previous = byName.get(name) || {
       name,
       installed: false,
+      skillLineCount: null,
+      indexLineCount: null,
+      updatedAtMs: null,
       helperPrefix: '',
       helpers: [],
       helperAliases: [],
@@ -437,6 +478,9 @@ function normalizePluginCatalogRows(rows) {
     byName.set(name, {
       name,
       installed: previous.installed || installed,
+      skillLineCount: previous.skillLineCount ?? normalizeNullableCount(row.skillLineCount),
+      indexLineCount: previous.indexLineCount ?? normalizeNullableCount(row.indexLineCount),
+      updatedAtMs: previous.updatedAtMs ?? normalizeNullableTimestamp(row.updatedAtMs),
       helperPrefix: previous.helperPrefix || helperPrefix || '',
       helpers: normalizePluginHelperNames([...previous.helpers, ...helpers]),
       helperAliases: normalizePluginHelperNames([...previous.helperAliases, ...helperAliases]),

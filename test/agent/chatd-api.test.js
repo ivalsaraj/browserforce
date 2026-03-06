@@ -82,7 +82,13 @@ test('GET /v1/plugins returns plugin catalog', async () => {
     port: 0,
     writeChatdUrl: false,
     pluginFetcher: async () => ([
-      { name: 'highlight', installed: true },
+      {
+        name: 'highlight',
+        installed: true,
+        skillLineCount: 12,
+        indexLineCount: 34,
+        updatedAtMs: 1700000000000,
+      },
     ]),
   });
   try {
@@ -96,6 +102,9 @@ test('GET /v1/plugins returns plugin catalog', async () => {
 
     const byName = Object.fromEntries((body.plugins || []).map((row) => [row.name, row]));
     assert.equal(byName.highlight?.installed, true);
+    assert.equal(byName.highlight?.skillLineCount, 12);
+    assert.equal(byName.highlight?.indexLineCount, 34);
+    assert.equal(byName.highlight?.updatedAtMs, 1700000000000);
     assert.equal(typeof byName.highlight?.required, 'undefined');
   } finally {
     await daemon.stop();
@@ -170,6 +179,36 @@ Plugin body`
     assert.deepEqual(plugin?.helpers, ['ufe__resolveAppFrame']);
     assert.deepEqual(plugin?.helperAliases, ['resolveAppFrame', 'snapshotOrFallback']);
     assert.deepEqual(plugin?.helperCalls, ['ufe__resolveAppFrame', 'resolveAppFrame', 'snapshotOrFallback']);
+  } finally {
+    await daemon.stop();
+    rmSync(pluginsDir, { recursive: true, force: true });
+  }
+});
+
+test('GET /v1/plugins reads local plugin file stats', async () => {
+  const pluginsDir = mkdtempSync(join(tmpdir(), 'bf-chatd-plugins-'));
+  const pluginDir = join(pluginsDir, 'sample-plugin');
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(join(pluginDir, 'index.js'), 'export default {\n  name: "sample-plugin"\n};\n', 'utf8');
+  writeFileSync(join(pluginDir, 'SKILL.md'), '---\nname: sample-plugin\ndescription: test\n---\n\n# Skill\n', 'utf8');
+
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    pluginsDir,
+  });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/plugins`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const byName = Object.fromEntries((body.plugins || []).map((row) => [row.name, row]));
+    assert.equal(byName['sample-plugin']?.installed, true);
+    assert.equal(byName['sample-plugin']?.indexLineCount, 3);
+    assert.equal(byName['sample-plugin']?.skillLineCount, 6);
+    assert.equal(typeof byName['sample-plugin']?.updatedAtMs, 'number');
+    assert.equal(byName['sample-plugin']?.updatedAtMs > 0, true);
   } finally {
     await daemon.stop();
     rmSync(pluginsDir, { recursive: true, force: true });

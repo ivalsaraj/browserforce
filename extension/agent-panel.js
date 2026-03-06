@@ -795,9 +795,54 @@ function normalizePluginCatalogRows(input) {
       helpers,
       helperAliases,
       helperCalls,
+      skillLineCount: normalizeNullablePluginCount(row.skillLineCount),
+      indexLineCount: normalizeNullablePluginCount(row.indexLineCount),
+      updatedAtMs: normalizeNullablePluginTimestamp(row.updatedAtMs),
     });
   }
   return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function normalizeNullablePluginCount(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function normalizeNullablePluginTimestamp(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function formatPluginFileCount(label, count) {
+  return `${label} ${count == null ? '-' : count}`;
+}
+
+function formatPluginUpdatedAt(updatedAtMs) {
+  if (!updatedAtMs) return null;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date(updatedAtMs));
+  } catch {
+    return null;
+  }
+}
+
+function formatPluginDetailsLabel(plugin) {
+  if (plugin.skillLineCount == null && plugin.indexLineCount == null && !plugin.updatedAtMs) {
+    return '';
+  }
+  const parts = [
+    formatPluginFileCount('SKILL', plugin.skillLineCount),
+    formatPluginFileCount('JS', plugin.indexLineCount),
+  ];
+  const updatedLabel = formatPluginUpdatedAt(plugin.updatedAtMs);
+  if (updatedLabel) parts.push(`Updated ${updatedLabel}`);
+  return parts.join(' · ');
 }
 
 function buildPluginHelperLookup(pluginCatalog = state.pluginCatalog) {
@@ -1052,11 +1097,13 @@ function renderPluginList() {
     const disabled = !isInstalled;
     const disabledAttr = disabled ? 'disabled' : '';
     const statusLabel = isInstalled ? (isEnabled ? 'Enabled' : 'Disabled') : 'Not installed';
+    const detailLabel = formatPluginDetailsLabel(plugin);
     return `
       <li>
         <button type="button" data-plugin-name="${escapeHtml(plugin.name)}" class="popover-item plugin-item ${activeClass}" ${disabledAttr}>
           <span class="plugin-item-main">
             <span class="plugin-item-name">${escapeHtml(plugin.name)}</span>
+            ${detailLabel ? `<span class="plugin-item-detail">${escapeHtml(detailLabel)}</span>` : ''}
             <span class="plugin-item-meta">${escapeHtml(statusLabel)}</span>
           </span>
         </button>

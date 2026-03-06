@@ -1647,7 +1647,7 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .plugin-item-name {
@@ -1656,11 +1656,17 @@ body {
   text-overflow: ellipsis;
 }
 
+.plugin-item-detail,
 .plugin-item-meta {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.55);
 }
 
+.plugin-item-detail {
+  line-height: 1.2;
+}
+
+.plugin-item.active .plugin-item-detail,
 .plugin-item.active .plugin-item-meta {
   color: rgba(255, 255, 255, 0.9);
 }
