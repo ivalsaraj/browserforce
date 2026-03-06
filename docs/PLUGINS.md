@@ -4,6 +4,10 @@ Extend BrowserForce with local JS files — no framework, no build step, no regi
 
 Plugins live in `~/.browserforce/plugins/<name>/`. Each plugin folder exports a plain object from `index.js`. The MCP server loads plugins at startup and merges their helpers, tools, and hooks into the runtime.
 
+Helper naming convention:
+- Prefer canonical names in the form `<prefix>__<action>` (example: `ufe__resolveAppFrame`).
+- This avoids helper collisions and makes plugin helper calls easier to identify in side panel execute traces.
+
 **Minimal plugin — 10 lines:**
 
 ```js

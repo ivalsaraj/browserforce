@@ -632,11 +632,7 @@ function buildSummaryResult(sheet, columns, scanResult, options = {}) {
   };
 }
 
-export default {
-  name: 'google-sheets',
-  description: 'Google Sheets helpers for reliable row scanning, cell reads, and issue logging',
-  version: '1.0.0',
-  helpers: {
+const helpers = {
     gsGetMeta: async (page) => {
       assertGoogleSheet(page, 'gsGetMeta');
       const title = await page.title();
@@ -995,5 +991,23 @@ export default {
         results,
       };
     },
-  },
+};
+
+// Canonical helper naming convention: <prefix>__<action>.
+helpers.gs__getMeta = helpers.gsGetMeta;
+helpers.gs__gotoCell = helpers.gsGotoCell;
+helpers.gs__readCell = helpers.gsReadCell;
+helpers.gs__readContiguousRows = helpers.gsReadContiguousRows;
+helpers.gs__summarizeSheet = helpers.gsSummarizeSheet;
+helpers.gs__splitBulletsInRange = helpers.gsSplitBulletsInRange;
+helpers.gs__rebalanceBoldInRange = helpers.gsRebalanceBoldInRange;
+helpers.gs__formatBulletsInRange = helpers.gsFormatBulletsInRange;
+helpers.gs__logIssue = helpers.gsLogIssue;
+helpers.gs__issueLogPath = helpers.gsIssueLogPath;
+
+export default {
+  name: 'google-sheets',
+  description: 'Google Sheets helpers for reliable row scanning, cell reads, and issue logging',
+  version: '1.0.0',
+  helpers,
 };

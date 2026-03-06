@@ -141,6 +141,40 @@ Body`
   await rm(dir, { recursive: true });
 });
 
+test('loadPlugins parses helper_prefix and helper_aliases metadata', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bf-test-'));
+  const pluginDir = join(dir, 'prefix-meta');
+  await mkdir(pluginDir);
+  await writeFile(
+    join(pluginDir, 'index.js'),
+    `export default { name: 'prefix-meta', helpers: { pf__run: async () => null, run: async () => null } };`
+  );
+  await writeFile(
+    join(pluginDir, 'SKILL.md'),
+    `---
+name: prefix-meta
+description: Prefix metadata test
+helper_prefix: pf
+helpers:
+  - pf__run
+helper_aliases:
+  - run
+---
+# Prefix Meta
+Body`
+  );
+
+  const { loadPlugins } = await import('../src/plugin-loader.js');
+  const plugins = await loadPlugins(dir);
+
+  assert.equal(plugins.length, 1);
+  assert.equal(plugins[0]._skillMeta.helper_prefix, 'pf');
+  assert.deepEqual(plugins[0]._skillMeta.helpers, ['pf__run']);
+  assert.deepEqual(plugins[0]._skillMeta.helper_aliases, ['run']);
+
+  await rm(dir, { recursive: true });
+});
+
 test('loadPlugins tolerates malformed frontmatter without crashing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bf-test-'));
   const pluginDir = join(dir, 'malformed');
@@ -329,7 +363,10 @@ test('loadPlugins parses metadata shape from official google-sheets SKILL fixtur
   assert.equal(typeof googleSheets._skillMeta.description, 'string');
   assert.equal(Array.isArray(googleSheets._skillMeta.when_to_use), true);
   assert.equal(Array.isArray(googleSheets._skillMeta.helpers), true);
+  assert.equal(typeof googleSheets._skillMeta.helper_prefix, 'string');
+  assert.equal(Array.isArray(googleSheets._skillMeta.helper_aliases), true);
   assert.equal(Array.isArray(googleSheets._skillMeta.tools), true);
   assert.ok(googleSheets._skillMeta.when_to_use.length > 0);
   assert.ok(googleSheets._skillMeta.helpers.length > 0);
+  assert.ok(googleSheets._skillMeta.helper_aliases.length > 0);
 });

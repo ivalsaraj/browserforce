@@ -815,6 +815,7 @@ export function buildExecContext(
     return catalog.map((entry) => ({
       ...entry,
       helpers: Array.isArray(entry?.helpers) ? [...entry.helpers] : [],
+      ...(Array.isArray(entry?.helperAliases) ? { helperAliases: [...entry.helperAliases] } : {}),
       sections: Array.isArray(entry?.sections) ? [...entry.sections] : [],
     }));
   };

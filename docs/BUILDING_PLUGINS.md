@@ -67,7 +67,7 @@ export default {
      * @param {number} [duration] - ms to hold the highlight (0 = permanent, default: 2000)
      * @returns {Promise<{ found: boolean, selector: string }>}
      */
-    async highlight(page, selector, color = '#ff0', duration = 2000) {
+    async hl__highlight(page, selector, color = '#ff0', duration = 2000) {
       const found = await page.evaluate(
         ({ sel, col, dur }) => {
           const el = document.querySelector(sel);
@@ -98,7 +98,7 @@ export default {
      *
      * @param {import('playwright').Page} page
      */
-    async clearHighlights(page) {
+    async hl__clearHighlights(page) {
       await page.evaluate(() => {
         document.querySelectorAll('[data-bf-highlighted]').forEach(el => {
           el.removeAttribute('style');
@@ -122,19 +122,19 @@ pnpm mcp
 
 ### Step 4 — Call the helper from execute
 
-Once loaded, `highlight` and `clearHighlights` are available as globals inside every `execute()` call:
+Once loaded, `hl__highlight` and `hl__clearHighlights` are available as globals inside every `execute()` call:
 
 ```js
 // In an execute() block:
-const result = await highlight(page, 'button[type="submit"]', '#f90', 3000);
+const result = await hl__highlight(page, 'button[type="submit"]', '#f90', 3000);
 if (!result.found) return 'Element not found';
 return `Highlighted: ${result.selector}`;
 ```
 
 ```js
 // Highlight multiple elements:
-await highlight(page, 'h1', '#0ff', 0);          // permanent cyan on heading
-await highlight(page, '.price', '#f0f', 0);       // permanent magenta on price
+await hl__highlight(page, 'h1', '#0ff', 0);          // permanent cyan on heading
+await hl__highlight(page, '.price', '#f0f', 0);       // permanent magenta on price
 ```
 
 ### Step 5 — Write a SKILL.md companion
@@ -260,7 +260,9 @@ Frontmatter is expected at the top of `SKILL.md`:
 name: highlight
 description: Visual outlining helpers for matching elements.
 when_to_use: ["Debugging selectors", "Previewing click targets"]
-helpers: ["highlight", "clearHighlights"]
+helper_prefix: hl
+helpers: ["hl__highlight", "hl__clearHighlights"]
+helper_aliases: ["highlight", "clearHighlights"]
 tools: []
 ---
 ```
@@ -271,7 +273,9 @@ Supported canonical keys:
 | --- | --- | --- | --- |
 | `name` | Required | string | Plugin metadata name shown in catalog. |
 | `description` | Required | string | Short summary shown in metadata-only prompt and `pluginCatalog()`. |
-| `helpers` | Optional | JSON array string | Helper names this plugin exposes. |
+| `helper_prefix` | Recommended | string | Short lowercase prefix used in canonical helper names (example: `gs`, `hl`, `ufe`). |
+| `helpers` | Optional | JSON array string | Canonical helper names, recommended as `<prefix>__<action>`. |
+| `helper_aliases` | Optional | JSON array string | Backward-compatible helper aliases (non-canonical names still callable). |
 | `tools` | Optional | JSON array string | MCP tool names this plugin exposes. |
 | `when_to_use` | Optional | JSON array string or block scalar | Guidance for agent selection behavior. |
 
@@ -279,6 +283,27 @@ Notes:
 - Unknown frontmatter keys are ignored.
 - Keep arrays as JSON (`["item-a", "item-b"]`) for reliable parsing.
 - Block scalars (`|` or `>`) are supported for multiline text fields.
+
+### Helper Naming Contract/Convention
+
+Use canonical helper names in this format:
+
+`<helper_prefix>__<action>`
+
+Examples:
+- `gs__summarizeSheet`
+- `hl__highlight`
+- `ufe__resolveAppFrame`
+
+Why this convention exists:
+- Reduces helper name conflicts across plugins.
+- Makes plugin helper calls clearly identifiable in side panel execute traces.
+- Keeps plugin metadata machine-parseable for UI labeling.
+
+Recommended pattern:
+1. Put canonical names in `helpers`.
+2. Put old names in `helper_aliases` when migrating existing plugins.
+3. Keep aliases callable for compatibility, but use canonical names in new code/docs.
 
 ### SKILL body guidance (on-demand help)
 
@@ -337,26 +362,26 @@ The following will cause a PR to be rejected without review.
 
 **Single responsibility.** One plugin, one concern. Don't bundle 10 unrelated helpers into one file. If it needs its own README section, it needs its own plugin.
 
-**Name helpers specifically.** Helper names become globals in `execute()`. Use descriptive names that won't collide with built-ins or other plugins:
+**Use the helper naming convention.** Helper names become globals in `execute()`. Prefer canonical `<prefix>__<action>` names, and keep aliases only for compatibility:
 
 | Bad | Good |
 |-----|------|
-| `capture` | `captureHAR` |
-| `save` | `saveSessionState` |
-| `extract` | `extractTableData` |
+| `capture` | `net__captureHar` |
+| `save` | `state__saveSession` |
+| `extract` | `table__extractRows` |
 
 **Handle errors and return useful values.** Wrap page interactions in try/catch. Return a summary the agent can act on — don't return `undefined` when you could return `{ found: false, reason: 'selector matched 0 elements' }`.
 
 ```js
 // Bad
-async highlight(page, selector) {
+async hl__highlight(page, selector) {
   await page.evaluate((sel) => {
     document.querySelector(sel).style.outline = '3px solid red';
   }, selector);
 }
 
 // Good
-async highlight(page, selector) {
+async hl__highlight(page, selector) {
   try {
     const found = await page.evaluate((sel) => {
       const el = document.querySelector(sel);
@@ -395,7 +420,7 @@ Install locally, restart the MCP server, run a minimal `execute()` call:
 
 ```js
 // Minimal smoke test
-return await highlight(page, 'body', '#ff0', 1000);
+return await hl__highlight(page, 'body', '#ff0', 1000);
 ```
 
 Verify: no crash, no uncaught exception, return value looks correct.
@@ -407,11 +432,11 @@ Run against at least one real website for each helper and tool the plugin expose
 Example test results entry:
 
 ```
-highlight(page, 'h1', '#f90', 2000) on https://example.com
+hl__highlight(page, 'h1', '#f90', 2000) on https://example.com
 → { found: true, selector: 'h1' }
 Element glowed orange for 2s, reverted cleanly.
 
-highlight(page, '.nonexistent', '#f90') on https://example.com
+hl__highlight(page, '.nonexistent', '#f90') on https://example.com
 → { found: false, selector: '.nonexistent' }
 No crash, correct not-found response.
 ```
@@ -434,7 +459,7 @@ Before opening a PR, verify all of the following:
 - [ ] No external network calls
 - [ ] No `eval()` or dynamic code execution
 - [ ] No credentials or secrets in code or comments
-- [ ] Helper names are specific enough to avoid collisions
+- [ ] Helper names follow `<prefix>__<action>` (or are listed as explicit `helper_aliases`)
 - [ ] PR description includes a `## Test Results` section with actual output
 
 ### registry.json entry format
@@ -476,16 +501,16 @@ When updating an existing plugin:
 ```markdown
 ## Migration — v1 → v2
 
-`highlight(page, selector, color)` now returns `{ found, selector }` instead of a boolean.
+`hl__highlight(page, selector, color)` now returns `{ found, selector }` instead of a boolean.
 
 Before:
 \`\`\`js
-const ok = await highlight(page, 'h1', '#f90');
+const ok = await hl__highlight(page, 'h1', '#f90');
 \`\`\`
 
 After:
 \`\`\`js
-const { found } = await highlight(page, 'h1', '#f90');
+const { found } = await hl__highlight(page, 'h1', '#f90');
 \`\`\`
 ```
 

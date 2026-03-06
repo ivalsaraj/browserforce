@@ -282,6 +282,19 @@ test('plugin helper receives null page gracefully when no page open', async () =
   assert.equal(result, 'no-page');
 });
 
+test('official plugin canonical helper names remain available alongside aliases', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const { default: highlightPlugin } = await import('../../plugins/official/highlight/index.js');
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__summarizeSheet, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsSummarizeSheet, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__summarizeSheet, googleSheetsPlugin.helpers.gsSummarizeSheet);
+
+  assert.equal(typeof highlightPlugin.helpers.hl__highlight, 'function');
+  assert.equal(typeof highlightPlugin.helpers.highlight, 'function');
+  assert.equal(highlightPlugin.helpers.hl__highlight, highlightPlugin.helpers.highlight);
+});
+
 test('runCode uses execute-scope console shim instead of global console', async () => {
   const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
   const originalLog = globalThis.console.log;

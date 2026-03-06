@@ -20,11 +20,14 @@ const CANONICAL_SKILL_META_KEYS = new Set([
   'name',
   'description',
   'helpers',
+  'helper_prefix',
+  'helper_aliases',
   'tools',
   'when_to_use',
 ]);
 const CANONICAL_SKILL_LIST_KEYS = new Set([
   'helpers',
+  'helper_aliases',
   'tools',
   'when_to_use',
 ]);
@@ -334,13 +337,17 @@ export function buildPluginSkillRuntime(plugins) {
     const meta = plugin._skillMeta && typeof plugin._skillMeta === 'object' ? plugin._skillMeta : {};
     const skillBody = (typeof plugin._skillBody === 'string' ? plugin._skillBody : plugin._skill || '').trim();
     const description = String(meta.description || '').trim() || '';
+    const helperPrefix = String(meta.helper_prefix || '').trim();
+    const helperAliases = Array.isArray(meta.helper_aliases) ? [...meta.helper_aliases] : [];
     const sections = extractSkillSections(skillBody);
     const sectionNames = Object.keys(sections);
 
     catalog.push({
       name: plugin.name,
       description: description || 'No description provided',
+      helperPrefix,
       helpers: helperNames,
+      helperAliases,
       sections: sectionNames,
     });
 
@@ -349,7 +356,9 @@ export function buildPluginSkillRuntime(plugins) {
       description,
       text: skillBody,
       sections,
+      helperPrefix,
       helpers: helperNames,
+      helperAliases,
     };
   }
 
