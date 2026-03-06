@@ -3,8 +3,8 @@ name: google-sheets
 description: Google Sheets helpers for reading, selection-aware formatting, summarizing, and issue logging in the active sheet.
 when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Formatting the current cell or selection without guesswork", "Applying bullet splitting and sparse bold formatting across ranges", "Logging extraction or formatting failures for follow-up"]
 helper_prefix: gs
-helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
-helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
+helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__writeCell", "gs__writeCells", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
+helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsWriteCell", "gsWriteCells", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
 tools: []
 ---
 
@@ -22,6 +22,8 @@ Available helpers:
 - `gs__gotoCell(cellRef)` → jump to a cell using the Sheets name box
 - `gs__readCell(cellRef, options?)` → read cell text through the in-cell editor
 - `gs__readContiguousRows(options?)` → detect used rows without hard-scanning arbitrary ranges
+- `gs__writeCell(cellRef, value, options?)` → write exact literal text into one cell through the in-cell editor
+- `gs__writeCells(valuesByRef, options?)` → write exact literal text into multiple cells with per-cell verification
 - `gs__suggestBoldPhrases(rangeRef, options?)` → propose 1-2 emphasis phrases per cell without writing
 - `gs__summarizeSheet(options?)` → one-call summary payload (sheet meta + scan stats + preview rows)
 - `gs__splitBulletsInRange(rangeRef, options?)` → replace in-cell bullet separators with real new lines
@@ -49,18 +51,22 @@ When the user says "summarize this page/sheet", "read this sheet", or equivalent
 - For summary requests, prefer `gs__summarizeSheet()` over ad-hoc DOM probing loops.
 - `gs__summarizeSheet()` reuses a recent in-session scan by default; set `forceRefresh: true` when the user asks for a guaranteed fresh pull.
 - Use `gs__getSelection()` or `gs__formatCurrentSelection()` when the user refers to "this cell" or "current selection".
+- Use `gs__writeCell()` or `gs__writeCells()` for plain-text cell updates.
 - Use `gs__suggestBoldPhrases()` when phrase choice matters and you want a preview before writing.
 - Prefer `gs__formatBulletsInRange()` for multi-cell content cleanup tasks.
 - Use `dryRun: true` first for formatting helpers when changing many cells.
 - Formatting defaults to `executionMode: 'safe'` and `verifyMode: 'full'`.
 - Use `executionMode: 'parallel'` only when the user explicitly asks for speed or parallel execution.
 - Log every process failure or unexpected behavior with `gs__logIssue(...)`.
+- Literal writes replace rich-text styling in the target cell; use formatting helpers after the write if the cell needs sparse bolding or line breaks.
 
 ## Guardrails (Google Sheets)
 
 - Do not switch to `/export`, `/gviz`, CSV downloads, or out-of-page fetch flows unless the user explicitly asks for export data.
 - Do not open extra tabs for summary-only requests.
 - Do not infer cell content from toolbar/status text when table rows are available via helpers.
+- Do not write through `#t-formula-bar-input` with `fill`, `page.evaluate`, `innerHTML`, or `textContent` hacks when a literal cell update is needed.
+- If a literal write fails verification, log the issue and stop. Do not retry with `UNICHAR`, invisible prefix characters, or alternate spellings like `Rs.` unless the user explicitly wants that fallback.
 
 ## Example: One-Shot Summary
 
@@ -108,6 +114,20 @@ const result = await gs__formatBulletsInRange('D2:D11', {
 });
 
 return result.summary || result;
+```
+
+## Example: Safe Literal Cell Writes
+
+```js
+const result = await gs__writeCells({
+  M1: 'Package (₹ LPA)',
+  M2: '₹3.0L - ₹3.8L',
+  M3: '₹3.8L - ₹5.0L'
+}, {
+  verify: true
+});
+
+return result;
 ```
 
 ## Example: Follow the Current Selection

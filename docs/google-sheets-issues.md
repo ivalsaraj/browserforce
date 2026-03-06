@@ -41,3 +41,9 @@ Use this format for each new entry:
 - Root cause: Skill guidance did not enforce a summary-first path for Google Sheets and lacked anti-export guardrails.
 - Fix: Added `gsSummarizeSheet()` helper plus strict skill rules to summarize directly from active-sheet helpers first.
 - Rule: For "summarize/read this sheet" requests, use helper-driven page reads and answer directly before any export path.
+
+## 2026-03-06 — [WRITE] Formula-Bar Drift During Literal Cell Updates
+- Symptom: Agent left the plugin helper path, tried formula-bar DOM writes, and spiraled through `UNICHAR`, invisible-prefix, and fallback-text hacks when asked to add `₹`.
+- Root cause: The plugin exposed read and formatting helpers but no first-class literal write helper for exact cell updates.
+- Fix: Added `gsWriteCell()` / `gsWriteCells()` plus guardrails to keep plain-text writes on the in-cell editor path and stop on verification failure.
+- Rule: For exact cell values, use literal write helpers and verification; never improvise formula-bar DOM mutation.

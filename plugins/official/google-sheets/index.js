@@ -50,6 +50,23 @@ function normalizeColumns(columns) {
   });
 }
 
+function normalizeWriteEntries(valuesByRef) {
+  if (!valuesByRef || typeof valuesByRef !== 'object' || Array.isArray(valuesByRef)) {
+    throw new Error('valuesByRef must be an object like { M2: "₹3.0L - ₹3.8L" }');
+  }
+
+  const entries = Object.entries(valuesByRef).map(([cellRef, value]) => [
+    normalizeCellRef(cellRef),
+    String(value ?? ''),
+  ]);
+
+  if (entries.length === 0) {
+    throw new Error('valuesByRef must include at least one cell');
+  }
+
+  return entries;
+}
+
 function columnToIndex(column) {
   let value = 0;
   for (const ch of String(column || '')) {
@@ -571,6 +588,123 @@ async function readCell(page, cellRef, options = {}) {
   return { ref, value };
 }
 
+async function writeCellLiteral(page, cellRef, value, options = {}) {
+  const ref = normalizeCellRef(cellRef);
+  const waitMs = Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS;
+  const dryRun = options.dryRun === true;
+  const verify = options.verify !== false;
+
+  await openEditorAtCell(page, ref, waitMs);
+  const snapshot = await readEditorSnapshot(page);
+  const nextText = String(value ?? '');
+  const changed = snapshot.text !== nextText || snapshot.boldRanges.length > 0;
+
+  if (!changed) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'unchanged',
+      changed: false,
+      committed: false,
+      verified: false,
+      before: snapshot.text,
+      after: snapshot.text,
+    };
+  }
+
+  if (dryRun) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'dry_run',
+      changed: true,
+      committed: false,
+      verified: false,
+      before: snapshot.text,
+      after: nextText,
+      clearedBoldSegments: snapshot.boldRanges.length,
+    };
+  }
+
+  const write = await writeEditorWithRanges(page, nextText, [], snapshot.baseStyle);
+  if (write.after !== nextText) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'error',
+      changed: false,
+      committed: false,
+      verified: false,
+      before: snapshot.text,
+      after: write.after,
+      error: 'text_mismatch_after_write',
+    };
+  }
+
+  await closeEditor(page, true);
+
+  if (!verify) {
+    return {
+      ref,
+      status: 'ok',
+      changed: true,
+      committed: true,
+      verified: false,
+      before: snapshot.text,
+      after: nextText,
+    };
+  }
+
+  await openEditorAtCell(page, ref, waitMs);
+  const verifySnapshot = await readEditorSnapshot(page);
+  await closeEditor(page, false);
+  const verifyOk = verifySnapshot.text === nextText && verifySnapshot.boldRanges.length === 0;
+
+  return {
+    ref,
+    status: verifyOk ? 'ok' : 'verify_failed',
+    changed: true,
+    committed: true,
+    verified: true,
+    before: snapshot.text,
+    after: verifySnapshot.text,
+    ...(verifyOk ? {} : { error: 'verify_failed' }),
+  };
+}
+
+async function writeCellsLiteral(page, state, valuesByRef, options = {}) {
+  const entries = normalizeWriteEntries(valuesByRef);
+  const dryRun = options.dryRun === true;
+  const results = [];
+
+  for (const [ref, value] of entries) {
+    try {
+      results.push(await writeCellLiteral(page, ref, value, options));
+    } catch (err) {
+      try { await closeEditor(page, false); } catch { /* ignore */ }
+      results.push({ ref, status: 'error', changed: false, committed: false, verified: false, error: String(err?.message || err) });
+    }
+  }
+
+  const changedCount = results.filter((r) => r.changed).length;
+  const committedCount = results.filter((r) => r.committed).length;
+  const unchangedCount = results.filter((r) => r.status === 'unchanged').length;
+  const okCount = results.filter((r) => r.status === 'ok' || r.status === 'dry_run').length;
+  const failedCount = results.filter((r) => r.status === 'error' || r.status === 'verify_failed').length;
+
+  if (!dryRun && committedCount > 0) clearSummaryCache(state);
+
+  return {
+    total: results.length,
+    changed: changedCount,
+    committed: committedCount,
+    unchanged: unchangedCount,
+    ok: okCount,
+    failed: failedCount,
+    results,
+  };
+}
+
 async function readRow(page, row, columns, options) {
   const cells = {};
   for (const col of columns) {
@@ -1036,6 +1170,18 @@ const helpers = {
       return scanContiguousRows(page, options);
     },
 
+    gsWriteCell: async (page, ctx, state, cellRef, value, options = {}) => {
+      assertGoogleSheet(page, 'gsWriteCell');
+      const result = await writeCellLiteral(page, cellRef, value, options);
+      if (options.dryRun !== true && result.committed) clearSummaryCache(state);
+      return result;
+    },
+
+    gsWriteCells: async (page, ctx, state, valuesByRef, options = {}) => {
+      assertGoogleSheet(page, 'gsWriteCells');
+      return writeCellsLiteral(page, state, valuesByRef, options);
+    },
+
     gsSuggestBoldPhrases: async (page, ctx, state, rangeRef, options = {}) => {
       assertGoogleSheet(page, 'gsSuggestBoldPhrases');
       const strategy = normalizeSuggestionStrategy(options.strategy);
@@ -1341,6 +1487,8 @@ helpers.gs__getSelection = helpers.gsGetSelection;
 helpers.gs__gotoCell = helpers.gsGotoCell;
 helpers.gs__readCell = helpers.gsReadCell;
 helpers.gs__readContiguousRows = helpers.gsReadContiguousRows;
+helpers.gs__writeCell = helpers.gsWriteCell;
+helpers.gs__writeCells = helpers.gsWriteCells;
 helpers.gs__suggestBoldPhrases = helpers.gsSuggestBoldPhrases;
 helpers.gs__summarizeSheet = helpers.gsSummarizeSheet;
 helpers.gs__splitBulletsInRange = helpers.gsSplitBulletsInRange;

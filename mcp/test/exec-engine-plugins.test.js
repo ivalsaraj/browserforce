@@ -163,6 +163,7 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
   }
   const boldRangesByCell = options.boldRangesByCell || {};
   const failWriteRefs = new Set((options.failWriteRefs || []).map((ref) => String(ref).toUpperCase()));
+  const verifyFailRefs = new Set((options.verifyFailRefs || []).map((ref) => String(ref).toUpperCase()));
   const pageUrl = options.pageUrl || 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit#gid=1';
   let currentUrl = pageUrl;
 
@@ -201,7 +202,7 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
         if (failWriteRefs.has(activeRef)) {
           return { after: `${arg.textValue} [mismatch]`, lineCount: arg.textValue.split('\n').length };
         }
-        cellValues[activeRef] = arg.textValue;
+        cellValues[activeRef] = verifyFailRefs.has(activeRef) ? `${arg.textValue} [verify-failed]` : arg.textValue;
         return { after: arg.textValue, lineCount: arg.textValue.split('\n').length };
       }
       if (source.includes('#t-name-box') && source.includes('activeSheetTitle')) {
@@ -342,6 +343,14 @@ test('official plugin canonical helper names remain available alongside aliases'
   assert.equal(typeof googleSheetsPlugin.helpers.gs__summarizeSheet, 'function');
   assert.equal(typeof googleSheetsPlugin.helpers.gsSummarizeSheet, 'function');
   assert.equal(googleSheetsPlugin.helpers.gs__summarizeSheet, googleSheetsPlugin.helpers.gsSummarizeSheet);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__writeCell, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsWriteCell, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__writeCell, googleSheetsPlugin.helpers.gsWriteCell);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__writeCells, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsWriteCells, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__writeCells, googleSheetsPlugin.helpers.gsWriteCells);
 
   assert.equal(typeof highlightPlugin.helpers.hl__highlight, 'function');
   assert.equal(typeof highlightPlugin.helpers.highlight, 'function');
@@ -558,6 +567,89 @@ test('gsFormatBulletsInRange parallel mode falls back to safe mode after a worke
   assert.equal(result.fallbackTriggered, true);
   assert.match(result.fallbackReason, /text_mismatch_after_write/i);
   assert.ok(newPageCalls >= 2);
+});
+
+test('gsWriteCell writes literal text with a leading rupee symbol', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const writeCell = googleSheetsPlugin.helpers.gsWriteCell;
+  const cells = {
+    M2: '3.0L - 3.8L',
+  };
+  const { page } = createGoogleSheetsMockPage(cells);
+
+  const result = await writeCell(page, null, {}, 'M2', '₹3.0L - ₹3.8L');
+
+  assert.equal(result.ref, 'M2');
+  assert.equal(result.status, 'ok');
+  assert.equal(result.changed, true);
+  assert.equal(result.verified, true);
+  assert.equal(cells.M2, '₹3.0L - ₹3.8L');
+});
+
+test('gsWriteCells updates multiple literal values exactly', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const writeCells = googleSheetsPlugin.helpers.gsWriteCells;
+  const cells = {
+    M2: '3.0L - 3.8L',
+    M3: '3.8L - 5.0L',
+    M4: '5.5L - 6.8L',
+  };
+  const { page } = createGoogleSheetsMockPage(cells);
+
+  const result = await writeCells(page, null, {}, {
+    M2: '₹3.0L - ₹3.8L',
+    M3: '₹3.8L - ₹5.0L',
+    M4: '₹5.5L - ₹6.8L',
+  });
+
+  assert.equal(result.total, 3);
+  assert.equal(result.changed, 3);
+  assert.equal(result.failed, 0);
+  assert.equal(cells.M2, '₹3.0L - ₹3.8L');
+  assert.equal(cells.M3, '₹3.8L - ₹5.0L');
+  assert.equal(cells.M4, '₹5.5L - ₹6.8L');
+});
+
+test('gsWriteCells surfaces verify failures without retry hacks', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const writeCells = googleSheetsPlugin.helpers.gsWriteCells;
+  const { page } = createGoogleSheetsMockPage({
+    M2: '3.0L - 3.8L',
+  }, {
+    failWriteRefs: ['M2'],
+  });
+
+  const result = await writeCells(page, null, {}, {
+    M2: '₹3.0L - ₹3.8L',
+  });
+
+  assert.equal(result.total, 1);
+  assert.equal(result.changed, 0);
+  assert.equal(result.committed, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.results[0].status, 'error');
+  assert.equal(result.results[0].error, 'text_mismatch_after_write');
+});
+
+test('gsWriteCells surfaces post-commit verify failures', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const writeCells = googleSheetsPlugin.helpers.gsWriteCells;
+  const { page } = createGoogleSheetsMockPage({
+    M2: '3.0L - 3.8L',
+  }, {
+    verifyFailRefs: ['M2'],
+  });
+
+  const result = await writeCells(page, null, {}, {
+    M2: '₹3.0L - ₹3.8L',
+  });
+
+  assert.equal(result.total, 1);
+  assert.equal(result.changed, 1);
+  assert.equal(result.committed, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(result.results[0].status, 'verify_failed');
+  assert.equal(result.results[0].error, 'verify_failed');
 });
 
 test('runCode uses execute-scope console shim instead of global console', async () => {
@@ -795,6 +887,47 @@ test('gsFormatBulletsInRange invalidates gsSummarizeSheet cache after real write
     dryRun: false,
   });
   assert.equal(formatResult.changed, 1);
+
+  const readsAfterWrite = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterThird = getEditorReadCount();
+  assert.ok(readsAfterThird > readsAfterWrite);
+});
+
+test('gsWriteCells invalidates gsSummarizeSheet cache after real write', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const writeCells = googleSheetsPlugin.helpers.gsWriteCells;
+  const { page, getEditorReadCount } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+    M2: '3.0L - 3.8L',
+  });
+  const state = {};
+  const summarizeOptions = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterFirst = getEditorReadCount();
+  await summarize(page, null, state, summarizeOptions);
+  const readsAfterSecond = getEditorReadCount();
+  assert.equal(readsAfterSecond, readsAfterFirst);
+
+  const writeResult = await writeCells(page, null, state, {
+    M2: '₹3.0L - ₹3.8L',
+  }, {
+    verify: false,
+  });
+  assert.equal(writeResult.changed, 1);
 
   const readsAfterWrite = getEditorReadCount();
   await summarize(page, null, state, summarizeOptions);
