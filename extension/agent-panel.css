@@ -1465,13 +1465,14 @@ body {
 }
 
 .btn-upload {
-  background: rgba(178, 83, 52, 0.1);
+  background: transparent;
   color: var(--crail-dark);
   cursor: pointer;
 }
 
 .btn-upload:hover:not(:disabled) {
-  background: rgba(178, 83, 52, 0.18);
+  background: transparent;
+  color: var(--crail);
   transform: translateY(-1px);
 }
 
@@ -1480,7 +1481,7 @@ body {
 }
 
 .btn-upload:disabled {
-  background: #d9d4cb;
+  background: transparent;
   color: #9d9487;
   cursor: not-allowed;
 }
