@@ -458,9 +458,63 @@ body {
   gap: 6px;
 }
 
+.bubble-assistant .md-content .md-pre-wrap {
+  position: relative;
+}
+
+.bubble-assistant .md-content .md-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--crail-dark);
+  opacity: 0;
+  transform: translateY(-2px);
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 140ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.bubble-assistant .md-content .md-copy-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.bubble-assistant .md-content .md-pre-wrap:hover .md-copy-btn,
+.bubble-assistant .md-content .md-pre-wrap:focus-within .md-copy-btn,
+.bubble-assistant .md-content .md-copy-btn.copied {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.bubble-assistant .md-content .md-copy-btn:hover {
+  border-color: var(--crail);
+  color: var(--crail);
+}
+
+.bubble-assistant .md-content .md-copy-btn:focus-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  outline: 2px solid color-mix(in srgb, var(--crail) 55%, #fff 45%);
+  outline-offset: 1px;
+}
+
+.bubble-assistant .md-content .md-copy-btn.copied {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line) 55%);
+}
+
 .bubble-assistant .md-content .md-pre {
   margin: 0;
-  padding: 10px 12px;
+  padding: 30px 12px 10px;
   border-radius: 10px;
   border: 1px solid var(--line);
   background: #f6f4ef;
@@ -703,6 +757,31 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.step-branch-call-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.step-branch-origin {
+  display: inline-block;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+.step-branch-origin.plugin {
+  border-color: rgba(150, 74, 44, 0.45);
+  color: var(--crail-dark);
 }
 
 .step-branch-preview.done .step-branch-call {

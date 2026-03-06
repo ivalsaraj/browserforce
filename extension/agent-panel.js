@@ -24,6 +24,9 @@ const BROWSERFORCE_AGENT_OPEN_REQUEST_MAX_AGE_MS = 60_000;
 const STREAM_CHUNK_TARGET_CHARS = 24;
 const STREAM_CHUNK_LOOKAHEAD_CHARS = 14;
 const STREAM_CHUNK_INTERVAL_MS = 26;
+const COPY_CODE_FEEDBACK_MS = 1400;
+const PLUGIN_HELPER_CALL_RE = /^[A-Za-z_$][\w$]{0,127}$/;
+const PLUGIN_HELPER_PREFIX_RE = /^[a-z][a-z0-9]{1,31}$/;
 
 const state = {
   value: initialState,
@@ -608,6 +611,33 @@ function normalizeEnabledPlugins(input) {
   return normalized;
 }
 
+function normalizePluginHelperName(value) {
+  const text = String(value || '').trim();
+  if (!text || !PLUGIN_HELPER_CALL_RE.test(text)) return '';
+  return text;
+}
+
+function normalizePluginHelperNames(input) {
+  const source = Array.isArray(input) ? input : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const rawValue of source) {
+    const helperName = normalizePluginHelperName(rawValue);
+    if (!helperName) continue;
+    const key = helperName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(helperName);
+  }
+  return normalized;
+}
+
+function normalizePluginHelperPrefix(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || !PLUGIN_HELPER_PREFIX_RE.test(text)) return '';
+  return text;
+}
+
 function activeSessionEnabledPlugins() {
   return normalizeEnabledPlugins(getActiveSession()?.enabledPlugins);
 }
@@ -627,12 +657,55 @@ function normalizePluginCatalogRows(input) {
     const name = String(row.name || '').trim().toLowerCase();
     if (!name || seen.has(name)) continue;
     seen.add(name);
+    const helpers = normalizePluginHelperNames(row.helpers);
+    const helperAliases = normalizePluginHelperNames(row.helperAliases || row.helper_aliases);
+    const helperCalls = normalizePluginHelperNames(row.helperCalls || [
+      ...helpers,
+      ...helperAliases,
+    ]);
     rows.push({
       name,
       installed: row.installed !== false,
+      helperPrefix: normalizePluginHelperPrefix(row.helperPrefix || row.helper_prefix),
+      helpers,
+      helperAliases,
+      helperCalls,
     });
   }
   return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function buildPluginHelperLookup(pluginCatalog = state.pluginCatalog) {
+  const rows = Array.isArray(pluginCatalog) ? pluginCatalog : [];
+  const lookup = new Map();
+
+  for (const plugin of rows) {
+    const pluginName = String(plugin?.name || '').trim().toLowerCase();
+    if (!pluginName) continue;
+    const helperPrefix = normalizePluginHelperPrefix(plugin?.helperPrefix);
+    const canonicalNames = normalizePluginHelperNames(plugin?.helpers);
+    const callNames = normalizePluginHelperNames(plugin?.helperCalls || [
+      ...canonicalNames,
+      ...normalizePluginHelperNames(plugin?.helperAliases),
+    ]);
+    for (const callName of callNames) {
+      const key = callName.toLowerCase();
+      if (lookup.has(key)) continue;
+      lookup.set(key, {
+        pluginName,
+        helperPrefix,
+        canonical: canonicalNames.includes(callName),
+      });
+    }
+  }
+
+  return lookup;
+}
+
+function resolvePluginHelperSource(callName, pluginHelperLookup) {
+  const helperName = normalizePluginHelperName(callName);
+  if (!helperName || !(pluginHelperLookup instanceof Map)) return null;
+  return pluginHelperLookup.get(helperName.toLowerCase()) || null;
 }
 
 function renderSelectors() {
@@ -1084,7 +1157,7 @@ function extractExecuteHelperCalls(details) {
   return helperCalls;
 }
 
-function renderExecuteHelperTreePreview(entry, expanded) {
+function renderExecuteHelperTreePreview(entry, expanded, pluginHelperLookup) {
   if (expanded) return '';
   if (!isBrowserForceExecuteStep(entry)) return '';
   const details = Array.isArray(entry?.details) ? entry.details : [];
@@ -1095,7 +1168,15 @@ function renderExecuteHelperTreePreview(entry, expanded) {
     <ul class="step-branch-preview ${status}">
       ${helperCalls.map((callName) => `
         <li class="step-branch-node">
-          <span class="step-branch-call">${escapeHtml(callName)}()</span>
+          <span class="step-branch-call-row">
+            <span class="step-branch-call">${escapeHtml(callName)}()</span>
+            ${(() => {
+              const source = resolvePluginHelperSource(callName, pluginHelperLookup);
+              if (!source) return '';
+              const badgeLabel = `plugin:${source.pluginName}`;
+              return `<span class="step-branch-origin plugin">${escapeHtml(badgeLabel)}</span>`;
+            })()}
+          </span>
         </li>
       `).join('')}
     </ul>
@@ -1206,6 +1287,7 @@ function collectReasoningBodyText(timeline, startIndex) {
 function renderRunTimeline(run, fallbackText = '') {
   const timeline = normalizeRunTimeline(run, fallbackText);
   if (!timeline.length) return '';
+  const pluginHelperLookup = buildPluginHelperLookup(state.pluginCatalog);
   const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
   const latestReasoningIndex = getLatestReasoningTimelineStepIndex(run, timeline);
   const getTimelineEntryKey = (entry, index) => {
@@ -1320,7 +1402,7 @@ function renderRunTimeline(run, fallbackText = '') {
     const key = getTimelineEntryKey(entry, index);
     const expanded = !!state.expandedTimelineEntries[key];
     if (expanded) classes.push('expanded');
-    const helperTreePreviewHtml = renderExecuteHelperTreePreview(entry, expanded);
+    const helperTreePreviewHtml = renderExecuteHelperTreePreview(entry, expanded, pluginHelperLookup);
     const isExecuteStep = isBrowserForceExecuteStep(entry);
     const detailsHtml = details
       .map((line) => `<li>${renderInlineContent(line)}</li>`)
@@ -1476,9 +1558,82 @@ function refreshReasoningBodyFades() {
   });
 }
 
+async function copyTextToClipboard(text) {
+  const value = String(text ?? '');
+  if (!value) return false;
+
+  if (navigator?.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (_) {
+      // fall through to legacy copy fallback
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } catch (_) {
+    copied = false;
+  }
+  textarea.remove();
+  return copied;
+}
+
+function clearCopyButtonFeedback(button) {
+  if (!(button instanceof HTMLButtonElement)) return;
+  const timeoutId = Number.parseInt(button.dataset.copyResetTimeout || '', 10);
+  if (Number.isFinite(timeoutId) && timeoutId > 0) {
+    window.clearTimeout(timeoutId);
+  }
+  delete button.dataset.copyResetTimeout;
+  button.classList.remove('copied');
+  button.setAttribute('aria-label', 'Copy code block');
+  button.setAttribute('title', 'Copy code block');
+}
+
+function setCopyButtonFeedback(button) {
+  if (!(button instanceof HTMLButtonElement)) return;
+  clearCopyButtonFeedback(button);
+  button.classList.add('copied');
+  button.setAttribute('aria-label', 'Copied');
+  button.setAttribute('title', 'Copied');
+  const timeoutId = window.setTimeout(() => {
+    clearCopyButtonFeedback(button);
+  }, COPY_CODE_FEEDBACK_MS);
+  button.dataset.copyResetTimeout = String(timeoutId);
+}
+
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
+    const copyBtn = event.target.closest('button[data-md-copy-code]');
+    if (copyBtn && transcriptEl.contains(copyBtn)) {
+      event.preventDefault();
+      const code = copyBtn.closest('.md-pre-wrap')?.querySelector('code');
+      const codeText = String(code?.textContent || '');
+      if (!codeText.trim()) return;
+      const copied = await copyTextToClipboard(codeText);
+      if (!copied) {
+        setStatus('error', 'Failed to copy code block');
+        return;
+      }
+      setCopyButtonFeedback(copyBtn);
+      return;
+    }
+
     const startupActionBtn = event.target.closest('button[data-startup-action]');
     if (startupActionBtn && transcriptEl.contains(startupActionBtn)) {
       event.preventDefault();

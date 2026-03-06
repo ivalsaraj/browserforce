@@ -119,6 +119,8 @@ test('renders fenced code blocks and table markdown', () => {
     '| foo | 42 |',
   ].join('\n'));
   assert.match(rendered, /class="md-pre"/);
+  assert.match(rendered, /class="md-copy-btn"/);
+  assert.match(rendered, /data-md-copy-code/);
   assert.match(rendered, /language-js/);
   assert.match(rendered, /const ok = true;/);
   assert.match(rendered, /class="md-table"/);

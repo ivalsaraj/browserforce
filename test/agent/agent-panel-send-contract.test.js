@@ -64,6 +64,14 @@ test('plugin popover loads catalog and patches per-session enabledPlugins', () =
   assert.match(js, /JSON\.stringify\(\{\s*enabledPlugins\s*\}\)/);
 });
 
+test('execute preview marks plugin helper calls using plugin catalog metadata', () => {
+  assert.match(js, /function buildPluginHelperLookup\(/);
+  assert.match(js, /function resolvePluginHelperSource\(/);
+  assert.match(js, /step-branch-origin plugin/);
+  assert.match(js, /const source = resolvePluginHelperSource\(callName, pluginHelperLookup\)/);
+  assert.match(js, /const badgeLabel = `plugin:/);
+});
+
 test('session popover renders per-session timestamp metadata', () => {
   assert.match(js, /function formatSessionTimestamp/);
   assert.match(js, /updatedAt|createdAt/);
