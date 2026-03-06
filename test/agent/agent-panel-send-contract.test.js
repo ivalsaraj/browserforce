@@ -35,21 +35,29 @@ test('enter key submits composer and shift+enter keeps newline', () => {
   assert.match(js, /chatFormEl\.requestSubmit\(\);/);
 });
 
-test('session labels prefer predicted title before falling back to session id', () => {
+test('sidebar session rows can use predicted title without changing the active session trigger label', () => {
   assert.match(js, /function isDefaultSessionTitle\(title\)/);
   assert.match(js, /new session/);
   assert.match(js, /new chat/);
   assert.match(js, /function formatSessionDisplayName\(session\)/);
   assert.match(js, /session\.predictedTitle/);
+  assert.match(js, /function formatSessionLabel\(session\)/);
+  assert.doesNotMatch(js, /function formatSessionLabel\(session\)[\s\S]*session\.predictedTitle/);
   assert.match(js, /session\.sessionId/);
 });
 
 test('session popover renders first-message favicon before the title', () => {
   assert.match(js, /function resolveSessionFaviconSrc\(session\)/);
   assert.match(js, /firstMessageTab/);
-  assert.match(js, /chrome:\/\/favicon2\/\?pageUrl=/);
+  assert.match(js, /chrome\.runtime\.getURL\(`\/_favicon\/\?pageUrl=/);
   assert.match(js, /class="session-favicon"/);
   assert.match(js, /<img class="session-favicon-image"/);
+});
+
+test('assistant content strips hidden session title marker before rendering', () => {
+  assert.match(js, /function stripHiddenSessionTitlePrefix\(value\)/);
+  assert.match(js, /function renderContent\(value\)\s*\{\s*return renderMarkdownContent\(stripHiddenSessionTitlePrefix\(value\)\);\s*\}/);
+  assert.match(js, /\[\[BF_SESSION_TITLE\]\]/);
 });
 
 test('session popover supports inline rename and saves via session patch endpoint', () => {
@@ -105,7 +113,7 @@ test('assistant transcript prefers ordered run timeline over grouped run steps',
 
 test('assistant transcript renders message bodies with markdown block renderer', () => {
   assert.match(js, /renderMarkdownContent/);
-  assert.match(js, /function renderContent\(value\)\s*\{\s*return renderMarkdownContent\(value\);\s*\}/);
+  assert.match(js, /function renderContent\(value\)\s*\{\s*return renderMarkdownContent\(stripHiddenSessionTitlePrefix\(value\)\);\s*\}/);
   assert.match(js, /<div class="bubble-assistant">\$\{renderContent\(entry\.text \|\| ''\)\}<\/div>/);
 });
 

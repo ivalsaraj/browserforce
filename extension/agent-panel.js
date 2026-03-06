@@ -708,7 +708,7 @@ function formatSessionDisplayName(session) {
   if (!session) return 'Session';
   const title = String(session.title || '').trim();
   if (!isDefaultSessionTitle(title)) return title;
-  const predictedTitle = String(session.predictedTitle || '').trim();
+  const predictedTitle = stripHiddenSessionTitlePrefix(session.predictedTitle || '');
   if (predictedTitle) return predictedTitle;
   return session.sessionId || 'Session';
 }
@@ -717,8 +717,6 @@ function formatSessionLabel(session) {
   if (!session) return 'Session';
   const title = String(session.title || '').trim();
   if (!isDefaultSessionTitle(title)) return title;
-  const predictedTitle = String(session.predictedTitle || '').trim();
-  if (predictedTitle) return predictedTitle;
   return formatShortSessionId(session.sessionId);
 }
 
@@ -726,14 +724,13 @@ function resolveSessionFaviconSrc(session) {
   const favIconUrl = String(session?.firstMessageTab?.favIconUrl || '').trim();
   if (
     favIconUrl.startsWith('data:')
-    || favIconUrl.startsWith('chrome://')
     || favIconUrl.startsWith('chrome-extension://')
   ) {
     return favIconUrl;
   }
   const pageUrl = String(session?.firstMessageTab?.url || '').trim();
   if (!pageUrl) return '';
-  return `chrome://favicon2/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`;
+  return chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`);
 }
 
 function formatSessionTimestamp(session) {
@@ -1919,7 +1916,13 @@ function renderRunStepIcon(icon) {
 }
 
 function renderContent(value) {
-  return renderMarkdownContent(value);
+  return renderMarkdownContent(stripHiddenSessionTitlePrefix(value));
+}
+
+function stripHiddenSessionTitlePrefix(value) {
+  const text = String(value || '');
+  if (!text.includes('[[BF_SESSION_TITLE]]')) return text;
+  return text.replace(/^\s*\[\[BF_SESSION_TITLE\]\]\s*[^\n]*\n{0,2}/, '');
 }
 
 function formatMessageTimestampTitle(message) {
