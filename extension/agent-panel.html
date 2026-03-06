@@ -73,7 +73,17 @@
         </div>
         <div class="composer-box">
           <textarea id="bf-chat-input" class="composer-textarea" rows="1" placeholder="Ask anything"></textarea>
+          <input id="bf-image-upload-input" type="file" accept="image/*" multiple hidden>
           <div class="composer-actions">
+            <button id="bf-image-upload-btn" type="button" class="btn-upload" aria-label="Upload images" title="Upload images">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                <circle cx="9" cy="10" r="1.5"></circle>
+                <path d="m21 15-4.2-4.2a1.6 1.6 0 0 0-2.2 0L9 16.4"></path>
+                <path d="M18 3v4"></path>
+                <path d="M16 5h4"></path>
+              </svg>
+            </button>
             <button id="bf-stop-run" type="button" class="btn-stop" aria-label="Stop" title="Stop" disabled hidden>
               <svg class="icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="12" cy="12" r="10"></circle>

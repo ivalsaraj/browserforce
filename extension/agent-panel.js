@@ -25,6 +25,7 @@ const STREAM_CHUNK_TARGET_CHARS = 24;
 const STREAM_CHUNK_LOOKAHEAD_CHARS = 14;
 const STREAM_CHUNK_INTERVAL_MS = 26;
 const COPY_CODE_FEEDBACK_MS = 1400;
+const MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024;
 const PLUGIN_HELPER_CALL_RE = /^[A-Za-z_$][\w$]{0,127}$/;
 const PLUGIN_HELPER_PREFIX_RE = /^[a-z][a-z0-9]{1,31}$/;
 
@@ -52,6 +53,7 @@ const state = {
   eventLoopToken: 0,
   streamEventQueue: [],
   streamEventTimer: null,
+  composerUploadInFlight: false,
   queuedMessageBySession: {},
   queuedSendInFlightBySession: {},
   sessionSelectionToken: 0,
@@ -90,6 +92,8 @@ const queuedSteerBtn = document.getElementById('bf-queued-steer');
 const queuedDeleteBtn = document.getElementById('bf-queued-delete');
 const composerBoxEl = chatFormEl.querySelector('.composer-box');
 const chatInputEl = document.getElementById('bf-chat-input');
+const imageUploadBtn = document.getElementById('bf-image-upload-btn');
+const imageUploadInputEl = document.getElementById('bf-image-upload-input');
 const stopRunBtn = document.getElementById('bf-stop-run');
 const sendBtn = chatFormEl.querySelector('button[type="submit"]');
 const tabAttachBannerEl = document.getElementById('bf-tab-attach-banner');
@@ -264,12 +268,17 @@ function syncComposerState() {
   const enabled = !chatInputEl.disabled;
   const hasText = chatInputEl.value.trim().length > 0;
   const runInProgress = isActiveRunInProgress();
+  const uploadInProgress = !!state.composerUploadInFlight;
 
   composerBoxEl.classList.toggle('is-thinking', enabled && runInProgress);
+  if (imageUploadBtn) {
+    imageUploadBtn.disabled = !enabled || uploadInProgress;
+    imageUploadBtn.classList.toggle('uploading', uploadInProgress);
+  }
   stopRunBtn.disabled = !enabled || !runInProgress;
   stopRunBtn.classList.toggle('active', enabled && runInProgress);
   stopRunBtn.hidden = !runInProgress;
-  sendBtn.disabled = !enabled || runInProgress || !hasText;
+  sendBtn.disabled = !enabled || runInProgress || uploadInProgress || !hasText;
   sendBtn.hidden = runInProgress;
 }
 
@@ -2124,6 +2133,112 @@ async function ensureOk(response, fallbackMessage) {
   throw new Error(body.error || `${fallbackMessage} (${response.status})`);
 }
 
+function escapeMarkdownImageAltText(value) {
+  const normalized = String(value || '')
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[\[\]\r\n]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return normalized || 'uploaded-image';
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!(file instanceof File)) {
+      reject(new Error('Invalid file selected'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Unable to read ${file.name || 'image file'}`));
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (!result) {
+        reject(new Error(`Unable to read ${file.name || 'image file'}`));
+        return;
+      }
+      resolve(result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function parseImageDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:([^;,]+)(?:;[^,]*)?;base64,([\s\S]+)$/i);
+  if (!match) return null;
+  const contentType = String(match[1] || '').trim().toLowerCase();
+  const dataBase64 = String(match[2] || '').replace(/\s+/g, '');
+  if (!contentType.startsWith('image/') || !dataBase64) return null;
+  return { contentType, dataBase64 };
+}
+
+function appendComposerImageMarkdown({ altText, localPath }) {
+  const alt = escapeMarkdownImageAltText(altText);
+  const path = String(localPath || '').trim();
+  if (!path) return;
+  const markdown = `![${alt}](${path})`;
+  const current = String(chatInputEl.value || '');
+  const needsNewline = current.length > 0 && !current.endsWith('\n');
+  chatInputEl.value = `${current}${needsNewline ? '\n' : ''}${markdown}\n`;
+  autoResizeInput();
+  syncComposerLayoutState();
+  syncComposerState();
+}
+
+async function uploadImageFileToSession(file, sessionId) {
+  const size = Number(file?.size || 0);
+  if (size > MAX_IMAGE_UPLOAD_BYTES) {
+    throw new Error(`Image too large (max ${Math.round(MAX_IMAGE_UPLOAD_BYTES / (1024 * 1024))}MB): ${file?.name || 'image'}`);
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+  const parsed = parseImageDataUrl(dataUrl);
+  if (!parsed) throw new Error(`Unsupported image format: ${file?.name || 'image'}`);
+
+  const res = await api('/v1/uploads/image', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId,
+      filename: String(file?.name || 'image'),
+      contentType: parsed.contentType,
+      dataBase64: parsed.dataBase64,
+    }),
+  });
+  await ensureOk(res, 'Failed to upload image');
+  const body = await readJsonOrEmpty(res);
+  const localPath = String(body?.path || '').trim();
+  if (!localPath) throw new Error(`Image upload failed: ${file?.name || 'image'}`);
+  return localPath;
+}
+
+async function handleComposerImageUploadSelection(files) {
+  const selected = Array.isArray(files) ? files : [];
+  if (selected.length === 0) return;
+  const sessionId = state.value.activeSessionId;
+  if (!sessionId) throw new Error('Start a conversation before uploading images');
+
+  state.composerUploadInFlight = true;
+  syncComposerState();
+  let uploadedCount = 0;
+  try {
+    for (const file of selected) {
+      if (!(file instanceof File)) continue;
+      const localPath = await uploadImageFileToSession(file, sessionId);
+      appendComposerImageMarkdown({
+        altText: file.name || 'uploaded-image',
+        localPath,
+      });
+      uploadedCount += 1;
+    }
+  } finally {
+    state.composerUploadInFlight = false;
+    syncComposerState();
+  }
+
+  if (uploadedCount > 0) {
+    setStatus('ready', uploadedCount === 1 ? 'Image attached' : `${uploadedCount} images attached`);
+  }
+}
+
 async function loadSessions(preferredSessionId = null) {
   const res = await api('/v1/sessions');
   await ensureOk(res, 'Failed to load sessions');
@@ -2556,6 +2671,7 @@ async function retryStartup({ refreshConnection = false } = {}) {
 
 chatFormEl.addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (state.composerUploadInFlight) return;
   const text = chatInputEl.value;
   const trimmed = text.trim();
   if (!trimmed) {
@@ -2629,6 +2745,22 @@ chatInputEl.addEventListener('input', () => {
   syncComposerLayoutState();
   syncComposerState();
 });
+
+if (imageUploadBtn && imageUploadInputEl) {
+  imageUploadBtn.addEventListener('click', () => {
+    if (chatInputEl.disabled || state.composerUploadInFlight) return;
+    imageUploadInputEl.click();
+  });
+
+  imageUploadInputEl.addEventListener('change', () => {
+    const files = Array.from(imageUploadInputEl.files || []);
+    imageUploadInputEl.value = '';
+    if (files.length === 0) return;
+    handleComposerImageUploadSelection(files).catch((error) => {
+      setStatus('error', error?.message || 'Failed to upload image');
+    });
+  });
+}
 
 if (queuedSteerBtn) {
   queuedSteerBtn.addEventListener('click', () => {

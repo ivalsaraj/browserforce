@@ -1378,6 +1378,7 @@ body {
   text-overflow: ellipsis;
 }
 
+.btn-upload,
 .btn-stop,
 .btn-send {
   width: 28px;
@@ -1388,6 +1389,36 @@ body {
   align-items: center;
   justify-content: center;
   transition: background 0.15s, opacity 0.15s, color 0.15s, transform 0.15s;
+}
+
+.btn-upload {
+  background: rgba(178, 83, 52, 0.1);
+  color: var(--crail-dark);
+  cursor: pointer;
+}
+
+.btn-upload:hover:not(:disabled) {
+  background: rgba(178, 83, 52, 0.18);
+  transform: translateY(-1px);
+}
+
+.btn-upload:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-upload:disabled {
+  background: #d9d4cb;
+  color: #9d9487;
+  cursor: not-allowed;
+}
+
+.btn-upload.uploading {
+  animation: spin 0.8s linear infinite;
+}
+
+.btn-upload svg {
+  width: 13px;
+  height: 13px;
 }
 
 .btn-stop {

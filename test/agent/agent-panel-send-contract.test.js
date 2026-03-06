@@ -114,6 +114,18 @@ test('local screenshot markdown images hydrate through authenticated chatd fetch
   assert.match(js, /hydrateLocalImagePreviews\(\);/);
 });
 
+test('composer supports image upload and inserts markdown image links', () => {
+  assert.match(js, /const imageUploadBtn = document\.getElementById\('bf-image-upload-btn'\)/);
+  assert.match(js, /const imageUploadInputEl = document\.getElementById\('bf-image-upload-input'\)/);
+  assert.match(js, /MAX_IMAGE_UPLOAD_BYTES/);
+  assert.match(js, /async function uploadImageFileToSession\(file, sessionId\)/);
+  assert.match(js, /\/v1\/uploads\/image/);
+  assert.match(js, /function appendComposerImageMarkdown\(/);
+  assert.match(js, /!\[\$\{alt\}\]\(\$\{path\}\)/);
+  assert.match(js, /imageUploadInputEl\.addEventListener\('change'/);
+  assert.match(js, /handleComposerImageUploadSelection\(files\)/);
+});
+
 test('context usage renderer hides element when unavailable and only shows formatted values', () => {
   assert.match(js, /function renderContextUsageChip\(\)/);
   assert.match(js, /latestUsageBySession/);

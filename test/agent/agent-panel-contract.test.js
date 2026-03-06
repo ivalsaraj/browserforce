@@ -61,6 +61,8 @@ test('agent panel composer matches compact/expanded shell structure', () => {
   assert.match(html, /id="bf-queued-text"/);
   assert.match(html, /id="bf-queued-steer"/);
   assert.match(html, /id="bf-queued-delete"/);
+  assert.match(html, /id="bf-image-upload-input"/);
+  assert.match(html, /id="bf-image-upload-btn"/);
   assert.match(html, /id="bf-stop-run"[\s\S]*icon-stop/);
   assert.match(html, /id="bf-send-btn"/);
   assert.match(css, /\.queued-row/);
@@ -70,6 +72,8 @@ test('agent panel composer matches compact/expanded shell structure', () => {
   assert.match(css, /\.composer-box\.is-multiline/);
   assert.match(css, /\.composer-box\.is-thinking::before/);
   assert.match(css, /\.composer-box\.is-thinking \.composer-textarea/);
+  assert.match(css, /\.btn-upload/);
+  assert.match(css, /\.btn-upload\.uploading/);
   assert.match(css, /\.btn-send[\s\S]*border-radius:\s*999px/);
 });
 
