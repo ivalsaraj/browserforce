@@ -88,7 +88,9 @@ test('in-flight thinking state keeps inline timeline visible above the thinking 
 test('assistant transcript prefers ordered run timeline over grouped run steps', () => {
   assert.match(js, /function normalizeRunTimeline\(run, fallbackText = ''\)/);
   assert.match(js, /if \(Array\.isArray\(run\.timeline\) && run\.timeline\.length > 0\)/);
-  assert.match(js, /const timelineHtml = renderRunTimeline\(messageRun, msg\.text \|\| ''\)/);
+  assert.match(js, /function renderCollapsedRunSummary\(\{ msg, messageRun, messages, messageIndex \}\)/);
+  assert.match(js, /const collapsedSummaryHtml = renderCollapsedRunSummary\(/);
+  assert.match(js, /const timelineHtml = collapsedSummaryHtml \|\| renderRunTimeline\(messageRun, msg\.text \|\| ''\)/);
 });
 
 test('assistant transcript renders message bodies with markdown block renderer', () => {
@@ -217,6 +219,20 @@ test('reasoning titles render strategy icon and fixed-height commentary body blo
   assert.match(js, /reasoning-step/);
   assert.match(js, /class="reasoning-body/);
   assert.match(js, /data-reasoning-streaming=/);
+});
+
+test('completed runs with multiple reasoning steps collapse into a worked-for summary row', () => {
+  assert.match(js, /function formatWorkedForLabel\(startValue, endValue\)/);
+  assert.match(js, /function findPreviousUserMessage\(messages, startIndex\)/);
+  assert.match(js, /function buildCollapsedRunHistoryTimeline\(timeline, finalReasoningIndex, finalResponseIndex\)/);
+  assert.match(js, /function getCollapsedRunPreviewResponseText\(msg, timeline, finalResponseIndex\)/);
+  assert.match(js, /const collapseKey = `run-summary:\$\{messageRun\.runId\}`/);
+  assert.match(js, /const historyTimeline = buildCollapsedRunHistoryTimeline\(/);
+  assert.match(js, /const previewResponseText = getCollapsedRunPreviewResponseText\(msg, timeline, finalResponseIndex\)/);
+  assert.match(js, /historyTimeline\.length > 0 \? `<div class="run-summary-expanded">\$\{renderTimelineEntries\(messageRun, historyTimeline\)\}<\/div>` : ''/);
+  assert.match(js, /const previewHtml = `[\s\S]*run-summary-preview[\s\S]*`;/);
+  assert.match(js, /Worked for /);
+  assert.doesNotMatch(js, /renderTimelineEntries\(messageRun, timeline\)/);
 });
 
 test('expanded BrowserForce execute rows reuse reasoning scroll-body container for scripts', () => {

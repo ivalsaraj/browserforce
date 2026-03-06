@@ -116,6 +116,15 @@ test('reasoning timeline uses icon-led blocks with fixed-height commentary body'
   assert.doesNotMatch(css, /\.reasoning-body\s*\{[^}]*\n\s+background:\s*#fff;/);
 });
 
+test('completed-run summary row exposes dedicated collapse styling hooks', () => {
+  assert.match(css, /\.run-summary-block/);
+  assert.match(css, /\.run-summary-toggle/);
+  assert.match(css, /\.run-summary-label/);
+  assert.match(css, /\.run-summary-preview/);
+  assert.match(css, /\.run-summary-expanded/);
+  assert.match(css, /\.run-summary-final-reasoning::before/);
+});
+
 test('done step icon uses branded animated svg check treatment', () => {
   assert.match(css, /\.run-step-icon\.icon-done/);
   assert.match(css, /\.run-step-icon-done-svg/);

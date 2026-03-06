@@ -1456,9 +1456,8 @@ function collectReasoningBodyText(timeline, startIndex) {
   };
 }
 
-function renderRunTimeline(run, fallbackText = '') {
-  const timeline = normalizeRunTimeline(run, fallbackText);
-  if (!timeline.length) return '';
+function renderTimelineEntries(run, timeline) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return '';
   const pluginHelperLookup = buildPluginHelperLookup(state.pluginCatalog);
   const latestStepIndex = getLatestInFlightTimelineStepIndex(run, timeline);
   const latestReasoningIndex = getLatestReasoningTimelineStepIndex(run, timeline);
@@ -1613,6 +1612,165 @@ function renderRunTimeline(run, fallbackText = '') {
   return `
     <div class="run-timeline">
       ${htmlParts.join('')}
+    </div>
+  `;
+}
+
+function renderRunTimeline(run, fallbackText = '') {
+  const timeline = normalizeRunTimeline(run, fallbackText);
+  if (!timeline.length) return '';
+  return renderTimelineEntries(run, timeline);
+}
+
+function countReasoningTimelineSteps(timeline) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return 0;
+  return timeline.filter((entry) => (
+    entry?.type === 'step'
+    && String(entry?.kind || '').toLowerCase() === 'reasoning'
+  )).length;
+}
+
+function getLastReasoningTimelineEntry(timeline) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return null;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.type !== 'step') continue;
+    if (String(entry?.kind || '').toLowerCase() !== 'reasoning') continue;
+    return entry;
+  }
+  return null;
+}
+
+function getLastReasoningTimelineStepIndexFromEntries(timeline) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.type !== 'step') continue;
+    if (String(entry?.kind || '').toLowerCase() !== 'reasoning') continue;
+    return index;
+  }
+  return -1;
+}
+
+function getLastTextTimelineEntryIndex(timeline) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.type === 'text' && String(entry?.text || '').trim()) return index;
+  }
+  return -1;
+}
+
+function parseTimestampMs(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function formatWorkedForLabel(startValue, endValue) {
+  const startMs = parseTimestampMs(startValue);
+  const endMs = parseTimestampMs(endValue);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return 'Worked for a moment';
+  }
+  const totalSeconds = Math.max(1, Math.round((endMs - startMs) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `Worked for ${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `Worked for ${minutes}m ${seconds}s`;
+  return `Worked for ${seconds}s`;
+}
+
+function findPreviousUserMessage(messages, startIndex) {
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if (candidate?.role === 'user') return candidate;
+  }
+  return null;
+}
+
+function buildCollapsedRunHistoryTimeline(timeline, finalReasoningIndex, finalResponseIndex) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return [];
+  return timeline.filter((entry, index) => {
+    if (!entry) return false;
+    if (index === finalReasoningIndex) return false;
+    if (index === finalResponseIndex) return false;
+    return true;
+  });
+}
+
+function getCollapsedRunPreviewResponseText(msg, timeline, finalResponseIndex) {
+  const messageText = String(msg?.text || '').trim();
+  if (messageText) return messageText;
+  if (!Array.isArray(timeline) || finalResponseIndex < 0) return '';
+  const finalEntry = timeline[finalResponseIndex];
+  return finalEntry?.type === 'text' ? String(finalEntry.text || '').trim() : '';
+}
+
+function renderCollapsedRunSummary({ msg, messageRun, messages, messageIndex }) {
+  if (!messageRun?.done) return '';
+  const timeline = normalizeRunTimeline(messageRun, msg.text || '');
+  if (countReasoningTimelineSteps(timeline) < 2) return '';
+
+  const finalReasoningIndex = getLastReasoningTimelineStepIndexFromEntries(timeline);
+  if (finalReasoningIndex < 0) return '';
+  const finalReasoning = getLastReasoningTimelineEntry(timeline);
+  if (!finalReasoning?.label) return '';
+  const finalResponseIndex = getLastTextTimelineEntryIndex(timeline);
+  const historyTimeline = buildCollapsedRunHistoryTimeline(
+    timeline,
+    finalReasoningIndex,
+    finalResponseIndex,
+  );
+
+  const collapseKey = `run-summary:${messageRun.runId}`;
+  const expanded = !!state.expandedTimelineEntries[collapseKey];
+  const previousUserMessage = findPreviousUserMessage(messages, messageIndex);
+  const workedForLabel = formatWorkedForLabel(previousUserMessage?.createdAt, msg?.createdAt);
+
+  const title = normalizeReasoningTitleLabel(finalReasoning.label || '');
+  const iconName = classifyReasoningTitleIcon(title);
+  const previewResponseText = getCollapsedRunPreviewResponseText(msg, timeline, finalResponseIndex);
+  const responseHtml = previewResponseText
+    ? `<div class="bubble-assistant">${renderContent(previewResponseText)}</div>`
+    : '';
+  const previewHtml = `
+    <div class="run-summary-preview">
+      <div class="step-item timeline-step reasoning-step run-summary-final-reasoning">
+        ${renderReasoningTitleIcon(iconName, { status: 'done', active: false })}
+        <div class="step-body">
+          <span class="step-label title-label reasoning-title-label">${renderInlineContent(title)}</span>
+        </div>
+      </div>
+      ${responseHtml}
+    </div>
+  `;
+
+  if (expanded) {
+    return `
+      <div class="run-summary-block expanded">
+        <button type="button" class="run-summary-toggle" data-step-key="${escapeHtml(collapseKey)}" aria-expanded="true">
+          <span class="run-summary-toggle-main">
+            <span class="run-summary-label">${escapeHtml(workedForLabel)}</span>
+            <span class="step-caret" aria-hidden="true"></span>
+          </span>
+        </button>
+        ${historyTimeline.length > 0 ? `<div class="run-summary-expanded">${renderTimelineEntries(messageRun, historyTimeline)}</div>` : ''}
+        ${previewHtml}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="run-summary-block">
+      <button type="button" class="run-summary-toggle" data-step-key="${escapeHtml(collapseKey)}" aria-expanded="false">
+        <span class="run-summary-toggle-main">
+          <span class="run-summary-label">${escapeHtml(workedForLabel)}</span>
+          <span class="step-caret" aria-hidden="true"></span>
+        </span>
+      </button>
+      ${previewHtml}
     </div>
   `;
 }
@@ -1840,7 +1998,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
   const sessionRunId = getSessionRunId(state.currentRunBySession, sessionId);
   const run = sessionRunId ? state.value.runs[sessionRunId] : null;
 
-  const chunks = messages.map((msg) => {
+  const chunks = messages.map((msg, messageIndex) => {
     const role = msg.role || 'assistant';
     const authorTitle = formatMessageTimestampTitle(msg);
     const userAuthorTitle = authorTitle ? ` title="${escapeHtml(authorTitle)}"` : '';
@@ -1855,7 +2013,13 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
     }
 
     const messageRun = msg.runId ? state.value.runs[msg.runId] : null;
-    const timelineHtml = renderRunTimeline(messageRun, msg.text || '');
+    const collapsedSummaryHtml = renderCollapsedRunSummary({
+      msg,
+      messageRun,
+      messages,
+      messageIndex,
+    });
+    const timelineHtml = collapsedSummaryHtml || renderRunTimeline(messageRun, msg.text || '');
     const fallbackHtml = `<div class="bubble-assistant">${renderContent(msg.text || '')}</div>`;
     return `
       <article class="message assistant">

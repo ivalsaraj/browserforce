@@ -624,6 +624,51 @@ body {
   margin-bottom: 6px;
 }
 
+.run-summary-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.run-summary-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.run-summary-toggle-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.run-summary-label {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-subtle);
+}
+
+.run-summary-preview,
+.run-summary-expanded {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.run-summary-block.expanded .step-caret::before {
+  transform: rotate(90deg);
+}
+
+.run-summary-final-reasoning::before {
+  display: none;
+}
+
 .timeline-step {
   position: relative;
   padding-left: 0;
