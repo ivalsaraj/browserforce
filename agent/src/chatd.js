@@ -29,6 +29,10 @@ const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
 const MODEL_LIST_TIMEOUT_MS = 5000;
 const DEFAULT_REASONING_EFFORT = 'medium';
 const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
+const PLUGIN_HELPER_NAME_RE = /^[A-Za-z_$][\w$]{0,127}$/;
+const PLUGIN_HELPER_PREFIX_RE = /^[a-z][a-z0-9]{1,31}$/;
+const PLUGIN_SKILL_META_KEYS = new Set(['name', 'helpers', 'helper_prefix', 'helper_aliases']);
+const PLUGIN_SKILL_LIST_KEYS = new Set(['helpers', 'helper_aliases']);
 const LOCAL_FILE_MAX_BYTES = 15 * 1024 * 1024;
 const LOCAL_IMAGE_CONTENT_TYPES = {
   '.png': 'image/png',
@@ -117,6 +121,124 @@ function normalizeModelCatalogRows(models) {
       return { value, label: label || value };
     })
     .filter(Boolean);
+}
+
+function stripWrappingQuotes(value) {
+  const text = String(value || '');
+  if (text.length >= 2) {
+    const first = text[0];
+    const last = text[text.length - 1];
+    if ((first === '"' && last === '"') || (first === '\'' && last === '\'')) {
+      return text.slice(1, -1);
+    }
+  }
+  return text;
+}
+
+function normalizePluginListItem(value) {
+  return stripWrappingQuotes(String(value || '').trim());
+}
+
+function parseInlinePluginList(rawValue) {
+  const text = String(rawValue || '').trim();
+  if (!text.startsWith('[') || !text.endsWith(']')) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed.map(normalizePluginListItem).filter(Boolean);
+    }
+  } catch {
+    // Fall back to scalar parsing.
+  }
+  return null;
+}
+
+function normalizePluginSkillMetaValue(key, value) {
+  const normalizedValue = typeof value === 'string' ? value.trim() : value;
+  if (!PLUGIN_SKILL_LIST_KEYS.has(key)) {
+    return normalizedValue;
+  }
+
+  const inline = parseInlinePluginList(normalizedValue);
+  if (inline) return inline;
+  if (typeof normalizedValue !== 'string') return [];
+  if (!normalizedValue) return [];
+  if (normalizedValue.includes(',')) {
+    return normalizedValue.split(',').map(normalizePluginListItem).filter(Boolean);
+  }
+  return [normalizePluginListItem(normalizedValue)].filter(Boolean);
+}
+
+function parsePluginSkillFrontmatter(rawSkill = '') {
+  const skillText = typeof rawSkill === 'string' ? rawSkill : '';
+  if (!skillText.startsWith('---')) return {};
+
+  const match = skillText.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n)?([\s\S]*)$/);
+  if (!match) return {};
+
+  const rawMeta = match[1];
+  const meta = {};
+  const lines = rawMeta.split(/\r?\n/);
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const keyMatch = line.match(/^\s*([^:]+?)\s*:\s*(.*)$/);
+    if (!keyMatch) continue;
+
+    const key = keyMatch[1].trim().toLowerCase();
+    const rawValue = keyMatch[2].trim();
+    if (!PLUGIN_SKILL_META_KEYS.has(key)) continue;
+
+    if (rawValue === '' && PLUGIN_SKILL_LIST_KEYS.has(key)) {
+      const listItems = [];
+      let j = i + 1;
+      for (; j < lines.length; j += 1) {
+        const listLine = lines[j];
+        if (!listLine.trim()) continue;
+        if (!/^\s+/.test(listLine)) break;
+        const listMatch = listLine.match(/^\s*-\s+(.+)$/);
+        if (!listMatch) break;
+        listItems.push(normalizePluginListItem(listMatch[1]));
+      }
+      i = j - 1;
+      meta[key] = listItems.filter(Boolean);
+      continue;
+    }
+
+    meta[key] = normalizePluginSkillMetaValue(key, stripWrappingQuotes(rawValue));
+  }
+
+  return meta;
+}
+
+function normalizePluginHelperName(value) {
+  const text = String(value || '').trim();
+  if (!text || !PLUGIN_HELPER_NAME_RE.test(text)) return '';
+  return text;
+}
+
+function normalizePluginHelperNames(input) {
+  const source = Array.isArray(input) ? input : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const rawValue of source) {
+    const helperName = normalizePluginHelperName(rawValue);
+    if (!helperName) continue;
+    const key = helperName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(helperName);
+  }
+  return normalized;
+}
+
+function normalizePluginHelperPrefix(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || !PLUGIN_HELPER_PREFIX_RE.test(text)) return '';
+  return text;
 }
 
 async function fetchCodexModelCatalog({
@@ -252,11 +374,33 @@ async function listInstalledPlugins({ pluginsDir = BF_PLUGINS_DIR } = {}) {
     if (error?.code === 'ENOENT') return [];
     throw error;
   }
-  return entries
-    .filter((entry) => entry?.isDirectory?.())
-    .map((entry) => normalizePluginId(entry.name))
-    .filter(Boolean)
-    .map((name) => ({ name, installed: true }));
+  const rows = [];
+  for (const entry of entries) {
+    if (!entry?.isDirectory?.()) continue;
+    const name = normalizePluginId(entry.name);
+    if (!name) continue;
+
+    let meta = {};
+    try {
+      const skillPath = join(pluginsDir, entry.name, 'SKILL.md');
+      const skillRaw = await fs.readFile(skillPath, 'utf8');
+      meta = parsePluginSkillFrontmatter(skillRaw);
+    } catch {
+      meta = {};
+    }
+
+    const helpers = normalizePluginHelperNames(meta.helpers);
+    const helperAliases = normalizePluginHelperNames(meta.helper_aliases);
+    const helperPrefix = normalizePluginHelperPrefix(meta.helper_prefix);
+    rows.push({
+      name,
+      installed: true,
+      ...(helperPrefix ? { helperPrefix } : {}),
+      ...(helpers.length > 0 ? { helpers } : {}),
+      ...(helperAliases.length > 0 ? { helperAliases } : {}),
+    });
+  }
+  return rows;
 }
 
 function normalizePluginCatalogRows(rows) {
@@ -268,9 +412,30 @@ function normalizePluginCatalogRows(rows) {
     const name = normalizePluginId(row.name || row.id);
     if (!name) continue;
     const installed = row.installed !== false;
+    const helperPrefix = normalizePluginHelperPrefix(row.helperPrefix || row.helper_prefix);
+    const helpers = normalizePluginHelperNames(row.helpers);
+    const helperAliases = normalizePluginHelperNames(row.helperAliases || row.helper_aliases);
+    const helperCalls = normalizePluginHelperNames([
+      ...helpers,
+      ...helperAliases,
+    ]);
+
+    const previous = byName.get(name) || {
+      name,
+      installed: false,
+      helperPrefix: '',
+      helpers: [],
+      helperAliases: [],
+      helperCalls: [],
+    };
+
     byName.set(name, {
       name,
-      installed,
+      installed: previous.installed || installed,
+      helperPrefix: previous.helperPrefix || helperPrefix || '',
+      helpers: normalizePluginHelperNames([...previous.helpers, ...helpers]),
+      helperAliases: normalizePluginHelperNames([...previous.helperAliases, ...helperAliases]),
+      helperCalls: normalizePluginHelperNames([...previous.helperCalls, ...helperCalls]),
     });
   }
 

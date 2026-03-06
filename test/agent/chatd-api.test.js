@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startChatd } from '../../agent/src/chatd.js';
@@ -99,6 +99,80 @@ test('GET /v1/plugins returns plugin catalog', async () => {
     assert.equal(typeof byName.highlight?.required, 'undefined');
   } finally {
     await daemon.stop();
+  }
+});
+
+test('GET /v1/plugins normalizes helper metadata fields', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    pluginFetcher: async () => ([
+      {
+        name: 'ufe-qa-plugin',
+        installed: true,
+        helperPrefix: 'ufe',
+        helpers: ['ufe__resolveAppFrame', 'not valid'],
+        helperAliases: ['resolveAppFrame', 'snapshotOrFallback'],
+      },
+    ]),
+  });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/plugins`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const plugin = (body.plugins || []).find((row) => row.name === 'ufe-qa-plugin');
+    assert.equal(plugin?.helperPrefix, 'ufe');
+    assert.deepEqual(plugin?.helpers, ['ufe__resolveAppFrame']);
+    assert.deepEqual(plugin?.helperAliases, ['resolveAppFrame', 'snapshotOrFallback']);
+    assert.deepEqual(plugin?.helperCalls, ['ufe__resolveAppFrame', 'resolveAppFrame', 'snapshotOrFallback']);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('GET /v1/plugins reads helper metadata from SKILL frontmatter on disk', async () => {
+  const pluginsDir = mkdtempSync(join(tmpdir(), 'bf-chatd-plugins-'));
+  const pluginDir = join(pluginsDir, 'ufe-qa-plugin');
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(
+    join(pluginDir, 'SKILL.md'),
+    `---
+name: ufe-qa-plugin
+description: Plugin frontmatter fixture
+helper_prefix: ufe
+helpers:
+  - ufe__resolveAppFrame
+  - invalid helper
+helper_aliases:
+  - resolveAppFrame
+  - snapshotOrFallback
+---
+# UFE QA
+Plugin body`
+  );
+
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    pluginsDir,
+  });
+  try {
+    const res = await fetch(`${daemon.baseUrl}/v1/plugins`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const plugin = (body.plugins || []).find((row) => row.name === 'ufe-qa-plugin');
+    assert.ok(plugin);
+    assert.equal(plugin?.helperPrefix, 'ufe');
+    assert.deepEqual(plugin?.helpers, ['ufe__resolveAppFrame']);
+    assert.deepEqual(plugin?.helperAliases, ['resolveAppFrame', 'snapshotOrFallback']);
+    assert.deepEqual(plugin?.helperCalls, ['ufe__resolveAppFrame', 'resolveAppFrame', 'snapshotOrFallback']);
+  } finally {
+    await daemon.stop();
+    rmSync(pluginsDir, { recursive: true, force: true });
   }
 });
 
