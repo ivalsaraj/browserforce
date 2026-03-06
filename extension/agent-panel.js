@@ -63,6 +63,8 @@ const state = {
   finalResponseExportByKey: {},
   finalResponseRenderContextByRunId: {},
   openFinalResponseMenuKey: null,
+  copiedFinalResponseActionKey: null,
+  finalResponseCopyFeedbackTimer: null,
   sessionSelectionToken: 0,
   popover: 'none',
   startupIssue: null,
@@ -1768,6 +1770,8 @@ function renderFinalResponseBubble({ markdownText = '', actionKey = '' } = {}) {
   if (!content) return '';
   if (!actionKey) return `<div class="bubble-assistant">${renderContent(content)}</div>`;
   const menuOpen = state.openFinalResponseMenuKey === actionKey;
+  const copyLabel = state.copiedFinalResponseActionKey === actionKey ? 'Copied' : 'Copy as Markdown';
+  const copyFeedbackClass = state.copiedFinalResponseActionKey === actionKey ? ' is-feedback' : '';
   return `
     <div class="final-response-shell" data-final-response-key="${escapeHtml(actionKey)}">
       <div class="final-response-actions">
@@ -1788,7 +1792,7 @@ function renderFinalResponseBubble({ markdownText = '', actionKey = '' } = {}) {
         </button>
         ${menuOpen ? `
           <div class="final-response-menu" role="menu">
-            <button type="button" class="final-response-menu-btn" role="menuitem" data-final-response-action="copy-md" data-final-response-key="${escapeHtml(actionKey)}">Copy as Markdown</button>
+            <button type="button" class="final-response-menu-btn${copyFeedbackClass}" role="menuitem" data-final-response-action="copy-md" data-final-response-key="${escapeHtml(actionKey)}">${copyLabel}</button>
             <button type="button" class="final-response-menu-btn" role="menuitem" data-final-response-action="export-md" data-final-response-key="${escapeHtml(actionKey)}">Download .md</button>
             <button type="button" class="final-response-menu-btn" role="menuitem" data-final-response-action="export-pdf" data-final-response-key="${escapeHtml(actionKey)}">Export PDF</button>
           </div>
@@ -2089,6 +2093,29 @@ function setCopyButtonFeedback(button) {
   button.dataset.copyResetTimeout = String(timeoutId);
 }
 
+function clearFinalResponseCopyFeedback({ shouldRender = true } = {}) {
+  if (state.finalResponseCopyFeedbackTimer) {
+    window.clearTimeout(state.finalResponseCopyFeedbackTimer);
+    state.finalResponseCopyFeedbackTimer = null;
+  }
+  if (!state.copiedFinalResponseActionKey) return;
+  state.copiedFinalResponseActionKey = null;
+  if (shouldRender) {
+    renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+  }
+}
+
+function setFinalResponseCopyFeedback(actionKey) {
+  if (!actionKey) return;
+  clearFinalResponseCopyFeedback({ shouldRender: false });
+  state.copiedFinalResponseActionKey = actionKey;
+  state.finalResponseCopyFeedbackTimer = window.setTimeout(() => {
+    state.finalResponseCopyFeedbackTimer = null;
+    clearFinalResponseCopyFeedback();
+  }, COPY_CODE_FEEDBACK_MS);
+  renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+}
+
 function bindTranscriptHandlers() {
   if (state.transcriptHandlersBound) return;
   transcriptEl.addEventListener('click', async (event) => {
@@ -2108,12 +2135,12 @@ function bindTranscriptHandlers() {
           setStatus('error', 'Failed to copy markdown');
           return;
         }
-        state.openFinalResponseMenuKey = null;
-        setStatus('ready', 'Copied markdown');
-        renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
+        state.openFinalResponseMenuKey = actionKey;
+        setFinalResponseCopyFeedback(actionKey);
         return;
       }
       if (finalResponseAction === 'export-md') {
+        clearFinalResponseCopyFeedback({ shouldRender: false });
         const file = buildFinalResponseMarkdownExport(payload);
         const downloaded = downloadTextFile({
           fileName: file.fileName,
@@ -2130,6 +2157,7 @@ function bindTranscriptHandlers() {
         return;
       }
       if (finalResponseAction === 'export-pdf') {
+        clearFinalResponseCopyFeedback({ shouldRender: false });
         const exported = await exportFinalResponsePdf(payload);
         if (!exported) {
           setStatus('error', 'Failed to export PDF');
@@ -2146,6 +2174,9 @@ function bindTranscriptHandlers() {
     if (finalResponseMenuTriggerBtn && transcriptEl.contains(finalResponseMenuTriggerBtn)) {
       event.preventDefault();
       const actionKey = finalResponseMenuTriggerBtn.getAttribute('data-final-response-key');
+      if (state.copiedFinalResponseActionKey && state.copiedFinalResponseActionKey !== actionKey) {
+        clearFinalResponseCopyFeedback({ shouldRender: false });
+      }
       state.openFinalResponseMenuKey = state.openFinalResponseMenuKey === actionKey ? null : actionKey;
       renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
       return;
@@ -2154,6 +2185,7 @@ function bindTranscriptHandlers() {
     if (state.openFinalResponseMenuKey) {
       const insideFinalResponseShell = event.target.closest('.final-response-shell');
       if (!insideFinalResponseShell) {
+        clearFinalResponseCopyFeedback({ shouldRender: false });
         state.openFinalResponseMenuKey = null;
         renderTranscript({ preserveScrollTop: transcriptEl.scrollTop });
         return;

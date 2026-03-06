@@ -135,6 +135,7 @@ test('final response export actions expose dedicated menu and table-scroll styli
   assert.match(css, /\.final-response-menu-trigger/);
   assert.match(css, /\.final-response-menu/);
   assert.match(css, /\.final-response-menu-btn/);
+  assert.match(css, /\.final-response-menu-btn\s*\{[^}]*cursor:\s*pointer/);
   assert.match(css, /\.md-table-wrap/);
   assert.match(css, /\.md-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
 });

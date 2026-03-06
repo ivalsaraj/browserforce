@@ -435,6 +435,13 @@ body {
   padding: 7px 9px;
   font-size: 12px;
   line-height: 1.25;
+  cursor: pointer;
+}
+
+.final-response-menu-btn.is-feedback {
+  background: var(--linen);
+  color: var(--crail-dark);
+  font-weight: 600;
 }
 
 .final-response-menu-btn:hover,

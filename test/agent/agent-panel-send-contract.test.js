@@ -366,7 +366,12 @@ test('transcript handler supports final-response copy and export actions', () =>
   assert.match(js, /closest\('button\[data-final-response-action\]'\)/);
   assert.match(js, /function downloadTextFile\(/);
   assert.match(js, /function exportFinalResponsePdf\(/);
+  assert.match(js, /copiedFinalResponseActionKey/);
+  assert.match(js, /function clearFinalResponseCopyFeedback\(/);
+  assert.match(js, /function setFinalResponseCopyFeedback\(actionKey\)/);
   assert.match(js, /finalResponseAction === 'copy-md'/);
   assert.match(js, /finalResponseAction === 'export-md'/);
   assert.match(js, /finalResponseAction === 'export-pdf'/);
+  assert.match(js, /Copy as Markdown/);
+  assert.match(js, /Copied/);
 });
