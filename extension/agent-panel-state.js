@@ -6,6 +6,8 @@ export const initialState = {
   latestUsageBySession: {},
 };
 
+const SESSION_TITLE_MARKER = '[[BF_SESSION_TITLE]]';
+
 function firstString(values) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -758,6 +760,50 @@ function normalizeUsagePayload(payload) {
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
+function stripHiddenSessionTitlePrefix(value) {
+  const text = String(value || '');
+  if (!text.includes(SESSION_TITLE_MARKER)) return text;
+  return text.replace(/^\s*\[\[BF_SESSION_TITLE\]\]\s*[^\n]*\n{0,2}/, '');
+}
+
+function sanitizeTimelineEntries(timeline) {
+  if (!Array.isArray(timeline)) return [];
+  const next = [];
+  for (const entry of timeline) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.type !== 'text') {
+      next.push(entry);
+      continue;
+    }
+    const text = stripHiddenSessionTitlePrefix(entry.text || '');
+    if (!text.trim()) continue;
+    next.push({ ...entry, text });
+  }
+  return next;
+}
+
+function sanitizeStoredMessage(message) {
+  if (!message || typeof message !== 'object') return message;
+  if (String(message.role || '').toLowerCase() !== 'assistant') return message;
+  const next = { ...message };
+  if (typeof next.text === 'string') {
+    next.text = stripHiddenSessionTitlePrefix(next.text);
+  }
+  if (Array.isArray(next.timeline)) {
+    next.timeline = sanitizeTimelineEntries(next.timeline);
+  }
+  return next;
+}
+
+function sanitizeSessionMetadata(session) {
+  if (!session || typeof session !== 'object') return session;
+  const next = { ...session };
+  if (typeof next.predictedTitle === 'string') {
+    next.predictedTitle = stripHiddenSessionTitlePrefix(next.predictedTitle);
+  }
+  return next;
+}
+
 function normalizeStoredStep(step) {
   return normalizeStep(step);
 }
@@ -812,7 +858,7 @@ export function reduceState(state = initialState, action = {}) {
   }
 
   if (action.type === 'messages.loaded') {
-    const messages = Array.isArray(action.messages) ? action.messages : [];
+    const messages = Array.isArray(action.messages) ? action.messages.map(sanitizeStoredMessage) : [];
     const hydratedRuns = hydrateRunsFromMessages(messages, action.sessionId, state.runs);
     return {
       ...state,
@@ -828,13 +874,23 @@ export function reduceState(state = initialState, action = {}) {
   }
 
   if (action.type === 'session.metadata.loaded') {
-    const usage = normalizeUsagePayload(action.session?.providerState?.codex?.latestUsage);
-    if (!usage || !action.sessionId) return state;
+    const sessionId = String(action.sessionId || '').trim();
+    const session = sanitizeSessionMetadata(action.session);
+    const usage = normalizeUsagePayload(session?.providerState?.codex?.latestUsage);
+    const sessions = !sessionId
+      ? state.sessions
+      : state.sessions.map((entry) => (
+        entry?.sessionId === sessionId
+          ? { ...entry, ...session }
+          : entry
+      ));
+    if (!usage && sessions === state.sessions) return state;
     return {
       ...state,
+      sessions,
       latestUsageBySession: {
         ...(state.latestUsageBySession || {}),
-        [action.sessionId]: usage,
+        ...(usage ? { [sessionId]: usage } : {}),
       },
     };
   }
@@ -893,8 +949,8 @@ export function applyEvent(state = initialState, evt = {}) {
 
   if (evt.event === 'chat.final') {
     const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
-    const finalText = evt.payload?.text || run.text || '';
-    const timeline = applyFinalTextToTimeline(run, finalText);
+    const finalText = stripHiddenSessionTitlePrefix(evt.payload?.text || run.text || '');
+    const timeline = sanitizeTimelineEntries(applyFinalTextToTimeline(run, finalText));
     const currentMessages = state.messagesBySession[evt.sessionId] || [];
     const hasStoredFinal = currentMessages.some(
       (message) => message.runId === evt.runId && message.role === 'assistant',
@@ -933,7 +989,7 @@ export function applyEvent(state = initialState, evt = {}) {
       status: 'failed',
       label: `Failed: ${error}`,
     };
-    const timeline = pushTimelineEntry(run, { type: 'step', ...step });
+    const timeline = sanitizeTimelineEntries(pushTimelineEntry(run, { type: 'step', ...step }));
     const currentMessages = state.messagesBySession[evt.sessionId] || [];
     const hasStoredFinal = currentMessages.some(
       (message) => message.runId === evt.runId && message.role === 'assistant',
@@ -966,14 +1022,15 @@ export function applyEvent(state = initialState, evt = {}) {
 
   if (evt.event === 'run.aborted') {
     const run = state.runs[evt.runId] || { text: '', steps: [], timeline: [] };
+    const text = stripHiddenSessionTitlePrefix(run.text || '');
     const step = {
       kind: 'status',
       status: 'aborted',
       label: 'Stopped',
     };
-    const timeline = pushTimelineEntry(run, { type: 'step', ...step });
+    const timeline = sanitizeTimelineEntries(pushTimelineEntry({ ...run, text }, { type: 'step', ...step }));
     const hasContentBeforeStop = Boolean(
-      (typeof run.text === 'string' && run.text)
+      text
       || (Array.isArray(run.timeline) && run.timeline.length > 0),
     );
     const currentMessages = state.messagesBySession[evt.sessionId] || [];
@@ -983,7 +1040,7 @@ export function applyEvent(state = initialState, evt = {}) {
     const nextMessages = (!hasStoredFinal && hasContentBeforeStop)
       ? [...currentMessages, {
         role: 'assistant',
-        text: run.text || '',
+        text,
         runId: evt.runId,
         timeline,
         createdAt: evt.payload?.createdAt || new Date().toISOString(),
@@ -999,6 +1056,7 @@ export function applyEvent(state = initialState, evt = {}) {
         sessionId: evt.sessionId,
         done: true,
         aborted: true,
+        text,
         steps: pushStep(run, step),
         timeline,
         activeCommentaryStepKey: '',

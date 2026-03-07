@@ -555,6 +555,9 @@ function applyIncomingEvent(evt) {
   }
   if (isTerminalRunEvent) {
     state.currentRunBySession = clearSessionRunId(state.currentRunBySession, evt.sessionId, evt.runId);
+    if (evt.sessionId) {
+      loadSessionMetadata(evt.sessionId).catch(() => {});
+    }
   }
   if (
     isActiveSessionEvent
@@ -1242,9 +1245,11 @@ function normalizeRunTimeline(run, fallbackText = '') {
         timeline.push(entry);
         continue;
       }
+      const text = stripHiddenSessionTitlePrefix(entry.text || '');
+      if (!text.trim()) continue;
       const hasStepAfter = source.slice(index + 1).some((item) => item.type === 'step');
       if (!hasStepAfter) {
-        timeline.push(entry);
+        timeline.push({ ...entry, text });
         continue;
       }
       const previousSource = source[index - 1];
@@ -1252,10 +1257,10 @@ function normalizeRunTimeline(run, fallbackText = '') {
         previousSource?.type === 'step'
         && String(previousSource.kind || '').toLowerCase() === 'reasoning'
       ) {
-        timeline.push(entry);
+        timeline.push({ ...entry, text });
         continue;
       }
-      const heading = reasoningHeadingFromText(entry.text || '');
+      const heading = reasoningHeadingFromText(text);
       if (!heading) continue;
       timeline.push({
         type: 'step',
@@ -1266,7 +1271,7 @@ function normalizeRunTimeline(run, fallbackText = '') {
       });
       timeline.push({
         type: 'text',
-        text: entry.text || '',
+        text,
       });
     }
     return timeline;
@@ -1280,9 +1285,11 @@ function normalizeRunTimeline(run, fallbackText = '') {
     label: step?.label || '',
   }));
 
-  const text = typeof fallbackText === 'string' && fallbackText
-    ? fallbackText
-    : (typeof run.text === 'string' ? run.text : '');
+  const text = stripHiddenSessionTitlePrefix(
+    typeof fallbackText === 'string' && fallbackText
+      ? fallbackText
+      : (typeof run.text === 'string' ? run.text : ''),
+  );
   if (text) timeline.push({ type: 'text', text });
   return timeline;
 }
@@ -1580,7 +1587,7 @@ function renderTimelineEntries(run, timeline) {
         ? `
           <div class="reasoning-body-shell">
             <div class="reasoning-body${isActiveReasoning ? ' streaming' : ''}" data-reasoning-streaming="${isActiveReasoning ? 'true' : 'false'}">
-              <div class="reasoning-body-text">${renderInlineContent(bodyTextRaw).replace(/\n/g, '<br>')}</div>
+              <div class="reasoning-body-text">${renderInlineContent(stripHiddenSessionTitlePrefix(bodyTextRaw)).replace(/\n/g, '<br>')}</div>
             </div>
           </div>
         `
@@ -1749,11 +1756,11 @@ function buildCollapsedRunHistoryTimeline(timeline, finalReasoningIndex, finalRe
 }
 
 function getCollapsedRunPreviewResponseText(msg, timeline, finalResponseIndex) {
-  const messageText = String(msg?.text || '').trim();
+  const messageText = stripHiddenSessionTitlePrefix(msg?.text || '').trim();
   if (messageText) return messageText;
   if (!Array.isArray(timeline) || finalResponseIndex < 0) return '';
   const finalEntry = timeline[finalResponseIndex];
-  return finalEntry?.type === 'text' ? String(finalEntry.text || '').trim() : '';
+  return finalEntry?.type === 'text' ? stripHiddenSessionTitlePrefix(finalEntry.text || '').trim() : '';
 }
 
 function buildFinalResponseActionKey(sessionId, msg, messageIndex) {

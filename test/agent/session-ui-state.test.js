@@ -183,7 +183,10 @@ test('messages.loaded strips shell wrapper prefixes from tool labels and details
 test('session.metadata.loaded hydrates persisted codex usage for reopened session', () => {
   const state = {
     activeSessionId: 's1',
-    sessions: [],
+    sessions: [{
+      sessionId: 's1',
+      title: 'New Session',
+    }],
     runs: {},
     messagesBySession: {},
     latestUsageBySession: {},
@@ -194,6 +197,10 @@ test('session.metadata.loaded hydrates persisted codex usage for reopened sessio
     sessionId: 's1',
     session: {
       sessionId: 's1',
+      predictedTitle: 'Pricing Sheet Summary',
+      firstMessageTab: {
+        url: 'https://example.com/pricing',
+      },
       providerState: {
         codex: {
           latestUsage: {
@@ -207,4 +214,33 @@ test('session.metadata.loaded hydrates persisted codex usage for reopened sessio
 
   assert.equal(next.latestUsageBySession.s1.modelContextWindow, 258400);
   assert.equal(next.latestUsageBySession.s1.totalTokens, 1120);
+  assert.equal(next.sessions[0]?.predictedTitle, 'Pricing Sheet Summary');
+  assert.equal(next.sessions[0]?.firstMessageTab?.url, 'https://example.com/pricing');
+});
+
+test('messages.loaded strips hidden session title prefix from stored assistant content before hydrating runs', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+    latestUsageBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'messages.loaded',
+    sessionId: 's1',
+    messages: [{
+      role: 'assistant',
+      text: '[[BF_SESSION_TITLE]] Pricing Sheet Summary\n\nVisible answer',
+      runId: 'run_1',
+      timeline: [
+        { type: 'text', text: '[[BF_SESSION_TITLE]] Pricing Sheet Summary\n\nVisible answer' },
+      ],
+    }],
+  });
+
+  assert.equal(next.messagesBySession.s1?.[0]?.text, 'Visible answer');
+  assert.equal(next.runs.run_1?.text, 'Visible answer');
+  assert.equal(next.runs.run_1?.timeline?.[0]?.text, 'Visible answer');
 });

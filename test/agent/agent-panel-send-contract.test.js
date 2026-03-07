@@ -60,6 +60,11 @@ test('assistant content strips hidden session title marker before rendering', ()
   assert.match(js, /\[\[BF_SESSION_TITLE\]\]/);
 });
 
+test('terminal run events refresh session metadata so sidebar titles update after first response', () => {
+  assert.match(js, /if \(isTerminalRunEvent\) \{/);
+  assert.match(js, /loadSessionMetadata\(evt\.sessionId\)\.catch\(\(\) => \{\}\);/);
+});
+
 test('session popover supports inline rename and saves via session patch endpoint', () => {
   assert.match(js, /data-session-edit-btn/);
   assert.match(js, /data-session-edit-form/);
