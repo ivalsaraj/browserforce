@@ -49,7 +49,10 @@ test('sidebar session rows can use predicted title without changing the active s
 test('session popover renders first-message favicon before the title', () => {
   assert.match(js, /function resolveSessionFaviconSrc\(session\)/);
   assert.match(js, /firstMessageTab/);
-  assert.match(js, /chrome\.runtime\.getURL\(`\/_favicon\/\?pageUrl=/);
+  assert.match(js, /fallbackAllowed/);
+  assert.match(js, /if \(!fallbackAllowed\) return '';/);
+  assert.match(js, /new URL\(chrome\.runtime\.getURL\('_favicon\/'\)\)/);
+  assert.match(js, /faviconUrl\.searchParams\.set\('pageUrl', pageUrl\)/);
   assert.match(js, /class="session-favicon"/);
   assert.match(js, /<img class="session-favicon-image"/);
 });

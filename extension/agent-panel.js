@@ -734,7 +734,12 @@ function resolveSessionFaviconSrc(session) {
   }
   const pageUrl = String(session?.firstMessageTab?.url || '').trim();
   if (!pageUrl) return '';
-  return chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`);
+  const fallbackAllowed = /^https?:\/\//i.test(pageUrl);
+  if (!fallbackAllowed) return '';
+  const faviconUrl = new URL(chrome.runtime.getURL('_favicon/'));
+  faviconUrl.searchParams.set('pageUrl', pageUrl);
+  faviconUrl.searchParams.set('size', '32');
+  return faviconUrl.toString();
 }
 
 function formatSessionTimestamp(session) {

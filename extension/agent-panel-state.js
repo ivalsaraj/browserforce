@@ -919,7 +919,7 @@ export function applyEvent(state = initialState, evt = {}) {
 
   if (evt.event === 'chat.delta') {
     const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
-    const delta = evt.payload?.delta || '';
+    const delta = stripHiddenSessionTitlePrefix(evt.payload?.delta || '');
     return {
       ...state,
       runs: upsertRun(state, evt.runId, {

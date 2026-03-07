@@ -16,6 +16,19 @@ test('chat.delta appends to in-flight run text', () => {
   assert.equal(next.runs.r1.text, 'Hi');
 });
 
+test('chat.delta strips hidden session title prefix from defensive fallback chunks', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const next = applyEvent(s1, {
+    event: 'chat.delta',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { delta: '[[BF_SESSION_TITLE]] Pricing Sheet Summary\n\nVisible answer' },
+  });
+
+  assert.equal(next.runs.r1.text, 'Visible answer');
+  assert.equal(next.runs.r1.timeline?.at(-1)?.text, 'Visible answer');
+});
+
 test('chat.final finalizes run output', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const next = applyEvent(s1, { event: 'chat.final', runId: 'r1', sessionId: 's1', payload: { text: 'Done' } });
