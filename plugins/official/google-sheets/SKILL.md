@@ -1,10 +1,10 @@
 ---
 name: google-sheets
-description: Google Sheets helpers for reading, writing (including multiline and notes), selection-aware formatting, summarizing, and issue logging in the active sheet.
-when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Formatting the current cell or selection without guesswork", "Applying bullet splitting and sparse bold formatting across ranges", "Writing or replacing multiline cell content reliably", "Editing cell notes (Shift+F2 workflow)", "Logging extraction or formatting failures for follow-up"]
+description: Google Sheets helpers for reading, surgical editing, writing (including multiline and notes), selection-aware formatting, summarizing, and issue logging in the active sheet.
+when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Formatting the current cell or selection without guesswork", "Applying bullet splitting and sparse bold formatting across ranges", "Editing formatted cell text without losing untouched formatting", "Writing or replacing multiline cell content reliably", "Editing cell notes (Shift+F2 workflow)", "Logging extraction or formatting failures for follow-up"]
 helper_prefix: gs
-helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__writeCell", "gs__writeCells", "gs__writeMultilineCell", "gs__editNote", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
-helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsWriteCell", "gsWriteCells", "gsWriteMultilineCell", "gsEditNote", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
+helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__writeCell", "gs__writeCells", "gs__applyCellEdits", "gs__appendToCell", "gs__insertInCell", "gs__replaceInCell", "gs__extractFromCell", "gs__writeMultilineCell", "gs__editNote", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
+helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsWriteCell", "gsWriteCells", "gsApplyCellEdits", "gsAppendToCell", "gsInsertInCell", "gsReplaceInCell", "gsExtractFromCell", "gsWriteMultilineCell", "gsEditNote", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
 tools: []
 ---
 
@@ -24,6 +24,11 @@ Available helpers:
 - `gs__readContiguousRows(options?)` → detect used rows without hard-scanning arbitrary ranges
 - `gs__writeCell(cellRef, value, options?)` → write exact literal text into one cell (single-line or simple content)
 - `gs__writeCells(valuesByRef, options?)` → write exact literal text into multiple cells with per-cell verification
+- `gs__applyCellEdits(cellRef, edits, options?)` → one-shot append/insert/replace/delete transaction for a single formatted cell
+- `gs__appendToCell(cellRef, appendText, options?)` → append text without disturbing untouched formatting
+- `gs__insertInCell(cellRef, insert, options?)` → insert text at an exact index in one pass
+- `gs__replaceInCell(cellRef, match, replacement, options?)` → replace a specific match while preserving untouched formatting
+- `gs__extractFromCell(cellRef, match, options?)` → preview exact substring matches without mutating the cell
 - `gs__writeMultilineCell(cellRef, lines, options?)` → keyboard-based multiline write (Backspace → F2 → Alt+Enter per line) — use for replacing existing multiline/bullet cells where `gs__writeCell` flattens content
 - `gs__editNote(cellRef, noteText, options?)` → edit a cell note via Shift+F2 note editor — full note replacement in one shot
 - `gs__suggestBoldPhrases(rangeRef, options?)` → propose 1-2 emphasis phrases per cell without writing
@@ -58,6 +63,7 @@ Every cell edit follows one-shot discipline: read current content, compose full 
 | Situation | Helper | Why |
 |-----------|--------|-----|
 | Single-line or simple text | `gs__writeCell` | DOM-based write, fast and reliable for single-line |
+| Surgical inline edit inside formatted content | `gs__applyCellEdits` | Preserves untouched rich-text formatting in one verified pass |
 | Replacing existing multiline/bullet content | `gs__writeMultilineCell` | Keyboard-based (Backspace → F2 → Alt+Enter), avoids flattening |
 | Multiple single-line cells | `gs__writeCells` | Batched `gs__writeCell` with per-cell verification |
 | Cell note | `gs__editNote` | Shift+F2 note editor, full note replacement |
@@ -72,6 +78,25 @@ await gs__writeMultilineCell('F2', [
   '- Follows sprint timeline with clear ownership',
   '- Escalates blockers proactively',
 ], { verify: true });
+```
+
+### Surgical Inline Edits
+
+Use `gs__applyCellEdits()` when the cell already contains formatting you need to preserve.
+
+```js
+await gs__applyCellEdits('D4', [
+  { type: 'replace', match: { text: 'with', occurrence: 1 }, replacement: 'by' },
+  { type: 'append', text: '\n- Added follow-up note' },
+], { verify: true });
+```
+
+For simpler one-off cases, use the thin wrappers:
+
+```js
+await gs__appendToCell('D4', ' Gamma', { verify: true });
+await gs__replaceInCell('D4', { text: 'Beta', occurrence: 2 }, 'Delta', { verify: true });
+const preview = await gs__extractFromCell('D4', { text: 'Beta' });
 ```
 
 ### Note Editing
@@ -97,13 +122,14 @@ If the same write/edit roadblock occurs twice on live cells, stop and move to a 
 - `gs__summarizeSheet()` reuses a recent in-session scan by default; set `forceRefresh: true` when the user asks for a guaranteed fresh pull.
 - Use `gs__getSelection()` or `gs__formatCurrentSelection()` when the user refers to "this cell" or "current selection".
 - Use `gs__writeCell()` or `gs__writeCells()` for plain-text cell updates.
+- Use `gs__applyCellEdits()` for append/insert/replace/delete changes inside already-formatted cells.
 - Use `gs__suggestBoldPhrases()` when phrase choice matters and you want a preview before writing.
 - Prefer `gs__formatBulletsInRange()` for multi-cell content cleanup tasks.
 - Use `dryRun: true` first for formatting helpers when changing many cells.
 - Formatting defaults to `executionMode: 'safe'` and `verifyMode: 'full'`.
 - Use `executionMode: 'parallel'` only when the user explicitly asks for speed or parallel execution.
 - Log every process failure or unexpected behavior with `gs__logIssue(...)`.
-- Literal writes replace rich-text styling in the target cell; use formatting helpers after the write if the cell needs sparse bolding or line breaks.
+- Literal writes replace rich-text styling in the target cell; use `gs__applyCellEdits()` when existing inline formatting must survive the edit.
 
 ## Guardrails (Google Sheets)
 
