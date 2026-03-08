@@ -1,6 +1,7 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
   assignSessionRunId,
+  buildDisplayStreamEvents,
   buildGoogleSheetsRangeUrl,
   buildFinalResponseMarkdownExport,
   buildFinalResponsePrintDocument,
@@ -574,28 +575,6 @@ function applyIncomingEvent(evt) {
   render();
 }
 
-function splitDeltaForDisplayStreaming(delta) {
-  const text = String(delta || '');
-  if (!text) return [];
-  if (text.length <= STREAM_CHUNK_TARGET_CHARS) return [text];
-  const chunks = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    let end = Math.min(cursor + STREAM_CHUNK_TARGET_CHARS, text.length);
-    if (end < text.length) {
-      const lookahead = text.slice(end, Math.min(end + STREAM_CHUNK_LOOKAHEAD_CHARS, text.length));
-      const wsIndex = lookahead.search(/\s/);
-      if (wsIndex >= 0) {
-        end += wsIndex + 1;
-      }
-    }
-    if (end <= cursor) end = Math.min(cursor + STREAM_CHUNK_TARGET_CHARS, text.length);
-    chunks.push(text.slice(cursor, end));
-    cursor = end;
-  }
-  return chunks;
-}
-
 function resetStreamEventQueue() {
   if (state.streamEventTimer) {
     window.clearTimeout(state.streamEventTimer);
@@ -646,37 +625,19 @@ function flushStreamEventsForRun(sessionId, runId) {
 
 function dispatchEvent(evt) {
   if (!evt || typeof evt !== 'object') return;
-  const eventType = String(evt.event || '');
-  const isTextDeltaEvent = (
-    (eventType === 'chat.delta' || eventType === 'chat.commentary')
-    && typeof evt.payload?.delta === 'string'
-  );
+  const streamEvents = buildDisplayStreamEvents(evt, {
+    chunkTargetChars: STREAM_CHUNK_TARGET_CHARS,
+    chunkLookaheadChars: STREAM_CHUNK_LOOKAHEAD_CHARS,
+  });
 
-  if (!isTextDeltaEvent) {
+  if (streamEvents.length <= 1) {
     flushStreamEventsForRun(evt.sessionId, evt.runId);
     applyIncomingEvent(evt);
     return;
   }
 
-  const chunks = splitDeltaForDisplayStreaming(evt.payload.delta);
-  if (chunks.length <= 1) {
-    applyIncomingEvent(evt);
-    return;
-  }
-
-  const firstPayload = { ...(evt.payload || {}), delta: chunks[0] };
-  applyIncomingEvent({ ...evt, payload: firstPayload });
-
-  const bufferedPayload = { ...(evt.payload || {}) };
-  for (let index = 1; index < chunks.length; index += 1) {
-    state.streamEventQueue.push({
-      ...evt,
-      payload: {
-        ...bufferedPayload,
-        delta: chunks[index],
-      },
-    });
-  }
+  applyIncomingEvent(streamEvents[0]);
+  state.streamEventQueue.push(...streamEvents.slice(1));
   scheduleStreamEventPump();
 }
 

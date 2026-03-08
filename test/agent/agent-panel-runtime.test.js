@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assignSessionRunId,
+  buildDisplayStreamEvents,
   buildGoogleSheetsRangeUrl,
   buildFinalResponseMarkdownExport,
   buildFinalResponsePrintDocument,
@@ -14,6 +15,7 @@ import {
   getSessionRunId,
   renderMarkdownContent,
   renderInlineContent,
+  splitDeltaForDisplayStreaming,
   shouldShowBottomScrollFade,
   shouldApplySessionSelection,
 } from '../../extension/agent-panel-runtime.js';
@@ -65,6 +67,53 @@ test('renders safe inline markdown for bold and code spans', () => {
   assert.equal(
     renderInlineContent('**<script>alert(1)</script>**'),
     '<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>',
+  );
+});
+
+test('splits long display deltas on whitespace when possible', () => {
+  const chunks = splitDeltaForDisplayStreaming('Alpha beta gamma delta epsilon zeta eta theta', {
+    chunkTargetChars: 12,
+    chunkLookaheadChars: 6,
+  });
+
+  assert.equal(chunks.length > 1, true);
+  assert.equal(chunks.join(''), 'Alpha beta gamma delta epsilon zeta eta theta');
+  assert.equal(chunks.every((chunk) => typeof chunk === 'string' && chunk.length > 0), true);
+  assert.equal(chunks.some((chunk) => /\s$/.test(chunk)), true);
+});
+
+test('converts long chat.final payloads into paced delta chunks plus terminal final chunk', () => {
+  const events = buildDisplayStreamEvents({
+    event: 'chat.final',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: {
+      text: 'Alpha beta gamma delta epsilon zeta eta theta',
+      phase: 'final_answer',
+    },
+  }, {
+    chunkTargetChars: 12,
+    chunkLookaheadChars: 6,
+  });
+
+  assert.deepEqual(
+    events.map((evt) => ({
+      event: evt.event,
+      delta: evt.payload?.delta || null,
+      text: evt.payload?.text || null,
+    })),
+    [
+      { event: 'chat.delta', delta: events[0].payload.delta, text: 'Alpha beta gamma delta epsilon zeta eta theta' },
+      { event: 'chat.delta', delta: events[1].payload.delta, text: 'Alpha beta gamma delta epsilon zeta eta theta' },
+      { event: 'chat.delta', delta: events[2].payload.delta, text: 'Alpha beta gamma delta epsilon zeta eta theta' },
+      { event: 'chat.final', delta: null, text: events[3].payload.text },
+    ],
+  );
+  assert.equal(events.slice(0, -1).every((evt) => evt.event === 'chat.delta'), true);
+  assert.equal(events.at(-1)?.event, 'chat.final');
+  assert.equal(
+    events.slice(0, -1).map((evt) => evt.payload?.delta || '').join('') + (events.at(-1)?.payload?.text || ''),
+    'Alpha beta gamma delta epsilon zeta eta theta',
   );
 });
 

@@ -246,6 +246,86 @@ export function buildGoogleSheetsRangeUrl(activeTabUrl, rangeRef) {
   return url.toString();
 }
 
+export function splitDeltaForDisplayStreaming(
+  delta,
+  {
+    chunkTargetChars = 24,
+    chunkLookaheadChars = 14,
+  } = {},
+) {
+  const text = String(delta || '');
+  if (!text) return [];
+  if (text.length <= chunkTargetChars) return [text];
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    let end = Math.min(cursor + chunkTargetChars, text.length);
+    if (end < text.length) {
+      const lookahead = text.slice(end, Math.min(end + chunkLookaheadChars, text.length));
+      const wsIndex = lookahead.search(/\s/);
+      if (wsIndex >= 0) end += wsIndex + 1;
+    }
+    if (end <= cursor) end = Math.min(cursor + chunkTargetChars, text.length);
+    chunks.push(text.slice(cursor, end));
+    cursor = end;
+  }
+  return chunks;
+}
+
+export function buildDisplayStreamEvents(
+  evt,
+  {
+    chunkTargetChars = 24,
+    chunkLookaheadChars = 14,
+  } = {},
+) {
+  if (!evt || typeof evt !== 'object') return [];
+
+  const eventType = String(evt.event || '');
+  const isDeltaEvent = eventType === 'chat.delta' || eventType === 'chat.commentary';
+  const isFinalEvent = eventType === 'chat.final';
+  if (!isDeltaEvent && !isFinalEvent) return [evt];
+
+  const sourceText = isFinalEvent
+    ? String(evt.payload?.text || '')
+    : String(evt.payload?.delta || '');
+  const chunks = splitDeltaForDisplayStreaming(sourceText, {
+    chunkTargetChars,
+    chunkLookaheadChars,
+  });
+  if (chunks.length <= 1) return [evt];
+
+  if (isFinalEvent) {
+    return chunks.map((chunk, index) => {
+      if (index === chunks.length - 1) {
+        return {
+          ...evt,
+          payload: {
+            ...(evt.payload || {}),
+            text: chunk,
+          },
+        };
+      }
+      return {
+        ...evt,
+        event: 'chat.delta',
+        payload: {
+          ...(evt.payload || {}),
+          delta: chunk,
+        },
+      };
+    });
+  }
+
+  return chunks.map((chunk) => ({
+    ...evt,
+    payload: {
+      ...(evt.payload || {}),
+      delta: chunk,
+    },
+  }));
+}
+
 function createMarkdownTokenStore() {
   const tokens = [];
   return {

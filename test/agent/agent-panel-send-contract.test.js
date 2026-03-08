@@ -254,10 +254,12 @@ test('tool-call timeline entries render collapsed toggle rows with click-to-expa
 test('text deltas are chunked into paced stream updates for visible incremental rendering', () => {
   assert.match(js, /STREAM_CHUNK_TARGET_CHARS/);
   assert.match(js, /STREAM_CHUNK_INTERVAL_MS/);
-  assert.match(js, /function splitDeltaForDisplayStreaming\(delta\)/);
+  assert.match(js, /buildDisplayStreamEvents/);
   assert.match(js, /state\.streamEventQueue/);
   assert.match(js, /flushStreamEventsForRun\(evt\.sessionId, evt\.runId\)/);
   assert.match(js, /scheduleStreamEventPump\(\)/);
+  assert.match(js, /applyIncomingEvent\(streamEvents\[0\]\)/);
+  assert.match(js, /state\.streamEventQueue\.push\(\.\.\.streamEvents\.slice\(1\)\)/);
 });
 
 test('reasoning titles render strategy icon and fixed-height commentary body blocks', () => {
