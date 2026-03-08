@@ -1622,6 +1622,60 @@ body {
   transform: none;
 }
 
+.sheet-selection-pill {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 2px;
+  padding: 2px 8px;
+  border: 1px dashed color-mix(in srgb, var(--crail) 35%, var(--line) 65%);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--crail-soft) 25%, var(--linen) 75%);
+  color: var(--crail-dark);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  white-space: nowrap;
+  cursor: pointer;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+
+.sheet-selection-pill::before {
+  content: '#';
+  opacity: 0.45;
+}
+
+.sheet-selection-pill:hover {
+  border-color: color-mix(in srgb, var(--crail) 55%, var(--line) 45%);
+  background: color-mix(in srgb, var(--crail-soft) 45%, var(--linen) 55%);
+}
+
+.sheet-selection-pill[hidden] {
+  display: none;
+}
+
+.composer-box.has-sheet-selection {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.composer-box.is-multiline.has-sheet-selection .sheet-selection-pill {
+  grid-row: 2;
+  grid-column: 1;
+  align-self: center;
+}
+
+.composer-box.is-multiline.has-sheet-selection .composer-textarea {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.composer-box.is-multiline.has-sheet-selection .composer-actions {
+  grid-row: 2;
+  grid-column: 2 / -1;
+  justify-self: end;
+}
+
 .composer-textarea {
   flex: 1;
   resize: none;

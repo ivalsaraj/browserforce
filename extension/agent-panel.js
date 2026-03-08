@@ -39,6 +39,7 @@ const state = {
   modelPresets: [{ value: null, label: 'Default' }],
   pluginCatalog: [],
   defaultReasoningEffort: 'medium',
+  sheetSelection: null,
   currentRunBySession: {},
   expandedTimelineEntries: {},
   latestReasoningTitleByRun: {},
@@ -104,6 +105,7 @@ const uploadRowEl = document.getElementById('bf-upload-row');
 const uploadTextEl = document.getElementById('bf-upload-text');
 const uploadClearBtn = document.getElementById('bf-upload-clear');
 const composerBoxEl = chatFormEl.querySelector('.composer-box');
+const sheetSelectionEl = document.getElementById('bf-sheet-selection');
 const chatInputEl = document.getElementById('bf-chat-input');
 const imageUploadBtn = document.getElementById('bf-image-upload-btn');
 const imageUploadInputEl = document.getElementById('bf-image-upload-input');
@@ -114,6 +116,8 @@ const tabAttachTextEl = document.getElementById('bf-tab-attach-text');
 const attachCurrentTabBtn = document.getElementById('bf-attach-current-tab');
 let tabAttachRefreshTimer = null;
 let tabAttachRefreshToken = 0;
+let sheetSelectionTimer = null;
+const GOOGLE_SHEETS_TAB_RE = /^https:\/\/docs\.google\.com\/spreadsheets\//;
 
 function getActiveSession() {
   return state.value.sessions.find((item) => item.sessionId === state.value.activeSessionId) || null;
@@ -2737,10 +2741,70 @@ async function getActiveTabContext() {
     if (!isTabAttachableUrl(url)) {
       return { tabId: tab.id, title, url: null, favIconUrl };
     }
-    return { tabId: tab.id, title, url: url.slice(0, 500), favIconUrl };
+    const base = { tabId: tab.id, title, url: url.slice(0, 500), favIconUrl };
+    if (state.sheetSelection) base.pageSelection = state.sheetSelection;
+    return base;
   } catch {
     return null;
   }
+}
+
+async function fetchSheetSelection(tabId) {
+  if (!tabId) return null;
+  try {
+    const response = await runtimeMessage({ type: 'getPageSelection', tabId });
+    const raw = String(response?.selection || '').trim().toUpperCase();
+    if (!raw || !/^[A-Z]+[1-9]\d*(?::[A-Z]+[1-9]\d*)?$/.test(raw)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function renderSheetSelection(selection) {
+  if (!sheetSelectionEl || !composerBoxEl) return;
+  if (selection) {
+    sheetSelectionEl.textContent = selection;
+    sheetSelectionEl.hidden = false;
+    composerBoxEl.classList.add('has-sheet-selection');
+  } else {
+    sheetSelectionEl.textContent = '';
+    sheetSelectionEl.hidden = true;
+    composerBoxEl.classList.remove('has-sheet-selection');
+  }
+}
+
+async function pollSheetSelection() {
+  let tab;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch { /* ignore */ }
+  const url = String(tab?.url || '');
+  if (!tab || !GOOGLE_SHEETS_TAB_RE.test(url)) {
+    if (state.sheetSelection) {
+      state.sheetSelection = null;
+      renderSheetSelection(null);
+    }
+    return;
+  }
+  const selection = await fetchSheetSelection(tab.id);
+  state.sheetSelection = selection;
+  renderSheetSelection(selection);
+}
+
+function startSheetSelectionPolling() {
+  if (sheetSelectionTimer) return;
+  pollSheetSelection();
+  sheetSelectionTimer = setInterval(pollSheetSelection, 3000);
+}
+
+function stopSheetSelectionPolling() {
+  if (sheetSelectionTimer) {
+    clearInterval(sheetSelectionTimer);
+    sheetSelectionTimer = null;
+  }
+  state.sheetSelection = null;
+  renderSheetSelection(null);
 }
 
 async function getRelayHttpUrl() {
@@ -3279,6 +3343,7 @@ async function sendMessage(text) {
 
   await ensureCurrentTabAttached();
   scheduleTabAttachRefresh(0);
+  await pollSheetSelection();
   const browserContext = await getActiveTabContext();
 
   const res = await api('/v1/runs', {
@@ -3343,6 +3408,7 @@ async function initializePanel() {
   }
   setComposerEnabled(true);
   scheduleTabAttachRefresh(0);
+  startSheetSelectionPolling();
   setStatus('ready', 'Ready');
   render();
 }

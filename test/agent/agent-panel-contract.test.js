@@ -76,6 +76,8 @@ test('agent panel composer matches compact/expanded shell structure', () => {
   assert.match(css, /\.queued-steer-btn/);
   assert.match(css, /\.queued-delete-btn/);
   assert.match(css, /\.composer-box\.is-multiline/);
+  assert.match(css, /\.composer-box\.has-sheet-selection/);
+  assert.match(css, /\.sheet-selection-pill/);
   assert.match(css, /\.composer-box\.is-thinking::before/);
   assert.match(css, /\.composer-box\.is-thinking \.composer-textarea/);
   assert.match(css, /\.btn-upload/);

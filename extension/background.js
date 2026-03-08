@@ -926,6 +926,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async sendResponse
   }
 
+  if (msg.type === 'getPageSelection') {
+    const tabId = msg.tabId;
+    if (!tabId || !attachedTabs.has(tabId)) {
+      sendResponse({ selection: null });
+      return false;
+    }
+    chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+      expression: `(() => { const b = document.querySelector('#t-name-box'); return b ? (b.value || b.getAttribute('value') || '').trim() : null; })()`,
+      returnByValue: true,
+    }, (result) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ selection: null });
+        return;
+      }
+      const value = result?.result?.value;
+      sendResponse({ selection: typeof value === 'string' && value ? value : null });
+    });
+    return true; // async sendResponse
+  }
+
   if (msg.type === 'getRestrictions') {
     chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], (s) => {
       sendResponse({

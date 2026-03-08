@@ -28,6 +28,17 @@ test('sidepanel auto-attaches current tab and sends browserContext with runs', (
   assert.match(js, /JSON\.stringify\(\{\s*sessionId,\s*message:\s*text,\s*browserContext\s*\}\)/);
 });
 
+test('sidepanel polls google sheets selection and injects into browserContext', () => {
+  assert.match(js, /async function fetchSheetSelection\(tabId\)/);
+  assert.match(js, /runtimeMessage\(\{\s*type:\s*'getPageSelection'/);
+  assert.match(js, /function renderSheetSelection\(selection\)/);
+  assert.match(js, /async function pollSheetSelection\(\)/);
+  assert.match(js, /startSheetSelectionPolling\(\)/);
+  assert.match(js, /state\.sheetSelection/);
+  assert.match(js, /base\.pageSelection = state\.sheetSelection/);
+  assert.match(js, /has-sheet-selection/);
+});
+
 test('enter key submits composer and shift+enter keeps newline', () => {
   assert.match(js, /chatInputEl\.addEventListener\('keydown'/);
   assert.match(js, /if\s*\(\s*event\.key\s*!==\s*'Enter'\s*\|\|\s*event\.shiftKey\s*\)\s*return;/);

@@ -626,8 +626,11 @@ function normalizeBrowserContext(raw) {
   const title = sanitizeContextText(raw.title, 180);
   const url = sanitizeContextText(raw.url, 500);
   const favIconUrl = sanitizeContextText(raw.favIconUrl, 2000);
+  const pageSelection = sanitizeContextText(raw.pageSelection, 40);
   if (tabId == null && !title && !url && !favIconUrl) return null;
-  return { tabId, title, url, favIconUrl };
+  const ctx = { tabId, title, url, favIconUrl };
+  if (pageSelection) ctx.pageSelection = pageSelection;
+  return ctx;
 }
 
 function shouldPredictSessionTitle(session) {
@@ -1496,6 +1499,7 @@ function buildRunPrompt({ message, browserContext, predictSessionTitle = false }
   if (browserContext.tabId != null) lines.push(`- Active tab id: ${browserContext.tabId}`);
   if (browserContext.title) lines.push(`- Active tab title: ${browserContext.title}`);
   if (browserContext.url) lines.push(`- Active tab URL: ${browserContext.url}`);
+  if (browserContext.pageSelection) lines.push(`- User's current cell/range selection: ${browserContext.pageSelection}`);
   lines.push('Inspect the active page and answer directly when the user asks about what is on this tab.');
   lines.push('Do not ask for permission to inspect the active page.');
   lines.push('Assume the user is referring to this active tab unless they explicitly say otherwise.');
