@@ -1,10 +1,10 @@
 ---
 name: google-sheets
-description: Google Sheets helpers for reading, selection-aware formatting, summarizing, and issue logging in the active sheet.
-when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Formatting the current cell or selection without guesswork", "Applying bullet splitting and sparse bold formatting across ranges", "Logging extraction or formatting failures for follow-up"]
+description: Google Sheets helpers for reading, writing (including multiline and notes), selection-aware formatting, summarizing, and issue logging in the active sheet.
+when_to_use: ["Summarizing an active Google Sheet quickly", "Reading specific cells or contiguous used rows", "Formatting the current cell or selection without guesswork", "Applying bullet splitting and sparse bold formatting across ranges", "Writing or replacing multiline cell content reliably", "Editing cell notes (Shift+F2 workflow)", "Logging extraction or formatting failures for follow-up"]
 helper_prefix: gs
-helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__writeCell", "gs__writeCells", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
-helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsWriteCell", "gsWriteCells", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
+helpers: ["gs__getMeta", "gs__getSelection", "gs__gotoCell", "gs__readCell", "gs__readContiguousRows", "gs__writeCell", "gs__writeCells", "gs__writeMultilineCell", "gs__editNote", "gs__suggestBoldPhrases", "gs__summarizeSheet", "gs__splitBulletsInRange", "gs__rebalanceBoldInRange", "gs__formatCurrentSelection", "gs__formatBulletsInRange", "gs__logIssue", "gs__issueLogPath"]
+helper_aliases: ["gsGetMeta", "gsGetSelection", "gsGotoCell", "gsReadCell", "gsReadContiguousRows", "gsWriteCell", "gsWriteCells", "gsWriteMultilineCell", "gsEditNote", "gsSuggestBoldPhrases", "gsSummarizeSheet", "gsSplitBulletsInRange", "gsRebalanceBoldInRange", "gsFormatCurrentSelection", "gsFormatBulletsInRange", "gsLogIssue", "gsIssueLogPath"]
 tools: []
 ---
 
@@ -22,8 +22,10 @@ Available helpers:
 - `gs__gotoCell(cellRef)` → jump to a cell using the Sheets name box
 - `gs__readCell(cellRef, options?)` → read cell text through the in-cell editor
 - `gs__readContiguousRows(options?)` → detect used rows without hard-scanning arbitrary ranges
-- `gs__writeCell(cellRef, value, options?)` → write exact literal text into one cell through the in-cell editor
+- `gs__writeCell(cellRef, value, options?)` → write exact literal text into one cell (single-line or simple content)
 - `gs__writeCells(valuesByRef, options?)` → write exact literal text into multiple cells with per-cell verification
+- `gs__writeMultilineCell(cellRef, lines, options?)` → keyboard-based multiline write (Backspace → F2 → Alt+Enter per line) — use for replacing existing multiline/bullet cells where `gs__writeCell` flattens content
+- `gs__editNote(cellRef, noteText, options?)` → edit a cell note via Shift+F2 note editor — full note replacement in one shot
 - `gs__suggestBoldPhrases(rangeRef, options?)` → propose 1-2 emphasis phrases per cell without writing
 - `gs__summarizeSheet(options?)` → one-call summary payload (sheet meta + scan stats + preview rows)
 - `gs__splitBulletsInRange(rangeRef, options?)` → replace in-cell bullet separators with real new lines
@@ -42,6 +44,49 @@ When the user says "summarize this page/sheet", "read this sheet", or equivalent
 - Answer directly from returned `preview` rows.
 - Include `scannedRows`, `usedRowCount`, and `stopReason` in the summary.
 - Ask a focused follow-up only when `usedRowCount === 0` or the user asks for a wider range.
+
+## One-Shot Edit Protocol (Mandatory)
+
+Every cell edit follows one-shot discipline: read current content, compose full final content, write once, format once, verify once.
+
+- Never patch the same cell repeatedly in fragments.
+- If verification fails, restart from the original cell content — do not stack more partial edits.
+- For cells with leading special characters (₹, $, etc.), test one cell first and verify immediately before batching.
+
+### Choosing the Right Write Helper
+
+| Situation | Helper | Why |
+|-----------|--------|-----|
+| Single-line or simple text | `gs__writeCell` | DOM-based write, fast and reliable for single-line |
+| Replacing existing multiline/bullet content | `gs__writeMultilineCell` | Keyboard-based (Backspace → F2 → Alt+Enter), avoids flattening |
+| Multiple single-line cells | `gs__writeCells` | Batched `gs__writeCell` with per-cell verification |
+| Cell note | `gs__editNote` | Shift+F2 note editor, full note replacement |
+
+### Multiline Cell Replacement
+
+`gs__writeCell` manipulates the DOM editor directly — this can flatten or append content when replacing existing multiline cells. Use `gs__writeMultilineCell` instead:
+
+```js
+await gs__writeMultilineCell('F2', [
+  '- Ships review-ready PRs on time',
+  '- Follows sprint timeline with clear ownership',
+  '- Escalates blockers proactively',
+], { verify: true });
+```
+
+### Note Editing
+
+Notes are stable clarification for future readers (prefer notes over comments for durable guidance). Use `gs__editNote` for the Shift+F2 note editor flow:
+
+```js
+await gs__editNote('K2', 'AI-AUTO: Fully automated by AI.\n\nAI-LED: AI does primary work, dev reviews.\n\nDEV-LED: Dev does primary work, AI assists.', { verify: true });
+```
+
+Leave one blank line between each definition or paragraph block in notes for scanability.
+
+### Scratch-Cell Testing Rule
+
+If the same write/edit roadblock occurs twice on live cells, stop and move to a scratch area (e.g., Z50+) to isolate the problem, make sure these scratch pad will not affect working cells. Only return to live cells after validating a working method on scratch cells, clean the scratch cells after use as it's a critical doc.
 
 ## Reliability Rules
 
@@ -67,6 +112,16 @@ When the user says "summarize this page/sheet", "read this sheet", or equivalent
 - Do not infer cell content from toolbar/status text when table rows are available via helpers.
 - Do not write through `#t-formula-bar-input` with `fill`, `page.evaluate`, `innerHTML`, or `textContent` hacks when a literal cell update is needed.
 - If a literal write fails verification, log the issue and stop. Do not retry with `UNICHAR`, invisible prefix characters, or alternate spellings like `Rs.` unless the user explicitly wants that fallback.
+
+## Anti-Patterns (Do NOT Do These)
+
+- **Partial patching**: Editing the same cell repeatedly in fragments instead of composing full content first.
+- **Using `gs__writeCell` for multiline replacement**: DOM-based write flattens/appends existing multiline content. Use `gs__writeMultilineCell`.
+- **Stacking retries on live cells**: After second failure on the same cell, switch to scratch-cell testing.
+- **Updating note and cell in separate logical passes**: Compose final state for both, write each once.
+- **Claiming success before visible verification**: Always verify the final cell/note state matches expected output.
+- **Using comments for durable clarification**: Comments collapse behind show-more flows. Use notes for persistent guidance.
+- **Dense notes without blank lines**: Leave one blank line between sections/paragraphs in notes for readability.
 
 ## Example: One-Shot Summary
 

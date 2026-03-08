@@ -1447,6 +1447,86 @@ const helpers = {
       };
     },
 
+    gsWriteMultilineCell: async (page, ctx, state, cellRef, lines, options = {}) => {
+      assertGoogleSheet(page, 'gsWriteMultilineCell');
+      if (!Array.isArray(lines) || lines.length === 0) {
+        throw new Error('gsWriteMultilineCell() requires a non-empty array of lines');
+      }
+      const ref = normalizeCellRef(cellRef);
+      const waitMs = Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS;
+      const verify = options.verify !== false;
+
+      await gotoCell(page, ref);
+      await page.keyboard.press('Backspace');
+      await pause(page, waitMs);
+      await page.keyboard.press('F2');
+      await pause(page, waitMs);
+
+      for (let i = 0; i < lines.length; i += 1) {
+        if (i > 0) {
+          await page.keyboard.press('Alt+Enter');
+          await pause(page, 10);
+        }
+        await page.keyboard.type(String(lines[i] ?? ''), { delay: 0 });
+      }
+
+      await page.keyboard.press('Enter');
+      await pause(page, waitMs);
+      clearSummaryCache(state);
+
+      if (!verify) {
+        return { ref, status: 'ok', verified: false, lineCount: lines.length };
+      }
+
+      const { value } = await readCell(page, ref, { trim: false, waitMs });
+      const actualLines = String(value || '').split('\n');
+      const expected = lines.map((l) => String(l ?? ''));
+      const match = actualLines.length === expected.length
+        && actualLines.every((line, i) => line === expected[i]);
+
+      return {
+        ref,
+        status: match ? 'ok' : 'verify_failed',
+        verified: true,
+        lineCount: actualLines.length,
+        expectedLineCount: expected.length,
+        ...(match ? {} : { error: 'verify_failed', actual: value }),
+      };
+    },
+
+    gsEditNote: async (page, ctx, state, cellRef, noteText, options = {}) => {
+      assertGoogleSheet(page, 'gsEditNote');
+      const ref = normalizeCellRef(cellRef);
+      const waitMs = Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : 80;
+      const verify = options.verify !== false;
+      const text = String(noteText ?? '');
+
+      await gotoCell(page, ref);
+      await page.keyboard.press('Escape');
+      await pause(page, waitMs);
+      await page.keyboard.press('Shift+F2');
+      await pause(page, waitMs * 2);
+
+      const noteBox = page.locator('textarea[name="Note"], [role="textbox"][aria-label*="Note"]');
+      await noteBox.fill(text);
+      await pause(page, waitMs);
+      await page.keyboard.press('Escape');
+      await pause(page, waitMs);
+
+      if (!verify) {
+        return { ref, status: 'ok', verified: false };
+      }
+
+      const bodyText = await page.evaluate(() => document.body.innerText || '');
+      const found = bodyText.includes(text.slice(0, 60));
+      return {
+        ref,
+        status: found ? 'ok' : 'verify_failed',
+        verified: true,
+        ...(found ? {} : { error: 'note_text_not_found_on_page' }),
+      };
+    },
+
     gsFormatBulletsInRange: async (page, ctx, state, rangeRef, options = {}) => {
       assertGoogleSheet(page, 'gsFormatBulletsInRange');
       const cells = expandA1Range(rangeRef);
@@ -1495,6 +1575,8 @@ helpers.gs__splitBulletsInRange = helpers.gsSplitBulletsInRange;
 helpers.gs__rebalanceBoldInRange = helpers.gsRebalanceBoldInRange;
 helpers.gs__formatCurrentSelection = helpers.gsFormatCurrentSelection;
 helpers.gs__formatBulletsInRange = helpers.gsFormatBulletsInRange;
+helpers.gs__writeMultilineCell = helpers.gsWriteMultilineCell;
+helpers.gs__editNote = helpers.gsEditNote;
 helpers.gs__logIssue = helpers.gsLogIssue;
 helpers.gs__issueLogPath = helpers.gsIssueLogPath;
 
