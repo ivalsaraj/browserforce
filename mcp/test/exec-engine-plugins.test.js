@@ -143,6 +143,8 @@ function createPageMarkdownPage(content = 'Markdown content line', options = {})
 function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
   let activeRef = String(options.activeRef || 'A1').toUpperCase();
   let editorReadCount = 0;
+  let commitCount = 0;
+  let cancelCount = 0;
   let selection;
   if (Object.prototype.hasOwnProperty.call(options, 'selection')) {
     selection = options.selection
@@ -164,8 +166,29 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
   const boldRangesByCell = options.boldRangesByCell || {};
   const failWriteRefs = new Set((options.failWriteRefs || []).map((ref) => String(ref).toUpperCase()));
   const verifyFailRefs = new Set((options.verifyFailRefs || []).map((ref) => String(ref).toUpperCase()));
+  const failSnapshotReadRefs = new Set((options.failSnapshotReadRefs || []).map((ref) => String(ref).toUpperCase()));
   const pageUrl = options.pageUrl || 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit#gid=1';
   let currentUrl = pageUrl;
+  const cellState = new Map();
+
+  const ensureCellState = (ref) => {
+    const normalizedRef = String(ref || '').toUpperCase();
+    if (!cellState.has(normalizedRef)) {
+      cellState.set(normalizedRef, {
+        text: Object.prototype.hasOwnProperty.call(cellValues, normalizedRef)
+          ? String(cellValues[normalizedRef])
+          : '',
+        baseStyle: '',
+        boldRanges: Array.isArray(boldRangesByCell[normalizedRef])
+          ? boldRangesByCell[normalizedRef].map((range) => ({ ...range }))
+          : [],
+      });
+    }
+    return cellState.get(normalizedRef);
+  };
+
+  for (const ref of Object.keys(cellValues)) ensureCellState(ref);
+  for (const ref of Object.keys(boldRangesByCell)) ensureCellState(ref);
 
   const page = {
     isClosed: () => false,
@@ -186,12 +209,15 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
     keyboard: {
       press: async (key) => {
         if (key === 'Enter') {
+          commitCount += 1;
           selection = {
             anchorCell: activeRef,
             rangeRef: activeRef,
             multiCell: false,
             activeSheetTitle: selection?.activeSheetTitle || 'Mock Sheet',
           };
+        } else if (key === 'Escape') {
+          cancelCount += 1;
         }
       },
     },
@@ -202,28 +228,32 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
         if (failWriteRefs.has(activeRef)) {
           return { after: `${arg.textValue} [mismatch]`, lineCount: arg.textValue.split('\n').length };
         }
-        cellValues[activeRef] = verifyFailRefs.has(activeRef) ? `${arg.textValue} [verify-failed]` : arg.textValue;
+        const nextText = verifyFailRefs.has(activeRef) ? `${arg.textValue} [verify-failed]` : arg.textValue;
+        const nextRanges = Array.isArray(arg.ranges) ? arg.ranges.map((range) => ({ ...range })) : [];
+        const state = ensureCellState(activeRef);
+        state.text = nextText;
+        state.baseStyle = arg.style || '';
+        state.boldRanges = nextRanges;
+        cellValues[activeRef] = nextText;
+        boldRangesByCell[activeRef] = nextRanges.map((range) => ({ ...range }));
         return { after: arg.textValue, lineCount: arg.textValue.split('\n').length };
       }
       if (source.includes('#t-name-box') && source.includes('activeSheetTitle')) {
         return selection ? { ...selection } : null;
       }
       if (source.includes('createTreeWalker(editor, NodeFilter.SHOW_TEXT)')) {
-        const text = Object.prototype.hasOwnProperty.call(cellValues, activeRef)
-          ? String(cellValues[activeRef])
-          : '';
+        if (failSnapshotReadRefs.has(activeRef)) return null;
+        const state = ensureCellState(activeRef);
         return {
-          text,
-          baseStyle: '',
-          boldRanges: Array.isArray(boldRangesByCell[activeRef]) ? boldRangesByCell[activeRef] : [],
-          lineCount: text.split('\n').length,
+          text: state.text,
+          baseStyle: state.baseStyle,
+          boldRanges: state.boldRanges.map((range) => ({ ...range })),
+          lineCount: state.text.split('\n').length,
         };
       }
       if (source.includes('#waffle-rich-text-editor')) {
         editorReadCount += 1;
-        return Object.prototype.hasOwnProperty.call(cellValues, activeRef)
-          ? String(cellValues[activeRef])
-          : '';
+        return ensureCellState(activeRef).text;
       }
       throw new Error('Unexpected evaluate call in google-sheets mock');
     },
@@ -233,6 +263,16 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
     page,
     getEditorReadCount: () => editorReadCount,
     getSelection: () => selection,
+    getCellState: (ref) => {
+      const state = ensureCellState(ref);
+      return {
+        text: state.text,
+        baseStyle: state.baseStyle,
+        boldRanges: state.boldRanges.map((range) => ({ ...range })),
+      };
+    },
+    getCommitCount: () => commitCount,
+    getCancelCount: () => cancelCount,
   };
 }
 
@@ -351,6 +391,26 @@ test('official plugin canonical helper names remain available alongside aliases'
   assert.equal(typeof googleSheetsPlugin.helpers.gs__writeCells, 'function');
   assert.equal(typeof googleSheetsPlugin.helpers.gsWriteCells, 'function');
   assert.equal(googleSheetsPlugin.helpers.gs__writeCells, googleSheetsPlugin.helpers.gsWriteCells);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__applyCellEdits, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsApplyCellEdits, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__applyCellEdits, googleSheetsPlugin.helpers.gsApplyCellEdits);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__appendToCell, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsAppendToCell, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__appendToCell, googleSheetsPlugin.helpers.gsAppendToCell);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__insertInCell, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsInsertInCell, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__insertInCell, googleSheetsPlugin.helpers.gsInsertInCell);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__replaceInCell, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsReplaceInCell, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__replaceInCell, googleSheetsPlugin.helpers.gsReplaceInCell);
+
+  assert.equal(typeof googleSheetsPlugin.helpers.gs__extractFromCell, 'function');
+  assert.equal(typeof googleSheetsPlugin.helpers.gsExtractFromCell, 'function');
+  assert.equal(googleSheetsPlugin.helpers.gs__extractFromCell, googleSheetsPlugin.helpers.gsExtractFromCell);
 
   assert.equal(typeof highlightPlugin.helpers.hl__highlight, 'function');
   assert.equal(typeof highlightPlugin.helpers.highlight, 'function');
@@ -650,6 +710,215 @@ test('gsWriteCells surfaces post-commit verify failures', async () => {
   assert.equal(result.failed, 1);
   assert.equal(result.results[0].status, 'verify_failed');
   assert.equal(result.results[0].error, 'verify_failed');
+});
+
+test('gsApplyCellEdits appends text while preserving existing bold ranges', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const cells = { D4: 'Owns delivery' };
+  const mock = createGoogleSheetsMockPage(cells, {
+    boldRangesByCell: { D4: [{ start: 0, end: 4 }] },
+  });
+
+  const result = await applyCellEdits(mock.page, null, {}, 'D4', [
+    { type: 'append', text: ' and tracks risks' },
+  ]);
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.changed, true);
+  assert.equal(result.after, 'Owns delivery and tracks risks');
+  assert.deepEqual(mock.getCellState('D4').boldRanges, [{ start: 0, end: 4 }]);
+});
+
+test('gsApplyCellEdits inserts text at a bold boundary using left-neighbor formatting', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({ D4: 'AlphaBeta' }, {
+    boldRangesByCell: { D4: [{ start: 0, end: 5 }] },
+  });
+
+  const result = await applyCellEdits(mock.page, null, {}, 'D4', [
+    { type: 'insert', index: 5, text: ' ' },
+  ]);
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.after, 'Alpha Beta');
+  assert.deepEqual(mock.getCellState('D4').boldRanges, [{ start: 0, end: 6 }]);
+});
+
+test('gsApplyCellEdits replaces matched text and preserves untouched formatting', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({ D4: 'overcommunicated with precise timelines' }, {
+    boldRangesByCell: { D4: [{ start: 0, end: 16 }, { start: 22, end: 39 }] },
+  });
+
+  const result = await applyCellEdits(mock.page, null, {}, 'D4', [
+    { type: 'replace', match: { text: 'over', occurrence: 1 }, replacement: '' },
+    { type: 'replace', match: { text: 'with', occurrence: 1 }, replacement: 'by' },
+  ]);
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.after, 'communicated by precise timelines');
+  assert.deepEqual(mock.getCellState('D4').boldRanges, [{ start: 0, end: 12 }, { start: 16, end: 33 }]);
+});
+
+test('gsApplyCellEdits deletes text and shifts later formatting ranges', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({ D4: 'Alpha Beta Gamma' }, {
+    boldRangesByCell: { D4: [{ start: 11, end: 16 }] },
+  });
+
+  const result = await applyCellEdits(mock.page, null, {}, 'D4', [
+    { type: 'delete', match: { text: 'Beta ', occurrence: 1 } },
+  ]);
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.after, 'Alpha Gamma');
+  assert.deepEqual(mock.getCellState('D4').boldRanges, [{ start: 6, end: 11 }]);
+});
+
+test('gsApplyCellEdits rejects ambiguous matches and occurrence overflow', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({ D4: 'Alpha with Beta with Gamma' });
+
+  await assert.rejects(
+    () => applyCellEdits(mock.page, null, {}, 'D4', [
+      { type: 'replace', match: { text: 'with' }, replacement: 'by' },
+    ]),
+    /ambiguous_match/i,
+  );
+
+  await assert.rejects(
+    () => applyCellEdits(mock.page, null, {}, 'D4', [
+      { type: 'replace', match: { text: 'with', occurrence: 3 }, replacement: 'by' },
+    ]),
+    /occurrence_overflow/i,
+  );
+});
+
+test('gsApplyCellEdits rejects overlapping edits resolved against the original text', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({ D4: 'Alpha Beta Gamma' });
+
+  await assert.rejects(
+    () => applyCellEdits(mock.page, null, {}, 'D4', [
+      { type: 'replace', match: { text: 'Beta', occurrence: 1 }, replacement: 'Delta' },
+      { type: 'delete', match: { start: 7, end: 11 } },
+    ]),
+    /overlap/i,
+  );
+});
+
+test('gsApplyCellEdits surfaces snapshot read failures clearly', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({ D4: 'Alpha Beta' }, {
+    failSnapshotReadRefs: ['D4'],
+  });
+
+  await assert.rejects(
+    () => applyCellEdits(mock.page, null, {}, 'D4', [
+      { type: 'append', text: ' Gamma' },
+    ]),
+    /cannot read google sheets editor snapshot/i,
+  );
+});
+
+test('gsApplyCellEdits handles empty and plain-text cells correctly', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+
+  const emptyCell = createGoogleSheetsMockPage({ D4: '' });
+  const appendResult = await applyCellEdits(emptyCell.page, null, {}, 'D4', [
+    { type: 'append', text: 'First line' },
+  ]);
+  assert.equal(appendResult.status, 'ok');
+  assert.equal(appendResult.after, 'First line');
+  assert.deepEqual(emptyCell.getCellState('D4').boldRanges, []);
+
+  await assert.rejects(
+    () => applyCellEdits(emptyCell.page, null, {}, 'D4', [
+      { type: 'replace', match: { text: 'missing', occurrence: 1 }, replacement: 'noop' },
+    ]),
+    /not_found/i,
+  );
+
+  const plainCell = createGoogleSheetsMockPage({ E4: 'Alpha Beta' });
+  const plainResult = await applyCellEdits(plainCell.page, null, {}, 'E4', [
+    { type: 'replace', match: { text: 'Beta', occurrence: 1 }, replacement: 'Gamma' },
+  ]);
+  assert.equal(plainResult.status, 'ok');
+  assert.equal(plainResult.after, 'Alpha Gamma');
+  assert.deepEqual(plainCell.getCellState('E4').boldRanges, []);
+});
+
+test('wrapper surgical helpers delegate correctly and extraction stays read-only', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const { gsAppendToCell, gsInsertInCell, gsReplaceInCell, gsExtractFromCell } = googleSheetsPlugin.helpers;
+  const mock = createGoogleSheetsMockPage({ D4: 'Alpha Beta Beta' }, {
+    boldRangesByCell: { D4: [{ start: 0, end: 5 }] },
+  });
+
+  const appendResult = await gsAppendToCell(mock.page, null, {}, 'D4', ' Gamma');
+  assert.equal(appendResult.after, 'Alpha Beta Beta Gamma');
+
+  const insertResult = await gsInsertInCell(mock.page, null, {}, 'D4', { index: 5, text: ',' });
+  assert.equal(insertResult.after, 'Alpha, Beta Beta Gamma');
+
+  const replaceResult = await gsReplaceInCell(mock.page, null, {}, 'D4', { text: 'Beta', occurrence: 2 }, 'Delta');
+  assert.equal(replaceResult.after, 'Alpha, Beta Delta Gamma');
+
+  const beforeExtract = mock.getCellState('D4');
+  const extractResult = await gsExtractFromCell(mock.page, null, {}, 'D4', { text: 'a' });
+  const afterExtract = mock.getCellState('D4');
+  assert.equal(extractResult.ref, 'D4');
+  assert.ok(extractResult.matches.length >= 2);
+  assert.deepEqual(afterExtract, beforeExtract);
+  assert.ok(mock.getCommitCount() >= 3);
+  assert.ok(mock.getCancelCount() >= 1);
+});
+
+test('gsApplyCellEdits invalidates gsSummarizeSheet cache after a real write', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const applyCellEdits = googleSheetsPlugin.helpers.gsApplyCellEdits;
+  const mock = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+    D2: 'Alpha Beta',
+  });
+  const state = {};
+  const summarizeOptions = {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 6,
+    emptyStreakStop: 1,
+    previewRows: 2,
+  };
+
+  await summarize(mock.page, null, state, summarizeOptions);
+  const readsAfterFirst = mock.getEditorReadCount();
+  await summarize(mock.page, null, state, summarizeOptions);
+  const readsAfterSecond = mock.getEditorReadCount();
+  assert.equal(readsAfterSecond, readsAfterFirst);
+
+  const editResult = await applyCellEdits(mock.page, null, state, 'D2', [
+    { type: 'replace', match: { text: 'Beta', occurrence: 1 }, replacement: 'Gamma' },
+  ]);
+  assert.equal(editResult.status, 'ok');
+
+  const readsAfterWrite = mock.getEditorReadCount();
+  await summarize(mock.page, null, state, summarizeOptions);
+  const readsAfterThird = mock.getEditorReadCount();
+  assert.ok(readsAfterThird > readsAfterWrite);
 });
 
 test('runCode uses execute-scope console shim instead of global console', async () => {

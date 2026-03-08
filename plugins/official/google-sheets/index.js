@@ -398,6 +398,328 @@ function suggestBoldPhrasesForText(text, existingRanges = [], options = {}) {
   return suggestions;
 }
 
+function buildBoldStyleMap(textLength, ranges = []) {
+  const styles = new Array(Math.max(0, Number(textLength) || 0)).fill(false);
+  for (const range of mergeRanges(ranges)) {
+    for (let i = range.start; i < range.end && i < styles.length; i += 1) {
+      styles[i] = true;
+    }
+  }
+  return styles;
+}
+
+function styleMapToRanges(styleMap = []) {
+  const ranges = [];
+  let start = -1;
+  for (let i = 0; i < styleMap.length; i += 1) {
+    if (styleMap[i]) {
+      if (start === -1) start = i;
+      continue;
+    }
+    if (start !== -1) {
+      ranges.push({ start, end: i });
+      start = -1;
+    }
+  }
+  if (start !== -1) ranges.push({ start, end: styleMap.length });
+  return ranges;
+}
+
+function inferAdjacentBoldStyle(styleMap, index) {
+  if (index > 0) return Boolean(styleMap[index - 1]);
+  if (index < styleMap.length) return Boolean(styleMap[index]);
+  return false;
+}
+
+function allValuesEqual(values = []) {
+  if (values.length === 0) return true;
+  return values.every((value) => value === values[0]);
+}
+
+function findTextMatches(text, needle) {
+  const target = String(needle ?? '');
+  if (!target) throw new Error('match.text must be a non-empty string');
+
+  const matches = [];
+  let fromIndex = 0;
+  while (fromIndex <= text.length) {
+    const start = text.indexOf(target, fromIndex);
+    if (start === -1) break;
+    matches.push({ start, end: start + target.length, text: target });
+    fromIndex = start + Math.max(target.length, 1);
+  }
+  return matches;
+}
+
+function normalizeMatchDescriptor(match) {
+  if (typeof match === 'string') {
+    return { text: match };
+  }
+  if (!match || typeof match !== 'object') {
+    throw new Error('match must be a string or an object with text or { start, end }');
+  }
+  return match;
+}
+
+function resolveMatchTarget(text, match, { allowMultiple = false } = {}) {
+  const descriptor = normalizeMatchDescriptor(match);
+  if (Number.isInteger(descriptor.start) || Number.isInteger(descriptor.end)) {
+    if (!Number.isInteger(descriptor.start) || !Number.isInteger(descriptor.end) || descriptor.start < 0 || descriptor.end < descriptor.start || descriptor.end > text.length) {
+      throw new Error('Invalid match range');
+    }
+    return allowMultiple
+      ? [{ start: descriptor.start, end: descriptor.end, text: text.slice(descriptor.start, descriptor.end), occurrence: 1 }]
+      : { start: descriptor.start, end: descriptor.end, text: text.slice(descriptor.start, descriptor.end), occurrence: 1 };
+  }
+
+  const matches = findTextMatches(text, descriptor.text).map((entry, index) => ({
+    ...entry,
+    occurrence: index + 1,
+  }));
+
+  if (allowMultiple) {
+    if (Number.isInteger(descriptor.occurrence) && descriptor.occurrence > 0) {
+      if (descriptor.occurrence > matches.length) {
+        throw new Error(`occurrence_overflow: requested occurrence ${descriptor.occurrence} but found ${matches.length}`);
+      }
+      return [matches[descriptor.occurrence - 1]];
+    }
+    return matches;
+  }
+
+  if (matches.length === 0) {
+    throw new Error(`not_found: could not find "${String(descriptor.text ?? '')}"`);
+  }
+  if (Number.isInteger(descriptor.occurrence) && descriptor.occurrence > 0) {
+    if (descriptor.occurrence > matches.length) {
+      throw new Error(`occurrence_overflow: requested occurrence ${descriptor.occurrence} but found ${matches.length}`);
+    }
+    return matches[descriptor.occurrence - 1];
+  }
+  if (matches.length > 1) {
+    throw new Error(`ambiguous_match: found ${matches.length} matches for "${String(descriptor.text ?? '')}"`);
+  }
+  return matches[0];
+}
+
+function normalizeCellEdit(edit, index, originalText) {
+  if (!edit || typeof edit !== 'object') {
+    throw new Error(`edit #${index + 1} must be an object`);
+  }
+  const type = String(edit.type || '').trim().toLowerCase();
+  if (!type) throw new Error(`edit #${index + 1} is missing a type`);
+
+  if (type === 'append') {
+    return {
+      type,
+      start: originalText.length,
+      end: originalText.length,
+      insertText: String(edit.text ?? ''),
+      order: index,
+    };
+  }
+
+  if (type === 'insert') {
+    if (!Number.isInteger(edit.index) || edit.index < 0 || edit.index > originalText.length) {
+      throw new Error(`edit #${index + 1} insert index must be between 0 and ${originalText.length}`);
+    }
+    return {
+      type,
+      start: edit.index,
+      end: edit.index,
+      insertText: String(edit.text ?? ''),
+      order: index,
+    };
+  }
+
+  if (type === 'replace' || type === 'delete') {
+    const target = resolveMatchTarget(originalText, edit.match, { allowMultiple: false });
+    return {
+      type,
+      start: target.start,
+      end: target.end,
+      insertText: type === 'replace' ? String(edit.replacement ?? '') : '',
+      order: index,
+    };
+  }
+
+  throw new Error(`Unsupported edit type: "${edit.type}"`);
+}
+
+function ensureNonOverlappingEdits(edits = []) {
+  const sorted = [...edits].sort((a, b) => a.start - b.start || a.end - b.end || a.order - b.order);
+  for (let i = 1; i < sorted.length; i += 1) {
+    if (sorted[i].start < sorted[i - 1].end) {
+      throw new Error('overlap: cell edits may not overlap in the original text');
+    }
+  }
+  return sorted;
+}
+
+function buildInsertedBoldSlice(styleMap, edit) {
+  if (!edit.insertText) return [];
+  if (edit.type === 'replace' && edit.end > edit.start) {
+    const replacedStyles = styleMap.slice(edit.start, edit.end);
+    if (replacedStyles.length === edit.insertText.length) return replacedStyles;
+    if (allValuesEqual(replacedStyles)) return new Array(edit.insertText.length).fill(Boolean(replacedStyles[0]));
+    throw new Error('mixed_replacement_formatting_unsupported: replacement crosses mixed bold formatting');
+  }
+  return new Array(edit.insertText.length).fill(inferAdjacentBoldStyle(styleMap, edit.start));
+}
+
+function planCellEdits(snapshot, edits) {
+  if (!Array.isArray(edits) || edits.length === 0) {
+    throw new Error('gsApplyCellEdits() requires a non-empty edits array');
+  }
+
+  const normalized = ensureNonOverlappingEdits(edits.map((edit, index) => normalizeCellEdit(edit, index, snapshot.text)));
+  const styleMap = buildBoldStyleMap(snapshot.text.length, snapshot.boldRanges);
+
+  let cursor = 0;
+  let nextText = '';
+  const nextStyleMap = [];
+
+  for (const edit of normalized) {
+    nextText += snapshot.text.slice(cursor, edit.start);
+    nextStyleMap.push(...styleMap.slice(cursor, edit.start));
+    nextText += edit.insertText;
+    nextStyleMap.push(...buildInsertedBoldSlice(styleMap, edit));
+    cursor = edit.end;
+  }
+
+  nextText += snapshot.text.slice(cursor);
+  nextStyleMap.push(...styleMap.slice(cursor));
+
+  return {
+    before: snapshot.text,
+    after: nextText,
+    beforeBoldRanges: snapshot.boldRanges,
+    afterBoldRanges: styleMapToRanges(nextStyleMap),
+    edits: normalized,
+    changed: nextText !== snapshot.text || !rangesEqual(snapshot.boldRanges, styleMapToRanges(nextStyleMap)),
+  };
+}
+
+async function applyCellEdits(page, state, cellRef, edits, options = {}) {
+  const ref = normalizeCellRef(cellRef);
+  const waitMs = Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS;
+  const verify = options.verify !== false;
+  const dryRun = options.dryRun === true;
+
+  await openEditorAtCell(page, ref, waitMs);
+  let snapshot;
+  try {
+    snapshot = await readEditorSnapshot(page);
+  } catch (err) {
+    await closeEditor(page, false);
+    throw err;
+  }
+
+  let plan;
+  try {
+    plan = planCellEdits(snapshot, edits);
+  } catch (err) {
+    await closeEditor(page, false);
+    throw err;
+  }
+
+  if (!plan.changed) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'unchanged',
+      changed: false,
+      committed: false,
+      verified: false,
+      before: plan.before,
+      after: plan.after,
+    };
+  }
+
+  if (dryRun) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'dry_run',
+      changed: true,
+      committed: false,
+      verified: false,
+      before: plan.before,
+      after: plan.after,
+      beforeBoldRanges: plan.beforeBoldRanges,
+      afterBoldRanges: plan.afterBoldRanges,
+    };
+  }
+
+  const write = await writeEditorWithRanges(page, plan.after, plan.afterBoldRanges, snapshot.baseStyle);
+  if (write.after !== plan.after) {
+    await closeEditor(page, false);
+    return {
+      ref,
+      status: 'error',
+      changed: false,
+      committed: false,
+      verified: false,
+      before: plan.before,
+      after: write.after,
+      error: 'text_mismatch_after_write',
+    };
+  }
+
+  await closeEditor(page, true);
+  clearSummaryCache(state);
+
+  if (!verify) {
+    return {
+      ref,
+      status: 'ok',
+      changed: true,
+      committed: true,
+      verified: false,
+      before: plan.before,
+      after: plan.after,
+      beforeBoldRanges: plan.beforeBoldRanges,
+      afterBoldRanges: plan.afterBoldRanges,
+    };
+  }
+
+  await openEditorAtCell(page, ref, waitMs);
+  const verifySnapshot = await readEditorSnapshot(page);
+  await closeEditor(page, false);
+  const verifyOk = verifySnapshot.text === plan.after && rangesEqual(verifySnapshot.boldRanges, plan.afterBoldRanges);
+
+  return {
+    ref,
+    status: verifyOk ? 'ok' : 'verify_failed',
+    changed: true,
+    committed: true,
+    verified: true,
+    before: plan.before,
+    after: verifySnapshot.text,
+    beforeBoldRanges: plan.beforeBoldRanges,
+    afterBoldRanges: verifySnapshot.boldRanges,
+    ...(verifyOk ? {} : { error: 'written_but_unverified' }),
+  };
+}
+
+async function extractFromCell(page, cellRef, match, options = {}) {
+  const ref = normalizeCellRef(cellRef);
+  const waitMs = Number.isInteger(options.waitMs) && options.waitMs >= 0 ? options.waitMs : DEFAULT_EDITOR_WAIT_MS;
+  await openEditorAtCell(page, ref, waitMs);
+  try {
+    const snapshot = await readEditorSnapshot(page);
+    const matches = resolveMatchTarget(snapshot.text, match, { allowMultiple: true }).map((entry) => ({
+      text: entry.text,
+      occurrence: entry.occurrence,
+      start: entry.start,
+      end: entry.end,
+    }));
+    return { ref, matches };
+  } finally {
+    await closeEditor(page, false);
+  }
+}
+
 async function readCurrentSelection(page) {
   const raw = await page.evaluate(() => {
     const nameBox = document.querySelector('#t-name-box');
@@ -1182,6 +1504,40 @@ const helpers = {
       return writeCellsLiteral(page, state, valuesByRef, options);
     },
 
+    gsApplyCellEdits: async (page, ctx, state, cellRef, edits, options = {}) => {
+      assertGoogleSheet(page, 'gsApplyCellEdits');
+      return applyCellEdits(page, state, cellRef, edits, options);
+    },
+
+    gsAppendToCell: async (page, ctx, state, cellRef, appendText, options = {}) => {
+      assertGoogleSheet(page, 'gsAppendToCell');
+      return helpers.gsApplyCellEdits(page, ctx, state, cellRef, [
+        { type: 'append', text: String(appendText ?? '') },
+      ], options);
+    },
+
+    gsInsertInCell: async (page, ctx, state, cellRef, insert, options = {}) => {
+      assertGoogleSheet(page, 'gsInsertInCell');
+      if (!insert || typeof insert !== 'object') {
+        throw new Error('gsInsertInCell() requires an insert object like { index, text }');
+      }
+      return helpers.gsApplyCellEdits(page, ctx, state, cellRef, [
+        { type: 'insert', index: insert.index, text: String(insert.text ?? '') },
+      ], options);
+    },
+
+    gsReplaceInCell: async (page, ctx, state, cellRef, match, replacement, options = {}) => {
+      assertGoogleSheet(page, 'gsReplaceInCell');
+      return helpers.gsApplyCellEdits(page, ctx, state, cellRef, [
+        { type: 'replace', match, replacement: String(replacement ?? '') },
+      ], options);
+    },
+
+    gsExtractFromCell: async (page, ctx, state, cellRef, match, options = {}) => {
+      assertGoogleSheet(page, 'gsExtractFromCell');
+      return extractFromCell(page, cellRef, match, options);
+    },
+
     gsSuggestBoldPhrases: async (page, ctx, state, rangeRef, options = {}) => {
       assertGoogleSheet(page, 'gsSuggestBoldPhrases');
       const strategy = normalizeSuggestionStrategy(options.strategy);
@@ -1569,6 +1925,11 @@ helpers.gs__readCell = helpers.gsReadCell;
 helpers.gs__readContiguousRows = helpers.gsReadContiguousRows;
 helpers.gs__writeCell = helpers.gsWriteCell;
 helpers.gs__writeCells = helpers.gsWriteCells;
+helpers.gs__applyCellEdits = helpers.gsApplyCellEdits;
+helpers.gs__appendToCell = helpers.gsAppendToCell;
+helpers.gs__insertInCell = helpers.gsInsertInCell;
+helpers.gs__replaceInCell = helpers.gsReplaceInCell;
+helpers.gs__extractFromCell = helpers.gsExtractFromCell;
 helpers.gs__suggestBoldPhrases = helpers.gsSuggestBoldPhrases;
 helpers.gs__summarizeSheet = helpers.gsSummarizeSheet;
 helpers.gs__splitBulletsInRange = helpers.gsSplitBulletsInRange;
@@ -1582,7 +1943,7 @@ helpers.gs__issueLogPath = helpers.gsIssueLogPath;
 
 export default {
   name: 'google-sheets',
-  description: 'Google Sheets helpers for selection-aware formatting, row scanning, cell reads, and issue logging',
+  description: 'Google Sheets helpers for surgical cell edits, selection-aware formatting, row scanning, cell reads, and issue logging',
   version: '1.0.0',
   helpers,
 };
