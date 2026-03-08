@@ -268,9 +268,15 @@ export function renderInlineContent(value) {
   const store = createMarkdownTokenStore();
   const source = String(value ?? '');
 
-  const withCodeTokens = source.replace(/`([^`\n]+)`/g, (_match, codeRaw) => (
-    store.put(`<code>${escapeHtml(codeRaw)}</code>`)
-  ));
+  const withCodeTokens = source.replace(/`([^`\n]+)`/g, (_match, codeRaw) => {
+    const sheetRef = normalizeGoogleSheetsRangeRef(codeRaw.trim());
+    if (sheetRef) {
+      return store.put(
+        `<a class="inline-link inline-sheet-ref" href="#" data-sheet-range-ref="${escapeHtml(sheetRef)}">${escapeHtml(codeRaw)}</a>`,
+      );
+    }
+    return store.put(`<code>${escapeHtml(codeRaw)}</code>`);
+  });
 
   const withImageAndLinks = withCodeTokens.replace(/(!)?\[([^\]]*)\]\(([^)]+)\)/g, (match, imageMark, labelRaw, urlRaw) => {
     const normalizedUrl = normalizeRenderableUrl(urlRaw);

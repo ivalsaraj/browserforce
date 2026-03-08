@@ -135,11 +135,12 @@ test('completed final assistant responses render export action menu hooks', () =
   assert.match(js, /data-final-response-action="export-pdf"/);
 });
 
-test('message author labels expose sent time in hover tooltip', () => {
+test('message author labels show visible timestamp alongside author name', () => {
   assert.match(js, /formatMessageTimestampForHover/);
   assert.match(js, /function formatMessageTimestampTitle\(message\)/);
-  assert.match(js, /class="msg-author"\$\{userAuthorTitle\}>You<\/span>/);
-  assert.match(js, /class="msg-author"\$\{assistantAuthorTitle\}>BrowserForce<\/span>/);
+  assert.match(js, /class="msg-author">You<\/span>/);
+  assert.match(js, /class="msg-author">BrowserForce<\/span>/);
+  assert.match(js, /class="msg-time"/);
 });
 
 test('local screenshot markdown images hydrate through authenticated chatd fetch', () => {

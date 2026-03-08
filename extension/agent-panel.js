@@ -912,7 +912,8 @@ function resolvePluginHelperSource(callName, pluginHelperLookup) {
 
 function renderSelectors() {
   const activeSession = getActiveSession();
-  const modelLabel = `Model: ${formatModelLabel(activeSession?.model)}`;
+  const effortValue = normalizeReasoningEffort(activeSession?.reasoningEffort) || state.defaultReasoningEffort || 'medium';
+  const modelLabel = `${formatModelLabel(activeSession?.model)} · ${formatReasoningEffortLabel(effortValue)}`;
   const sessionLabel = formatSessionLabel(activeSession);
   const pluginLabel = formatPluginTriggerLabel(activeSession);
 
@@ -2330,12 +2331,11 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
   const chunks = messages.map((msg, messageIndex) => {
     const role = msg.role || 'assistant';
     const authorTitle = formatMessageTimestampTitle(msg);
-    const userAuthorTitle = authorTitle ? ` title="${escapeHtml(authorTitle)}"` : '';
-    const assistantAuthorTitle = authorTitle ? ` title="${escapeHtml(authorTitle)}"` : '';
+    const timeHtml = authorTitle ? `<span class="msg-time">${escapeHtml(authorTitle)}</span>` : '';
     if (role === 'user') {
       return `
         <article class="message user">
-          <div class="msg-meta"><span class="msg-author"${userAuthorTitle}>You</span></div>
+          <div class="msg-meta"><span class="msg-author">You</span>${timeHtml}</div>
           <div class="bubble-user">${escapeHtml(msg.text || '')}</div>
         </article>
       `;
@@ -2379,7 +2379,7 @@ function renderTranscript({ preserveScrollTop = null } = {}) {
     }) || `<div class="bubble-assistant">${renderContent(msg.text || '')}</div>`;
     return `
       <article class="message assistant">
-        <div class="msg-meta"><span class="msg-author"${assistantAuthorTitle}>BrowserForce</span></div>
+        <div class="msg-meta"><span class="msg-author">BrowserForce</span>${timeHtml}</div>
         <div class="msg-content-wrap">
           ${timelineHtml || fallbackHtml}
         </div>

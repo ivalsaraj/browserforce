@@ -92,10 +92,17 @@ test('renders standalone google sheets refs as clickable anchors', () => {
   assert.match(rendered, /data-sheet-range-ref="1:1"[^>]*>1:1<\/a>/);
 });
 
-test('does not render google sheets refs inside markdown links, code spans, or fenced code blocks', () => {
-  const inlineRendered = renderInlineContent('Keep [D4](https://example.com) plain and `F2:L11` literal.');
+test('renders google sheets refs inside code spans as clickable sheet ref links', () => {
+  const inlineRendered = renderInlineContent('Check `F2:L11` and `D4` here.');
+  assert.match(inlineRendered, /data-sheet-range-ref="F2:L11"[^>]*>F2:L11<\/a>/);
+  assert.match(inlineRendered, /data-sheet-range-ref="D4"[^>]*>D4<\/a>/);
+  assert.doesNotMatch(inlineRendered, /<code>F2:L11<\/code>/);
+  assert.doesNotMatch(inlineRendered, /<code>D4<\/code>/);
+});
+
+test('does not render google sheets refs inside markdown links or fenced code blocks', () => {
+  const inlineRendered = renderInlineContent('Keep [D4](https://example.com) plain.');
   assert.doesNotMatch(inlineRendered, /data-sheet-range-ref="D4"/);
-  assert.doesNotMatch(inlineRendered, /data-sheet-range-ref="F2:L11"/);
 
   const blockRendered = renderMarkdownContent([
     '```txt',
