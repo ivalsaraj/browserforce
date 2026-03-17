@@ -80,6 +80,27 @@ export function buildCodexStderrStepPayload({ count, lines } = {}) {
   };
 }
 
+// Official context windows from platform.openai.com/docs/models.
+// gpt-5.4 uses the 272K standard-pricing boundary (>272K input triggers
+// 2x input / 1.5x output for the full session) rather than the raw 1.05M.
+const CODEX_MODEL_CONTEXT_WINDOWS = {
+  'codex-mini-latest': 200_000,
+  'gpt-5-codex-mini': 200_000,
+  'gpt-5.1-codex-mini': 200_000,
+  'gpt-5-codex': 200_000,
+  'gpt-5.1-codex': 200_000,
+  'gpt-5.1-codex-max': 200_000,
+  'gpt-5.2-codex': 400_000,
+  'gpt-5.3-codex': 400_000,
+  'gpt-5.3-codex-spark': 400_000,
+  'gpt-5.4': 272_000,
+};
+
+export function getDefaultModelContextWindow(model) {
+  if (!model || typeof model !== 'string') return null;
+  return CODEX_MODEL_CONTEXT_WINDOWS[model.trim().toLowerCase()] ?? null;
+}
+
 function toCount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;

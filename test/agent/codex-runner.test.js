@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCodexStderrStepPayload,
   buildCodexExecArgs,
+  getDefaultModelContextWindow,
   normalizeCodexLine,
   shouldSuppressCodexStderrLine,
 } from '../../agent/src/codex-runner.js';
@@ -309,4 +310,17 @@ test('maps response_item assistant message without phase to chat.commentary', ()
   });
   assert.equal(evt.event, 'chat.commentary');
   assert.equal(evt.payload.delta, 'Final text without phase');
+});
+
+test('getDefaultModelContextWindow returns known context windows for codex models', () => {
+  assert.equal(getDefaultModelContextWindow('codex-mini-latest'), 200_000);
+  assert.equal(getDefaultModelContextWindow('gpt-5.3-codex'), 400_000);
+  assert.equal(getDefaultModelContextWindow('gpt-5.4'), 272_000);
+  assert.equal(getDefaultModelContextWindow('GPT-5.3-CODEX'), 400_000);
+});
+
+test('getDefaultModelContextWindow returns null for unknown or missing models', () => {
+  assert.equal(getDefaultModelContextWindow('unknown-model'), null);
+  assert.equal(getDefaultModelContextWindow(null), null);
+  assert.equal(getDefaultModelContextWindow(''), null);
 });

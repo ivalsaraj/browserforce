@@ -312,8 +312,11 @@ test('formats context usage with percentage when context window is present', () 
   );
 });
 
+test('shows token count without percentage when context window is missing', () => {
+  assert.equal(formatContextUsage({ totalTokens: 12345 }), '12,345 tokens');
+});
+
 test('returns null for context usage formatting when values are incomplete', () => {
-  assert.equal(formatContextUsage({ totalTokens: 12345 }), null);
   assert.equal(formatContextUsage({ modelContextWindow: 258400 }), null);
   assert.equal(formatContextUsage({ totalTokens: 0, modelContextWindow: 258400 }), null);
 });

@@ -679,8 +679,9 @@ export function formatMessageTimestampForHover(value, { now = Date.now(), locale
 
 export function formatContextUsage({ totalTokens, modelContextWindow } = {}) {
   const total = normalizeUsageValue(totalTokens);
+  if (total == null) return null;
   const windowSize = normalizeUsageValue(modelContextWindow);
-  if (total == null || windowSize == null) return null;
+  if (windowSize == null) return `${total.toLocaleString()} tokens`;
   const percent = ((total / windowSize) * 100).toFixed(1);
   return `${total.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)`;
 }

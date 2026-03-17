@@ -1830,3 +1830,58 @@ test('GET /v1/sessions/:id exposes providerState metadata for side-panel hydrati
     await daemon.stop();
   }
 });
+
+test('run.usage injects fallback modelContextWindow from session model when CLI omits it', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent, onExit }) => {
+      setTimeout(() => {
+        onEvent({
+          event: 'run.usage',
+          runId,
+          sessionId,
+          payload: {
+            totalTokens: 15455,
+            inputTokens: 15166,
+            cachedInputTokens: 3456,
+            outputTokens: 289,
+          },
+        });
+      }, 5);
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'done' } }), 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Fallback test', model: 'gpt-5.3-codex' }),
+    }).then((res) => res.json());
+
+    await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'context check' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.providerState?.codex?.latestUsage?.modelContextWindow, 400_000);
+    assert.equal(sessionBody.providerState?.codex?.latestUsage?.totalTokens, 15455);
+  } finally {
+    await daemon.stop();
+  }
+});

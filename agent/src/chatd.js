@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { pickChatdPort } from './port-resolver.js';
 import { isAllowedOrigin, verifyBearer } from './auth.js';
-import { startCodexRun } from './codex-runner.js';
+import { startCodexRun, getDefaultModelContextWindow } from './codex-runner.js';
 import {
   appendMessage,
   createSession,
@@ -2256,6 +2256,10 @@ export async function startChatd(opts = {}) {
                 if (evt.event === 'run.usage') {
                   const usage = normalizeUsagePayload(evt.payload);
                   if (usage) {
+                    if (!usage.modelContextWindow && session.model) {
+                      const fallback = getDefaultModelContextWindow(session.model);
+                      if (fallback) usage.modelContextWindow = fallback;
+                    }
                     await updateSession({
                       sessionId,
                       patch: {
