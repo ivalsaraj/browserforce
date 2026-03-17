@@ -431,8 +431,8 @@ function renderContextUsageChip() {
   if (!contextUsageEl) return;
   const sessionId = state.value.activeSessionId;
   const usage = sessionId ? state.value.latestUsageBySession?.[sessionId] : null;
-  const formatted = formatContextUsage(usage || {});
-  const note = formatted ? `Context: ${formatted}` : '';
+  const result = formatContextUsage(usage || {});
+  const note = result ? `${result.label}: ${result.text}` : '';
   contextUsageEl.classList.toggle('hidden', !note);
   if (!note) {
     contextUsageEl.textContent = '';

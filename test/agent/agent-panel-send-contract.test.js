@@ -190,7 +190,8 @@ test('composer supports queued image uploads from picker and paste before send',
 test('context usage renderer hides element when unavailable and only shows formatted values', () => {
   assert.match(js, /function renderContextUsageChip\(\)/);
   assert.match(js, /latestUsageBySession/);
-  assert.match(js, /const note = formatted \? `Context: \$\{formatted\}` : '';/);
+  assert.match(js, /const result = formatContextUsage\(usage \|\| \{\}\)/);
+  assert.match(js, /const note = result \? `\$\{result\.label\}: \$\{result\.text\}` : '';/);
   assert.match(js, /contextUsageEl\.classList\.toggle\('hidden', !note\)/);
   assert.match(js, /contextUsageEl\.textContent = note/);
   assert.doesNotMatch(js, /Context:\s*unavailable/);

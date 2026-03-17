@@ -305,15 +305,22 @@ test('tracks latest step index for active runs only', () => {
   assert.equal(getLatestInFlightStepIndex({ done: false, steps: [] }), -1);
 });
 
-test('formats context usage with percentage when context window is present', () => {
-  assert.equal(
-    formatContextUsage({ totalTokens: 12345, modelContextWindow: 258400 }),
-    '12,345 / 258,400 (4.8%)',
-  );
+test('formats context usage with percentage when total fits within context window', () => {
+  const result = formatContextUsage({ totalTokens: 12345, modelContextWindow: 258400 });
+  assert.equal(result.label, 'Context');
+  assert.equal(result.text, '12,345 / 258,400 (4.8%)');
 });
 
 test('shows token count without percentage when context window is missing', () => {
-  assert.equal(formatContextUsage({ totalTokens: 12345 }), '12,345 tokens');
+  const result = formatContextUsage({ totalTokens: 12345 });
+  assert.equal(result.label, 'Tokens');
+  assert.equal(result.text, '12,345 tokens');
+});
+
+test('shows token count when total exceeds context window (cumulative usage)', () => {
+  const result = formatContextUsage({ totalTokens: 4398463, modelContextWindow: 400000 });
+  assert.equal(result.label, 'Tokens');
+  assert.equal(result.text, '4,398,463 tokens');
 });
 
 test('returns null for context usage formatting when values are incomplete', () => {

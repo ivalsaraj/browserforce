@@ -681,9 +681,9 @@ export function formatContextUsage({ totalTokens, modelContextWindow } = {}) {
   const total = normalizeUsageValue(totalTokens);
   if (total == null) return null;
   const windowSize = normalizeUsageValue(modelContextWindow);
-  if (windowSize == null) return `${total.toLocaleString()} tokens`;
+  if (windowSize == null || total > windowSize) return { label: 'Tokens', text: `${total.toLocaleString()} tokens` };
   const percent = ((total / windowSize) * 100).toFixed(1);
-  return `${total.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)`;
+  return { label: 'Context', text: `${total.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)` };
 }
 
 function slugifyFilePart(value, fallback = 'browserforce-response') {
