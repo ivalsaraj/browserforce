@@ -273,6 +273,11 @@ function normalizePredictedTitle(value) {
   return normalizeSessionText(value, SESSION_PREDICTED_TITLE_MAX_LEN);
 }
 
+function isDefaultSessionTitle(title) {
+  const lowered = String(title || '').trim().toLowerCase();
+  return !lowered || lowered === 'new session' || lowered === 'new chat';
+}
+
 function normalizeFirstMessageTab(firstMessageTabPatch, currentFirstMessageTab) {
   if (firstMessageTabPatch == null) return null;
   if (!isObject(firstMessageTabPatch)) {
@@ -499,7 +504,12 @@ export async function updateSession({ sessionId, patch = {}, storageRoot } = {})
     if (Object.prototype.hasOwnProperty.call(patch, 'predictedTitle')) {
       const predictedTitle = normalizePredictedTitle(patch.predictedTitle);
       if (predictedTitle == null) delete next.predictedTitle;
-      else next.predictedTitle = predictedTitle;
+      else {
+        next.predictedTitle = predictedTitle;
+        if (!Object.prototype.hasOwnProperty.call(patch, 'title') && isDefaultSessionTitle(current.title)) {
+          next.title = predictedTitle;
+        }
+      }
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'firstMessageTab')) {
       const firstMessageTab = normalizeFirstMessageTab(patch.firstMessageTab, current.firstMessageTab);

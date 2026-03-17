@@ -244,3 +244,36 @@ test('messages.loaded strips hidden session title prefix from stored assistant c
   assert.equal(next.runs.run_1?.text, 'Visible answer');
   assert.equal(next.runs.run_1?.timeline?.[0]?.text, 'Visible answer');
 });
+
+test('messages.loaded strips hidden session title prefix from stored reasoning labels and timeline text', () => {
+  const state = {
+    activeSessionId: 's1',
+    sessions: [],
+    runs: {},
+    messagesBySession: {},
+    latestUsageBySession: {},
+  };
+
+  const next = reduceState(state, {
+    type: 'messages.loaded',
+    sessionId: 's1',
+    messages: [{
+      role: 'assistant',
+      text: '',
+      runId: 'run_2',
+      timeline: [
+        { type: 'step', kind: 'reasoning', status: 'running', key: 'commentary:1', label: '[[BF_SESSION_TITLE]] Pricing Sheet Summary' },
+        { type: 'text', text: '[[BF_SESSION_TITLE]] Pricing Sheet Summary\n\nVisible answer' },
+      ],
+    }],
+  });
+
+  const timeline = next.runs.run_2?.timeline || [];
+  const messageTimeline = next.messagesBySession.s1?.[0]?.timeline || [];
+
+  assert.equal(timeline.some((item) => String(item?.label || '').includes('[[BF_SESSION_TITLE]]')), false);
+  assert.equal(timeline.some((item) => String(item?.text || '').includes('[[BF_SESSION_TITLE]]')), false);
+  assert.equal(messageTimeline.some((item) => String(item?.label || '').includes('[[BF_SESSION_TITLE]]')), false);
+  assert.equal(messageTimeline.some((item) => String(item?.text || '').includes('[[BF_SESSION_TITLE]]')), false);
+  assert.equal(timeline.some((item) => item?.type === 'text' && item?.text === 'Visible answer'), true);
+});

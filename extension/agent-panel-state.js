@@ -90,7 +90,7 @@ function unwrapShellLcCommand(value) {
 }
 
 function trimStepLabel(label) {
-  const text = unwrapShellLcCommand(label);
+  const text = stripHiddenSessionTitlePrefix(unwrapShellLcCommand(label));
   if (!text) return '';
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
@@ -772,7 +772,8 @@ function sanitizeTimelineEntries(timeline) {
   for (const entry of timeline) {
     if (!entry || typeof entry !== 'object') continue;
     if (entry.type !== 'text') {
-      next.push(entry);
+      const normalized = normalizeStoredTimelineEntry(entry);
+      if (normalized) next.push(normalized);
       continue;
     }
     const text = stripHiddenSessionTitlePrefix(entry.text || '');
@@ -933,7 +934,8 @@ export function applyEvent(state = initialState, evt = {}) {
 
   if (evt.event === 'chat.commentary') {
     const run = state.runs[evt.runId] || { text: '', done: false, steps: [], timeline: [] };
-    const delta = evt.payload?.delta || '';
+    const delta = stripHiddenSessionTitlePrefix(evt.payload?.delta || '');
+    if (!delta) return state;
     const commentaryState = applyCommentaryDeltaToRun(run, delta);
     return {
       ...state,

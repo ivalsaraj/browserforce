@@ -620,6 +620,12 @@ function normalizePredictedTitle(value) {
   return sanitizeContextText(value, 120);
 }
 
+function stripHiddenSessionTitlePrefix(value) {
+  const text = String(value || '');
+  if (!text.includes(SESSION_TITLE_MARKER)) return text;
+  return text.replace(/^\s*\[\[BF_SESSION_TITLE\]\]\s*[^\n]*\n{0,2}/, '');
+}
+
 function normalizeBrowserContext(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const tabId = Number.isInteger(raw.tabId) ? raw.tabId : null;
@@ -695,6 +701,31 @@ function sanitizeRunDelta(run, delta) {
   if (!prediction?.active) {
     return { predictedTitle: '', visibleText: text };
   }
+  prediction.buffer += text;
+  const result = consumeSessionTitlePrefix(prediction.buffer, { force: false });
+  if (result.pending) return { predictedTitle: '', visibleText: '' };
+  prediction.active = false;
+  prediction.buffer = '';
+  return result;
+}
+
+function sanitizeRunCommentaryDelta(run, delta) {
+  const text = String(delta || '');
+  const prediction = run?.sessionTitlePrediction;
+  if (!prediction?.active) {
+    return { predictedTitle: '', visibleText: stripHiddenSessionTitlePrefix(text) };
+  }
+
+  const prefixLength = Math.min(text.length, SESSION_TITLE_MARKER.length);
+  const prefixCheck = text.slice(0, prefixLength);
+  const looksLikeMarkerPrefix = Boolean(prediction.buffer)
+    || text.startsWith(SESSION_TITLE_MARKER)
+    || (SESSION_TITLE_MARKER.startsWith(prefixCheck) && text.length < SESSION_TITLE_MARKER.length);
+
+  if (!looksLikeMarkerPrefix) {
+    return { predictedTitle: '', visibleText: stripHiddenSessionTitlePrefix(text) };
+  }
+
   prediction.buffer += text;
   const result = consumeSessionTitlePrefix(prediction.buffer, { force: false });
   if (result.pending) return { predictedTitle: '', visibleText: '' };
@@ -841,7 +872,7 @@ function unwrapShellLcCommand(value) {
 }
 
 function trimStepLabel(label) {
-  const text = unwrapShellLcCommand(label);
+  const text = stripHiddenSessionTitlePrefix(unwrapShellLcCommand(label));
   if (!text) return '';
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
@@ -2184,8 +2215,16 @@ export async function startChatd(opts = {}) {
                 if (evt.event === 'chat.commentary') {
                   const delta = evt.payload?.delta || '';
                   if (delta) {
-                    applyRunCommentaryDelta(active, delta);
-                    broadcast(buildEvent({ event: 'chat.commentary', runId, sessionId, payload: { delta } }));
+                    const sanitized = sanitizeRunCommentaryDelta(active, delta);
+                    await persistPredictedTitle(active, sanitized.predictedTitle);
+                    if (!sanitized.visibleText) return;
+                    applyRunCommentaryDelta(active, sanitized.visibleText);
+                    broadcast(buildEvent({
+                      event: 'chat.commentary',
+                      runId,
+                      sessionId,
+                      payload: { delta: sanitized.visibleText },
+                    }));
                   }
                   return;
                 }

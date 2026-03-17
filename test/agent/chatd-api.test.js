@@ -814,6 +814,79 @@ test('POST /v1/runs persists one keyed reasoning step across chunked commentary 
   }
 });
 
+test('POST /v1/runs strips hidden session title prefix from commentary before persisting aborted runs', async () => {
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, onEvent }) => {
+      setTimeout(() => {
+        onEvent({
+          event: 'chat.commentary',
+          runId,
+          sessionId,
+          payload: {
+            delta: '[[BF_SESSION_TITLE]] Savad 1:1 Email\n\nI’m using `gog`.',
+          },
+        });
+      }, 5);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'New chat' }),
+    }).then((res) => res.json());
+
+    const runBody = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'find savad email' }),
+    }).then((res) => res.json());
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const abortRes = await fetch(`${daemon.baseUrl}/v1/runs/${encodeURIComponent(runBody.runId)}/abort`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${daemon.token}`,
+      },
+    });
+    assert.equal(abortRes.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const sessionBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    assert.equal(sessionBody.predictedTitle, 'Savad 1:1 Email');
+    assert.equal(sessionBody.title, 'Savad 1:1 Email');
+
+    const messagesBody = await fetch(
+      `${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}/messages`,
+      { headers: { authorization: `Bearer ${daemon.token}` } },
+    ).then((res) => res.json());
+    const assistant = (messagesBody.messages || []).at(-1);
+    const timeline = assistant?.timeline || [];
+    const reasoningSteps = timeline.filter((item) => item?.type === 'step' && item?.kind === 'reasoning');
+
+    assert.equal(Array.isArray(timeline), true);
+    assert.equal(timeline.some((item) => String(item?.text || '').includes('[[BF_SESSION_TITLE]]')), false);
+    assert.equal(reasoningSteps.some((item) => String(item?.label || '').includes('[[BF_SESSION_TITLE]]')), false);
+    assert.equal(timeline.some((item) => item?.type === 'text' && /I’m using `gog`\./.test(item?.text || '')), true);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs persists execute tool details for collapsible timeline rows', async () => {
   const daemon = await startChatd({
     port: 0,
@@ -1138,6 +1211,7 @@ test('POST /v1/runs injects hidden first-turn title prompt and persists first-me
     assert.equal(sessionRes.status, 200);
     const sessionBody = await sessionRes.json();
     assert.equal(sessionBody.predictedTitle, 'Sidebar Session Titles');
+    assert.equal(sessionBody.title, 'Sidebar Session Titles');
     assert.equal(sessionBody.firstMessageTab?.tabId, 42);
     assert.equal(sessionBody.firstMessageTab?.title, 'Pricing');
     assert.equal(sessionBody.firstMessageTab?.url, 'https://example.com/pricing');
@@ -1245,6 +1319,7 @@ test('POST /v1/runs does not overwrite predicted title or first-message tab afte
     });
     const sessionBody = await sessionRes.json();
     assert.equal(sessionBody.predictedTitle, 'Sidebar Session Titles');
+    assert.equal(sessionBody.title, 'Sidebar Session Titles');
     assert.equal(sessionBody.firstMessageTab?.tabId, 42);
     assert.equal(sessionBody.firstMessageTab?.title, 'Pricing');
     assert.equal(sessionBody.firstMessageTab?.url, 'https://example.com/pricing');

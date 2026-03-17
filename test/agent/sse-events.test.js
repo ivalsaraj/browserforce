@@ -147,6 +147,23 @@ test('chat.commentary chunks update one active reasoning heading instead of crea
   assert.match(textEntries[0]?.text || '', /give exact steps/i);
 });
 
+test('chat.commentary strips hidden session title prefix from commentary payloads', () => {
+  const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
+  const s2 = applyEvent(s1, {
+    event: 'chat.commentary',
+    runId: 'r1',
+    sessionId: 's1',
+    payload: { delta: '[[BF_SESSION_TITLE]] Pricing Sheet Summary\n\nVisible answer' },
+  });
+
+  const timeline = s2.runs.r1.timeline || [];
+  const reasoningSteps = timeline.filter((item) => item?.type === 'step' && item?.kind === 'reasoning');
+
+  assert.equal(timeline.some((item) => String(item?.text || '').includes('[[BF_SESSION_TITLE]]')), false);
+  assert.equal(reasoningSteps.some((item) => String(item?.label || '').includes('[[BF_SESSION_TITLE]]')), false);
+  assert.equal(timeline.some((item) => item?.type === 'text' && item?.text === 'Visible answer'), true);
+});
+
 test('chat and tool events preserve inline timeline order', () => {
   const s1 = applyEvent(baseState, { event: 'run.started', runId: 'r1', sessionId: 's1', payload: {} });
   const s2 = applyEvent(s1, { event: 'chat.delta', runId: 'r1', sessionId: 's1', payload: { delta: 'First chunk. ' } });

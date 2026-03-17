@@ -508,7 +508,16 @@ function registerExecuteTool(skillAppendix = '') {
       ]);
       const ctx = getContext();
       const pages = ctx.pages();
-      const page = pages[0] || null;
+      let page = pages[0] || null;
+
+      if (
+        !page &&
+        browserforceRestrictions.mode !== 'manual' &&
+        !browserforceRestrictions.noNewTabs
+      ) {
+        page = await ctx.newPage();
+        userState.page = page;
+      }
 
       if (page) setupConsoleCapture(page);
       const execCtx = buildExecContext(page, ctx, userState, {

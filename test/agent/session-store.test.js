@@ -221,6 +221,7 @@ test('updateSession persists predicted title and first-message tab metadata', as
   });
 
   assert.equal(updated?.predictedTitle, 'Sidebar Session Titles');
+  assert.equal(updated?.title, 'Sidebar Session Titles');
   assert.equal(updated?.firstMessageTab?.tabId, 42);
   assert.equal(updated?.firstMessageTab?.title, 'Pricing');
   assert.equal(updated?.firstMessageTab?.url, 'https://example.com/pricing');
@@ -229,10 +230,25 @@ test('updateSession persists predicted title and first-message tab metadata', as
   const rows = await listSessions({ limit: 10, storageRoot });
   const row = rows.find((item) => item.sessionId === created.sessionId);
   assert.equal(row?.predictedTitle, 'Sidebar Session Titles');
+  assert.equal(row?.title, 'Sidebar Session Titles');
   assert.equal(row?.firstMessageTab?.tabId, 42);
   assert.equal(row?.firstMessageTab?.title, 'Pricing');
   assert.equal(row?.firstMessageTab?.url, 'https://example.com/pricing');
   assert.equal(row?.firstMessageTab?.favIconUrl, 'https://example.com/favicon.ico');
+});
+
+test('updateSession preserves manual title when predicted title arrives later', async () => {
+  const created = await createSession({ title: 'Manual Title', storageRoot });
+  const updated = await updateSession({
+    sessionId: created.sessionId,
+    patch: {
+      predictedTitle: 'Predicted Title',
+    },
+    storageRoot,
+  });
+
+  assert.equal(updated?.title, 'Manual Title');
+  assert.equal(updated?.predictedTitle, 'Predicted Title');
 });
 
 test('listSessions fails fast on corrupted index metadata', async () => {

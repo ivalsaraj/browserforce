@@ -345,6 +345,30 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('execute auto-creates a working page when auto mode starts empty', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes("browserforceRestrictions.mode !== 'manual'"),
+      'execute should skip auto page creation in manual mode'
+    );
+    assert.ok(
+      source.includes('!browserforceRestrictions.noNewTabs'),
+      'execute should skip auto page creation when noNewTabs is enabled'
+    );
+    assert.ok(
+      source.includes('page = await ctx.newPage()'),
+      'execute should bootstrap a new page when the browser context is empty'
+    );
+    assert.ok(
+      source.includes('userState.page = page'),
+      'execute should persist the auto-created page as state.page'
+    );
+  });
+
   it('reset clears cached preferences', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
