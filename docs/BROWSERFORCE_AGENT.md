@@ -28,7 +28,9 @@ browserforce agent status
 
 3. In the extension popup, click `Open BrowserForce Agent`.
 
-4. Send a message in the side panel.
+4. Attach the current tab only when you want the agent to control that tab.
+
+5. Send a message in the side panel.
 
 Stop daemon when needed:
 
@@ -42,6 +44,16 @@ browserforce agent stop
 2. Relay validates extension origin/ID and returns `{ port, token }` from `~/.browserforce/chatd-url.json`.
 3. Side panel calls chatd directly on `127.0.0.1:<port>` with `Authorization: Bearer <token>`.
 4. Chat events stream over SSE from `/v1/events`.
+
+## Current Tab Attachment
+
+- Opening the BrowserForce side panel does not auto-attach the active tab.
+- Sending a message does not auto-attach the active tab.
+- Use `Attach current tab` only when you want the agent to drive that tab through Chrome DevTools.
+- This keeps fragile pages from being debugger-attached implicitly and reduces surprise automation on the tab you are viewing.
+- When you ask the agent to `check`, `inspect`, `look at`, `review`, or `read` an attached page, it should start with `context.pages()` and reuse the matching existing tab.
+- In that flow, it should not call `context.newPage()` or `page.goto()` just to find a page that is already open.
+- If the page you want is not present in `context.pages()`, the agent should tell you instead of opening a fresh copy.
 
 ## Session Model
 

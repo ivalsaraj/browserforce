@@ -624,7 +624,7 @@ export function buildExecContext(
   const activePage = () => {
     if (userState.page && !userState.page.isClosed()) return userState.page;
     if (defaultPage && !defaultPage.isClosed()) return defaultPage;
-    throw new Error('No active page. Create one first: state.page = await context.newPage()');
+    throw new Error("No active page. Reuse an existing one first: state.page = context.pages()[0]. If there isn't one, create one with: state.page = await context.newPage()");
   };
 
   const snapshot = async ({ selector, search, showDiffSinceLastCall = true } = {}) => {

@@ -71,13 +71,61 @@ function ensureAllPagesCapture() {
 
 let browser = null;
 const CONNECT_RETRY_TIMEOUT_MS = 30000;
-const BACKGROUND_CONNECT_RETRY_INTERVAL_MS = 1500;
+const DEFAULT_IDLE_BROWSER_DISCONNECT_MS = 15000;
+const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
+  process.env.BF_MCP_IDLE_DISCONNECT_MS,
+  DEFAULT_IDLE_BROWSER_DISCONNECT_MS,
+);
 let browserConnectPromise = null;
-let backgroundConnectLoopStarted = false;
-let lastBackgroundConnectError = null;
+let idleBrowserDisconnectTimer = null;
+let activeBrowserOperations = 0;
 
-function sleep(ms) {
-  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+function resolveNonNegativeInt(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+function clearIdleBrowserDisconnectTimer() {
+  if (!idleBrowserDisconnectTimer) return;
+  globalThis.clearTimeout(idleBrowserDisconnectTimer);
+  idleBrowserDisconnectTimer = null;
+}
+
+async function disconnectIdleBrowser() {
+  if (!browser?.isConnected() || activeBrowserOperations > 0) return;
+  try {
+    await browser.close();
+  } catch {
+    // The connection may already be gone.
+  }
+}
+
+function scheduleIdleBrowserDisconnect() {
+  clearIdleBrowserDisconnectTimer();
+  if (IDLE_BROWSER_DISCONNECT_MS <= 0) return;
+  if (!browser?.isConnected() || activeBrowserOperations > 0) return;
+
+  idleBrowserDisconnectTimer = globalThis.setTimeout(() => {
+    idleBrowserDisconnectTimer = null;
+    disconnectIdleBrowser().catch(() => {});
+  }, IDLE_BROWSER_DISCONNECT_MS);
+
+  if (typeof idleBrowserDisconnectTimer?.unref === 'function') {
+    idleBrowserDisconnectTimer.unref();
+  }
+}
+
+function beginBrowserOperation() {
+  activeBrowserOperations += 1;
+  clearIdleBrowserDisconnectTimer();
+}
+
+function endBrowserOperation() {
+  activeBrowserOperations = Math.max(0, activeBrowserOperations - 1);
+  scheduleIdleBrowserDisconnect();
 }
 
 function withClientLabel(cdpUrl) {
@@ -96,6 +144,7 @@ function withClientLabel(cdpUrl) {
 }
 
 async function ensureBrowser() {
+  clearIdleBrowserDisconnectTimer();
   if (browser?.isConnected()) return;
   if (browserConnectPromise) {
     await browserConnectPromise;
@@ -115,10 +164,12 @@ async function ensureBrowser() {
     });
     browser = nextBrowser;
     browser.on('disconnected', () => {
+      clearIdleBrowserDisconnectTimer();
       browser = null;
       contextListenerAttached = false;
       consoleLogs.clear();
     });
+    process.stderr.write('[bf-mcp] Connected to relay\n');
 
     try {
       const ctx = browser.contexts()[0];
@@ -137,42 +188,6 @@ async function ensureBrowser() {
   } finally {
     browserConnectPromise = null;
   }
-}
-
-function startBackgroundConnectionLoop() {
-  if (backgroundConnectLoopStarted) return;
-  backgroundConnectLoopStarted = true;
-
-  (async () => {
-    while (true) {
-      if (browser?.isConnected()) {
-        lastBackgroundConnectError = null;
-        await sleep(BACKGROUND_CONNECT_RETRY_INTERVAL_MS);
-        continue;
-      }
-
-      try {
-        await ensureBrowser();
-        if (lastBackgroundConnectError !== null) {
-          process.stderr.write('[bf-mcp] Relay slot available; connected\n');
-          lastBackgroundConnectError = null;
-        } else {
-          process.stderr.write('[bf-mcp] Connected to relay\n');
-        }
-      } catch (err) {
-        const message = err?.message || String(err);
-        if (message !== lastBackgroundConnectError) {
-          process.stderr.write(`[bf-mcp] Waiting for relay/browser: ${message}\n`);
-          process.stderr.write('[bf-mcp] MCP is running; tools will connect when slot is available\n');
-          lastBackgroundConnectError = message;
-        }
-      }
-
-      await sleep(BACKGROUND_CONNECT_RETRY_INTERVAL_MS);
-    }
-  })().catch((err) => {
-    process.stderr.write(`[bf-mcp] Background connect loop error: ${err?.message || String(err)}\n`);
-  });
 }
 
 function getContext() {
@@ -289,7 +304,7 @@ This is their actual browser with real cookies, sessions, and tabs — not a san
 ═══ AVAILABLE SCOPE ═══
 
 Variables:
-  page        Default page (first tab in context — shared, avoid navigating it)
+  page        Default page (first currently open tab, if any — use only as a fallback)
   context     Browser context — access all pages via context.pages()
   state       Persistent object across calls (cleared on reset). Store your working page here.
   browserforceSettings Session defaults loaded once per MCP session (refresh on reset).
@@ -331,9 +346,18 @@ Plugin workflow (metadata-first):
 
 ═══ FIRST CALL — PAGE SETUP ═══
 
-IMPORTANT: Do NOT navigate the user's existing tabs. Always create or reuse a dedicated tab.
+IMPORTANT: ALWAYS inspect existing attached/open tabs first.
+Only create or reuse a dedicated tab when the user explicitly asks to open/navigate to a URL,
+or when there are no suitable existing pages and session restrictions allow a new tab.
 
-On your first call:
+When the user says 'check', 'inspect', 'look at', 'review', or 'read':
+  1) Start with: const pages = context.pages();
+  2) Find the target tab by current URL/title/content — do not navigate to discover it.
+  3) Set state.page = the matching existing page.
+  4) NEVER call context.newPage() or page.goto() just to find a page that is already open.
+  5) If the target page isn't present in context.pages(), report that clearly instead of opening it.
+
+When you need a dedicated work tab for an explicit open/navigate task:
   state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
   await state.page.goto('https://example.com');
   await waitForPageLoad();
@@ -342,7 +366,10 @@ On your first call:
 After setup, use state.page for all subsequent operations.
 If state.page was closed:
   if (!state.page || state.page.isClosed()) {
-    state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
+    state.page = context.pages().find(p => !p.isClosed()) || null;
+    if (!state.page && browserforceRestrictions.mode !== 'manual' && !browserforceRestrictions.noNewTabs) {
+      state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
+    }
   }
 
 ═══ URL DISCOVERY (NO GUESSING) ═══
@@ -373,7 +400,7 @@ Read browserforceSettings + browserforceRestrictions before planning execution.
 Empty tabs/targets handling:
 - If tabs/targets are empty, treat it as normal startup state and create/reuse a dedicated tab with context.newPage().
 - Do not ask the user to click Attach/Share by default.
-- Ask for manual Attach/Share only when mode=manual or noNewTabs=true, or when the user explicitly asks to use their current tab.
+- Ask for manual Attach/Share only when mode=manual or noNewTabs=true, or when the user explicitly asks to use their current tab and it is not available in context.pages().
 
 ═══ CORE LOOP — OBSERVE → ACT → OBSERVE ═══
 
@@ -460,7 +487,7 @@ Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 
 ═══ HARD RULES ═══
 
-✗ Don't navigate the user's existing tabs
+✗ Don't navigate an already-open page just to locate or identify it
 ✗ Don't screenshot to read text; use snapshot
 ✗ Don't use console.log()/console.error() in execute code; use return values, snapshot(), or getLogs() instead
   If console.* was already used, inspect it with getExecConsoleLogs({ count }) instead of re-logging.
@@ -474,7 +501,7 @@ Do not switch to raw HTTP/curl expecting fully rendered DOM state.
 
 ═══ ERROR RECOVERY ═══
 
-If page closed:      recreate state.page with context.newPage() (or reuse about:blank)
+If page closed:      first pick another page from context.pages(); create a new tab only if none exist and policy allows it
 If navigation fails: check current URL, then snapshot() to re-ground state
 If element missing:  use snapshot({ search: /.../ }) with tighter patterns
 If connection lost:  call reset, then reinitialize state.page
@@ -500,46 +527,50 @@ function registerExecuteTool(skillAppendix = '') {
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
     },
     async ({ code, timeout = 30000 }) => {
-      await ensureBrowser();
-      ensureAllPagesCapture();
-      const [agentPreferences, browserforceRestrictions] = await Promise.all([
-        getAgentPreferencesForSession(),
-        getBrowserforceRestrictionsForSession(),
-      ]);
-      const ctx = getContext();
-      const pages = ctx.pages();
-      let page = pages[0] || null;
-
-      if (
-        !page &&
-        browserforceRestrictions.mode !== 'manual' &&
-        !browserforceRestrictions.noNewTabs
-      ) {
-        page = await ctx.newPage();
-        userState.page = page;
-      }
-
-      if (page) setupConsoleCapture(page);
-      const execCtx = buildExecContext(page, ctx, userState, {
-        consoleLogs, setupConsoleCapture,
-      }, pluginHelpers, agentPreferences, browserforceRestrictions, pluginSkillRuntime);
       try {
-        const result = await runCode(code, execCtx, timeout);
-        const formatted = formatResult(result);
-        const content = Array.isArray(formatted) ? [...formatted] : [formatted];
-        // Append update notice as a separate content item (once only per session)
-        if (pendingUpdate && !updateNoticeSent && content[0]?.type === 'text') {
-          updateNoticeSent = true;
-          content.push({ type: 'text', text: `[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]` });
+        beginBrowserOperation();
+        await ensureBrowser();
+        ensureAllPagesCapture();
+        const [agentPreferences, browserforceRestrictions] = await Promise.all([
+          getAgentPreferencesForSession(),
+          getBrowserforceRestrictionsForSession(),
+        ]);
+        const ctx = getContext();
+        const pages = ctx.pages();
+        let page = pages[0] || null;
+
+        if (
+          !page &&
+          browserforceRestrictions.mode !== 'manual' &&
+          !browserforceRestrictions.noNewTabs
+        ) {
+          page = await ctx.newPage();
+          userState.page = page;
         }
-        return { content };
-      } catch (err) {
-        const isTimeout = err instanceof CodeExecutionTimeoutError;
-        const hint = isTimeout ? '' : '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
-        return {
-          content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
-          isError: true,
-        };
+
+        if (page) setupConsoleCapture(page);
+        const execCtx = buildExecContext(page, ctx, userState, {
+          consoleLogs, setupConsoleCapture,
+        }, pluginHelpers, agentPreferences, browserforceRestrictions, pluginSkillRuntime);
+        try {
+          const result = await runCode(code, execCtx, timeout);
+          const formatted = formatResult(result);
+          const content = Array.isArray(formatted) ? [...formatted] : [formatted];
+          if (pendingUpdate && !updateNoticeSent && content[0]?.type === 'text') {
+            updateNoticeSent = true;
+            content.push({ type: 'text', text: `[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]` });
+          }
+          return { content };
+        } catch (err) {
+          const isTimeout = err instanceof CodeExecutionTimeoutError;
+          const hint = isTimeout ? '' : '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
+          return {
+            content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
+            isError: true,
+          };
+        }
+      } finally {
+        endBrowserOperation();
       }
     }
   );
@@ -550,16 +581,18 @@ server.tool(
   'Reconnects CDP and reinitializes browser/page bindings. Use when MCP stops responding, connection errors occur, pages/context were closed, or state is inconsistent. Reset clears persistent state; reinitialize state.page after calling it.',
   {},
   async () => {
-    if (browser) {
-      try { await browser.close(); } catch { /* connection may already be dead */ }
-    }
-    browser = null;
-    userState = {};
-    cachedAgentPreferences = null;
-    cachedBrowserforceRestrictions = null;
-    contextListenerAttached = false;
-    consoleLogs.clear();
     try {
+      beginBrowserOperation();
+      clearIdleBrowserDisconnectTimer();
+      if (browser) {
+        try { await browser.close(); } catch { /* connection may already be dead */ }
+      }
+      browser = null;
+      userState = {};
+      cachedAgentPreferences = null;
+      cachedBrowserforceRestrictions = null;
+      contextListenerAttached = false;
+      consoleLogs.clear();
       await ensureBrowser();
       ensureAllPagesCapture();
       const pages = getPages();
@@ -571,6 +604,8 @@ server.tool(
         content: [{ type: 'text', text: `Reset failed: ${err.message}` }],
         isError: true,
       };
+    } finally {
+      endBrowserOperation();
     }
   }
 );
@@ -602,7 +637,6 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   process.stderr.write('[bf-mcp] MCP server running\n');
-  startBackgroundConnectionLoop();
 }
 
 main().catch((err) => {

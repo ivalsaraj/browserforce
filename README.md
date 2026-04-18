@@ -12,6 +12,8 @@ Give AI agents controlled access to the browser you already use.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
+When you ask an agent to inspect an attached page, BrowserForce is intended to reuse that existing tab via `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no page exists yet.
+
 ## Why BrowserForce?
 
 
@@ -827,6 +829,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
 | **Parallel visibility** | `foreground-tab` keeps new tabs visible in the current window             |
+| **Tab grouping**        | Attached tabs stay grouped as `browserforce` inside their own Chrome window |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
@@ -959,6 +962,8 @@ BF_CLIENT_MODE=single-active browserforce serve
 In `multi-client` mode (default), slot arbitration is disabled. In `single-active` mode, the relay enforces one active client slot and a second `/cdp` connection receives HTTP `409 Conflict` (busy).
 
 **MCP standby polling (single-active mode):** if MCP sees a busy/`409` connect error, it enters standby and polls `GET /client-slot` until `busy: false` (about every 200-400ms, up to 30s), then retries connect.
+
+**MCP relay usage:** `browserforce mcp` now connects lazily when a tool call actually needs the browser, and drops its relay/CDP connection after an idle period. This keeps installed-but-idle MCP clients from inflating the relay client count. Override the idle timeout with `BF_MCP_IDLE_DISCONNECT_MS` (`0` disables auto-disconnect).
 
 **Operational non-goals:** canonical list is maintained in [AGENTS.md](AGENTS.md#operational-non-goals).
 

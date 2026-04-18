@@ -1,3 +1,5 @@
+import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
+
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
 
@@ -51,6 +53,8 @@ let restrictionExplained = false;
   // Tab lifecycle
   chrome.tabs.onRemoved.addListener(onTabRemoved);
   chrome.tabs.onUpdated.addListener(onTabUpdated);
+  chrome.tabs.onAttached.addListener(onTabAttachedToWindow);
+  chrome.tabs.onDetached.addListener(onTabDetachedFromWindow);
 
   // Alarm-based fallback: wakes the service worker if it was killed
   chrome.alarms.create('bf-reconnect', { periodInMinutes: 0.5 });
@@ -599,6 +603,16 @@ function onTabUpdated(tabId, changeInfo) {
   }
 }
 
+function onTabAttachedToWindow(tabId) {
+  if (!attachedTabs.has(tabId)) return;
+  queueSyncTabGroup();
+}
+
+function onTabDetachedFromWindow(tabId) {
+  if (!attachedTabs.has(tabId)) return;
+  queueSyncTabGroup();
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function cleanupTab(tabId) {
@@ -687,58 +701,54 @@ async function syncTabGroup() {
   try {
     const connectedTabIds = Array.from(attachedTabs.keys());
     const existingGroups = await chrome.tabGroups.query({ title: 'browserforce' });
-
-    if (connectedTabIds.length === 0) {
-      for (const group of existingGroups) {
-        const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
-        const tabIdsToUngroup = tabsInGroup.map((t) => t.id).filter((id) => id !== undefined);
-        if (tabIdsToUngroup.length > 0) {
-          await chrome.tabs.ungroup(tabIdsToUngroup);
-        }
-      }
-      return;
-    }
-
-    // Consolidate duplicate groups into one
-    let groupId = existingGroups[0]?.id;
-    if (existingGroups.length > 1) {
-      const [keep, ...duplicates] = existingGroups;
-      groupId = keep.id;
-      for (const group of duplicates) {
-        const tabsInDupe = await chrome.tabs.query({ groupId: group.id });
-        const tabIdsToUngroup = tabsInDupe.map((t) => t.id).filter((id) => id !== undefined);
-        if (tabIdsToUngroup.length > 0) {
-          await chrome.tabs.ungroup(tabIdsToUngroup);
-        }
-      }
-    }
-
     const allTabs = await chrome.tabs.query({});
-    const tabsInGroup = allTabs.filter((t) => t.groupId === groupId && t.id !== undefined);
-    const tabIdsInGroup = new Set(tabsInGroup.map((t) => t.id));
+    const plan = buildBrowserforceTabGroupPlan({
+      attachedTabIds: connectedTabIds,
+      allTabs,
+      existingGroups,
+    });
 
-    const tabsToAdd = connectedTabIds.filter((id) => !tabIdsInGroup.has(id));
-    const tabsToRemove = Array.from(tabIdsInGroup).filter((id) => !connectedTabIds.includes(id));
-
-    if (tabsToRemove.length > 0) {
+    for (const group of plan.groupsToClear) {
+      if (group.tabIdsToUngroup.length === 0) continue;
       try {
-        await chrome.tabs.ungroup(tabsToRemove);
+        await chrome.tabs.ungroup(group.tabIdsToUngroup);
       } catch {
         // Tab may have been closed already
       }
     }
 
-    if (tabsToAdd.length > 0) {
-      if (groupId === undefined) {
-        groupId = await chrome.tabs.group({ tabIds: tabsToAdd });
-      } else {
-        await chrome.tabs.group({ tabIds: tabsToAdd, groupId });
+    for (const windowPlan of plan.windows) {
+      if (windowPlan.duplicateTabIdsToUngroup.length > 0) {
+        try {
+          await chrome.tabs.ungroup(windowPlan.duplicateTabIdsToUngroup);
+        } catch {
+          // Tab may have been closed already
+        }
       }
-    }
 
-    // Always ensure group title/color are correct
-    if (groupId !== undefined) {
-      await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
+      if (windowPlan.tabsToRemove.length > 0) {
+        try {
+          await chrome.tabs.ungroup(windowPlan.tabsToRemove);
+        } catch {
+          // Tab may have been closed already
+        }
+      }
+
+      let groupId = windowPlan.createNewGroup ? null : windowPlan.existingGroupId;
+      if (windowPlan.tabsToAdd.length > 0) {
+        if (groupId == null) {
+          groupId = await chrome.tabs.group({
+            tabIds: windowPlan.tabsToAdd,
+            createProperties: { windowId: windowPlan.windowId },
+          });
+        } else {
+          await chrome.tabs.group({ tabIds: windowPlan.tabsToAdd, groupId });
+        }
+      }
+
+      if (groupId != null) {
+        await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
+      }
     }
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);

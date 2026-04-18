@@ -18,3 +18,12 @@ test('background handles updateRelayUrl message and triggers reconnect', () => {
   assert.match(backgroundJs, /const previousRelayUrl = currentRelayUrl/);
   assert.match(backgroundJs, /currentRelayUrl = previousRelayUrl/);
 });
+
+test('background reconciles tab groups when attached tabs move between windows', () => {
+  assert.match(backgroundJs, /chrome\.tabs\.onAttached\.addListener\(onTabAttachedToWindow\)/);
+  assert.match(backgroundJs, /chrome\.tabs\.onDetached\.addListener\(onTabDetachedFromWindow\)/);
+  assert.match(backgroundJs, /function onTabAttachedToWindow\(tabId\)/);
+  assert.match(backgroundJs, /function onTabDetachedFromWindow\(tabId\)/);
+  assert.match(backgroundJs, /if \(!attachedTabs\.has\(tabId\)\) return;/);
+  assert.match(backgroundJs, /queueSyncTabGroup\(\);/);
+});

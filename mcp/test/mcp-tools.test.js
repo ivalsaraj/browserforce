@@ -222,6 +222,37 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('execute prompt prefers existing attached tabs before creating new ones', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+
+    assert.ok(
+      promptBlock.includes('ALWAYS inspect existing attached/open tabs first'),
+      'should tell the agent to inspect existing tabs before creating or navigating'
+    );
+    assert.ok(
+      promptBlock.includes("When the user says 'check', 'inspect', 'look at', 'review', or 'read'"),
+      'should treat page inspection requests as existing-tab tasks'
+    );
+    assert.ok(
+      promptBlock.includes('NEVER call context.newPage() or page.goto() just to find a page that is already open'),
+      'should forbid opening tabs to locate an already open page'
+    );
+    assert.ok(
+      promptBlock.includes("If the target page isn't present in context.pages(), report that clearly instead of opening it"),
+      'should require reporting missing targets instead of silently opening them'
+    );
+    assert.ok(
+      !promptBlock.includes('Always create or reuse a dedicated tab'),
+      'should remove the old dedicated-tab-first instruction'
+    );
+  });
+
   it('execute tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
@@ -369,6 +400,22 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('missing active page hint prefers existing pages before opening a new tab', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('No active page. Reuse an existing one first: state.page = context.pages()[0]'),
+      'missing-page hint should prefer context.pages() before context.newPage()'
+    );
+    assert.ok(
+      source.includes("If there isn't one, create one with: state.page = await context.newPage()"),
+      'missing-page hint should still explain how to create a tab when needed'
+    );
+  });
+
   it('reset clears cached preferences', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
@@ -385,6 +432,50 @@ describe('Tool Definitions', () => {
     assert.ok(
       resetBlock.includes('cachedBrowserforceRestrictions = null'),
       'reset should clear cached browserforce restrictions'
+    );
+  });
+
+  it('MCP server no longer eagerly opens a relay connection on startup', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('MCP server running'),
+      'startup log should remain present'
+    );
+    assert.ok(
+      !source.includes('startBackgroundConnectionLoop();'),
+      'server startup should not launch an eager background CDP connect loop'
+    );
+    assert.ok(
+      !source.includes('BACKGROUND_CONNECT_RETRY_INTERVAL_MS'),
+      'background eager-connect interval should be removed'
+    );
+  });
+
+  it('MCP server includes idle disconnect handling for browser connections', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('BF_MCP_IDLE_DISCONNECT_MS'),
+      'idle disconnect timeout should be configurable'
+    );
+    assert.ok(
+      source.includes('scheduleIdleBrowserDisconnect'),
+      'should define idle browser disconnect scheduler'
+    );
+    assert.ok(
+      source.includes('clearIdleBrowserDisconnectTimer'),
+      'should clear pending idle disconnect timers when activity resumes'
+    );
+    assert.ok(
+      source.includes('activeBrowserOperations'),
+      'should track in-flight browser operations before disconnecting'
     );
   });
 });

@@ -69,6 +69,7 @@ Popup settings include:
 Current behavior lock:
 
 - Agent-created tabs stay visible in the current window (`foreground-tab` behavior).
+- Attached tabs stay in a `browserforce` group within their own Chrome window.
 - No new windows are created for parallel workers.
 - `rotate-visible` is treated as `foreground-tab` in this release.
 
