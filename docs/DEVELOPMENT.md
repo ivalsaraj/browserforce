@@ -141,3 +141,7 @@ node --test test/agent/codex-runner.test.js
 node --test test/agent/session-store.test.js
 node --test test/agent/agent-panel-contract.test.js test/agent/agent-panel-send-contract.test.js
 ```
+
+## Shared Agent/Panel Normalizers
+
+The agent daemon and extension side panel both normalize run timeline events. Keep shared, browser-safe helpers in `extension/agent-timeline-labels.js` and plugin helper metadata normalization in `extension/plugin-helper-normalization.js`. The daemon can import these modules directly because the published package includes `extension/`.

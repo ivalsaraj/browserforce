@@ -1,5 +1,9 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
+  normalizePluginHelperNames,
+  normalizePluginHelperPrefix,
+} from './plugin-helper-normalization.js';
+import {
   assignSessionRunId,
   buildDisplayStreamEvents,
   buildGoogleSheetsRangeUrl,
@@ -31,8 +35,6 @@ const STREAM_CHUNK_LOOKAHEAD_CHARS = 14;
 const STREAM_CHUNK_INTERVAL_MS = 26;
 const COPY_CODE_FEEDBACK_MS = 1400;
 const MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024;
-const PLUGIN_HELPER_CALL_RE = /^[A-Za-z_$][\w$]{0,127}$/;
-const PLUGIN_HELPER_PREFIX_RE = /^[a-z][a-z0-9]{1,31}$/;
 
 const state = {
   value: initialState,
@@ -719,33 +721,6 @@ function normalizeEnabledPlugins(input) {
     normalized.push(value);
   }
   return normalized;
-}
-
-function normalizePluginHelperName(value) {
-  const text = String(value || '').trim();
-  if (!text || !PLUGIN_HELPER_CALL_RE.test(text)) return '';
-  return text;
-}
-
-function normalizePluginHelperNames(input) {
-  const source = Array.isArray(input) ? input : [];
-  const seen = new Set();
-  const normalized = [];
-  for (const rawValue of source) {
-    const helperName = normalizePluginHelperName(rawValue);
-    if (!helperName) continue;
-    const key = helperName.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    normalized.push(helperName);
-  }
-  return normalized;
-}
-
-function normalizePluginHelperPrefix(value) {
-  const text = String(value || '').trim().toLowerCase();
-  if (!text || !PLUGIN_HELPER_PREFIX_RE.test(text)) return '';
-  return text;
 }
 
 function activeSessionEnabledPlugins() {
