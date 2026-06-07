@@ -435,7 +435,7 @@ describe('Tool Definitions', () => {
     );
   });
 
-  it('MCP server no longer eagerly opens a relay connection on startup', () => {
+  it('MCP server starts the relay on startup without opening a browser connection', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -445,6 +445,16 @@ describe('Tool Definitions', () => {
       source.includes('MCP server running'),
       'startup log should remain present'
     );
+    const mainStart = source.indexOf('async function main()');
+    const connectIdx = source.indexOf('await server.connect(transport)');
+    const ensureIdx = source.indexOf('await ensureRelay()', mainStart);
+    assert.ok(mainStart !== -1, 'main function should exist');
+    assert.ok(ensureIdx !== -1, 'main should ensure relay during MCP startup');
+    assert.ok(connectIdx !== -1, 'server connect should remain present');
+    assert.ok(
+      ensureIdx < connectIdx,
+      'relay should be ensured before MCP reports as connected'
+    );
     assert.ok(
       !source.includes('startBackgroundConnectionLoop();'),
       'server startup should not launch an eager background CDP connect loop'
@@ -452,6 +462,11 @@ describe('Tool Definitions', () => {
     assert.ok(
       !source.includes('BACKGROUND_CONNECT_RETRY_INTERVAL_MS'),
       'background eager-connect interval should be removed'
+    );
+    const mainBlock = source.slice(mainStart, source.indexOf('main().catch', mainStart));
+    assert.ok(
+      !mainBlock.includes('ensureBrowser()'),
+      'startup should not open a Playwright/CDP browser connection'
     );
   });
 

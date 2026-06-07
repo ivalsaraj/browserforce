@@ -351,6 +351,10 @@ args = ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp
 startup_timeout_sec = 45
 ```
 
+The MCP process starts or verifies the local relay during startup. You do not need
+to run `browserforce serve` separately for the default setup; keep the Chrome
+extension pointed at the same relay URL.
+
 </details>
 
 
@@ -886,19 +890,13 @@ If that port is already in use, you can see:
 
 Switch all components to the same new port (example: `19333`):
 
-1. Start relay on the new port:
-
-```bash
-RELAY_PORT=19333 browserforce serve
-```
-
-2. In extension popup, set relay URL to:
+1. In extension popup, set relay URL to:
 
 ```text
 ws://127.0.0.1:19333/extension
 ```
 
-3. Start MCP on the same port:
+2. Start MCP on the same port. MCP will start or verify the relay on that port:
 
 **Cursor** (`~/.cursor/mcp.json`)
 ```json
@@ -1053,7 +1051,7 @@ If `busy: true`, either close the current active MCP/CDP session, or remove sing
 
 This is most common when you intentionally run `single-active` mode and a second MCP session starts while the slot is busy.
 
-Why: the MCP process currently attempts browser connection during startup, and Codex's default MCP startup timeout can be shorter than BrowserForce's connect retry window.
+Why: the MCP process starts or verifies the relay during startup, and Codex's default MCP startup timeout can be shorter than a cold local relay start.
 
 Fix in Codex config (`~/.codex/config.toml`):
 
@@ -1064,15 +1062,9 @@ args = ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp
 startup_timeout_sec = 45
 ```
 
-Recommended reliable workflow:
-
-```bash
-# Terminal A: run one shared relay
-npx -y browserforce@latest serve
-
-# MCP clients (Codex/Cursor/Claude): run mcp only
-npx -y browserforce@latest mcp
-```
+Recommended reliable workflow: configure MCP with the desired `RELAY_PORT` and
+let `browserforce mcp` own relay startup. Run `browserforce serve` manually only
+when you intentionally want a separately managed shared relay process.
 
 If startup still times out, verify the relay endpoint and slot state:
 

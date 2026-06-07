@@ -10,12 +10,14 @@ This guide is for contributors who need a fast local dev/debug loop.
 pnpm install
 ```
 
-2. Run relay and MCP from this repo:
+2. Run MCP from this repo. MCP starts or verifies the relay automatically:
 
 ```bash
-pnpm relay
 pnpm mcp
 ```
+
+Run `pnpm relay` separately only when you intentionally want to debug the relay
+process in its own terminal.
 
 3. Load extension from this repo in Chrome (`chrome://extensions` -> Load unpacked -> `extension/`).
 
@@ -29,19 +31,13 @@ ws://127.0.0.1:19222/extension
 
 Use this when another BrowserForce instance is already running or you want isolated debugging.
 
-1. Start relay on a non-default port:
-
-```bash
-RELAY_PORT=19333 pnpm relay
-```
-
-2. In extension popup, set Relay URL to:
+1. In extension popup, set Relay URL to:
 
 ```text
 ws://127.0.0.1:19333/extension
 ```
 
-3. Make MCP use the same relay port.
+2. Make MCP use the same relay port. MCP starts or verifies the relay on that port.
 
 If your MCP client is configured with `npx browserforce@latest mcp`, inject `RELAY_PORT=19333` in the MCP command.
 

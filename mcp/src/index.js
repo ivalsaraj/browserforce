@@ -630,6 +630,7 @@ async function initPlugins() {
 async function main() {
   await initPlugins();
   registerExecuteTool(buildPluginSkillAppendix(plugins));
+  await ensureRelay();
 
   // Fire update check in background — result stored in pendingUpdate for execute handler
   checkForUpdate().then(info => { pendingUpdate = info; }).catch(() => {});
