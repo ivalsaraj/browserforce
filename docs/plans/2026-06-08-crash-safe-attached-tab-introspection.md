@@ -653,6 +653,17 @@ it('execute and reset are the only MCP tool handlers allowed to reach CDP startu
   }
   assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
 });
+
+it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
+  const source = readFileSync(
+    join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+    'utf8'
+  );
+  const ensureBrowserIdx = source.indexOf('async function ensureBrowser');
+  const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('function getContext', ensureBrowserIdx));
+  assert.doesNotMatch(ensureBrowserBlock, /assertExtensionConnected/);
+  assert.doesNotMatch(ensureBrowserBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
+});
 ```
 
 **Step 2: Add behavior test for predicate**
@@ -706,6 +717,18 @@ test('isAttachedPageIntent defaults to inspect-safe behavior', () => {
   assert.equal(isAttachedPageIntent('auto'), true);
   assert.equal(isAttachedPageIntent('open'), false);
 });
+
+test('assertOpenIntentAllowed blocks open intent when restrictions disable new tabs', () => {
+  assert.throws(
+    () => assertOpenIntentAllowed({ mode: 'manual', noNewTabs: false }),
+    /New tabs are disabled/,
+  );
+  assert.throws(
+    () => assertOpenIntentAllowed({ mode: 'auto', noNewTabs: true }),
+    /New tabs are disabled/,
+  );
+  assert.doesNotThrow(() => assertOpenIntentAllowed({ mode: 'auto', noNewTabs: false }));
+});
 ```
 
 **Step 3: Implement minimal predicate**
@@ -715,6 +738,18 @@ Add in `exec-engine.js`:
 ```js
 export function isAttachedPageIntent(intent) {
   return intent !== 'open';
+}
+
+export function assertOpenIntentAllowed(restrictions) {
+  if (restrictions?.mode === 'manual' || restrictions?.noNewTabs) {
+    throw new BrowserForceMcpError(
+      'New tabs are disabled in this BrowserForce session.',
+      {
+        code: 'BF_NEW_TABS_DISABLED',
+        details: { restrictions: restrictions || {}, intent: 'open' },
+      },
+    );
+  }
 }
 
 export function shouldCreateImplicitStartupPage(restrictions) {
@@ -752,7 +787,11 @@ async function preflightAttachedPageBeforeCdp({ intent = 'inspect' } = {}) {
   const baseUrl = getRelayHttpUrl();
   const restrictions = await fetchBrowserforceRestrictionsForSession({ forceRefresh: true });
   const extensionStatus = await getExtensionStatus({ baseUrl });
-  assertAttachedPageAvailable({ extensionStatus, restrictions, intent });
+  if (isAttachedPageIntent(intent)) {
+    assertAttachedPageAvailable({ extensionStatus, restrictions, intent });
+  } else {
+    assertOpenIntentAllowed(restrictions);
+  }
   return restrictions;
 }
 
@@ -760,17 +799,20 @@ const extensionStatus = await getExtensionStatus({ baseUrl: getRelayHttpUrl() })
 assertAttachedPageAvailable({ extensionStatus, restrictions: browserforceRestrictions });
 ```
 
-In `execute`, default `intent` to `'inspect'`, call `preflightAttachedPageBeforeCdp({ intent })` before `ensureBrowser()`, then reuse the returned fresh restrictions instead of immediately refetching/cached restrictions. Only `intent: 'open'` may bypass attached-page availability when restrictions also allow new tabs.
+In `execute`, default `intent` to `'inspect'`, call `preflightAttachedPageBeforeCdp({ intent })` before `ensureBrowser()`, then reuse the returned fresh restrictions instead of immediately refetching/cached restrictions. Only `intent: 'open'` may bypass attached-page availability, and only after the same preflight has confirmed `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`.
 
 In `reset`, call `preflightAttachedPageBeforeCdp({ intent: 'inspect' })` before reconnecting with `ensureBrowser()`. If it returns `BF_NO_ATTACHED_PAGE`, reset should fail with the same structured error rather than opening or connecting to CDP.
 
-Add an explicit call-site audit in the implementation commit. Search `mcp/src/index.js` and `mcp/src/exec-engine.js` for every `ensureBrowser(`, `chromium.connectOverCDP`, `connectOverCDP`, `ctx.newPage(`, and helper that can indirectly call them. For each execute/reset branch, either route through `preflightAttachedPageBeforeCdp()` first or document why the branch is unrelated to attached/manual/no-new-tabs startup. The audit result should be reflected in tests, preferably with one behavior-level test for the manual/no-attached path and one source contract that catches any new direct `ensureBrowser()` before preflight.
+Remove `assertExtensionConnected()` from `ensureBrowser()` or make it a generic non-startup health helper only. `ensureBrowser()` must not prove readiness by calling `/`; every startup path must rely on the fresh `/extension/status` preflight above before CDP connection.
+
+Add an explicit call-site audit in the implementation commit. Search `mcp/src/index.js` and `mcp/src/exec-engine.js` for every `ensureBrowser(`, `assertExtensionConnected`, `chromium.connectOverCDP`, `connectOverCDP`, `ctx.newPage(`, and helper that can indirectly call them. For each execute/reset branch, route through `preflightAttachedPageBeforeCdp()` first. The audit result should be reflected in tests, preferably with one behavior-level test for the manual/no-attached path and one source contract that catches any new direct `ensureBrowser()` before preflight or root-health check inside `ensureBrowser()`.
 
 Minimum behavior coverage:
 
 - `execute` with `{ mode: 'manual', noNewTabs: true }` and no manual attached tabs returns `BF_NO_ATTACHED_PAGE`; injected/observable `ensureBrowser` is not called.
 - `execute` with default/omitted `intent` and `{ mode: 'auto', noNewTabs: false }` still returns `BF_NO_ATTACHED_PAGE` when no manual tab exists; this protects inspect/current/attached asks even outside manual mode.
-- `execute` with `intent: 'open'` may continue past attached-page preflight only when restrictions allow new tabs.
+- `execute` with `intent: 'open'` and `{ mode: 'manual' }` or `{ noNewTabs: true }` returns `BF_NEW_TABS_DISABLED`; injected/observable `ensureBrowser` is not called.
+- `execute` with `intent: 'open'` may continue past preflight only when restrictions allow new tabs.
 - `reset` with `{ mode: 'manual', noNewTabs: true }` and no manual attached tabs returns `BF_NO_ATTACHED_PAGE`; injected/observable `ensureBrowser` is not called.
 - `execute` in legacy auto mode creates no implicit page unless `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1`.
 
