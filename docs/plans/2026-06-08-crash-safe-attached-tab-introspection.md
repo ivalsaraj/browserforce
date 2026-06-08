@@ -324,11 +324,13 @@ If Task 1 did not include malformed Host cases, add:
 
 ```js
 it('rejects malformed bracketed Host header', async () => {
-  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+  const res = await rawHttpGet({
+    port,
+    path: '/extension/status',
     headers: { Host: '[::1' },
   });
   assert.equal(res.status, 403);
-  assert.match(await res.text(), /Invalid Host header/);
+  assert.match(res.text, /Invalid Host header/);
 });
 ```
 
@@ -556,8 +558,9 @@ export async function getExtensionStatus({ baseUrl = getRelayHttpUrl(), timeoutM
   return await response.json();
 }
 
-export function assertAttachedPageAvailable({ extensionStatus, restrictions }) {
+export function assertAttachedPageAvailable({ extensionStatus, restrictions, intent = 'inspect' }) {
   const isAttachedOnly =
+    isAttachedPageIntent(intent) ||
     restrictions?.mode === 'manual' ||
     restrictions?.noNewTabs === true ||
     process.env.BF_REQUIRE_ATTACHED_PAGE === '1';
@@ -574,6 +577,7 @@ export function assertAttachedPageAvailable({ extensionStatus, restrictions }) {
         attachedTabs: extensionStatus?.attachedTabs || [],
         manualAttachedTabs: extensionStatus?.manualAttachedTabs || [],
         restrictions: restrictions || {},
+        intent,
       },
     },
   );
@@ -675,11 +679,44 @@ test('shouldCreateImplicitStartupPage preserves legacy auto bootstrap only when 
 });
 ```
 
+**Step 2.5: Add canonical execute intent tests**
+
+Add `intent` to the `execute` tool schema:
+
+```js
+intent: z.enum(['inspect', 'open', 'auto']).optional()
+  .describe('Use inspect for current/attached-tab work; use open only when the user explicitly asked to open/navigate. Defaults to inspect.'),
+```
+
+Add source/behavior tests:
+
+```js
+it('execute schema includes an explicit attached-page intent', () => {
+  const source = readFileSync(
+    join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+    'utf8'
+  );
+  const execBlock = source.split("'execute'")[1]?.split('async ({ code')[0] || '';
+  assert.match(execBlock, /intent:\s*z\.enum\(\['inspect', 'open', 'auto'\]\)\.optional\(\)/);
+});
+
+test('isAttachedPageIntent defaults to inspect-safe behavior', () => {
+  assert.equal(isAttachedPageIntent(undefined), true);
+  assert.equal(isAttachedPageIntent('inspect'), true);
+  assert.equal(isAttachedPageIntent('auto'), true);
+  assert.equal(isAttachedPageIntent('open'), false);
+});
+```
+
 **Step 3: Implement minimal predicate**
 
 Add in `exec-engine.js`:
 
 ```js
+export function isAttachedPageIntent(intent) {
+  return intent !== 'open';
+}
+
 export function shouldCreateImplicitStartupPage(restrictions) {
   if (restrictions?.mode === 'manual') return false;
   if (restrictions?.noNewTabs) return false;
@@ -700,7 +737,7 @@ Preflight ordering is mandatory for crash-safety. Add a shared `preflightAttache
 
 Centralization requirement: keep `chromium.connectOverCDP()` reachable only from `ensureBrowser()`, and keep `ensureBrowser()` reachable from MCP tool handlers only after the same branch has successfully called `preflightAttachedPageBeforeCdp()`. Do not add another helper that calls `ensureBrowser()` indirectly unless it accepts and verifies a preflight result.
 
-For attached/manual/no-new-tabs flows, the shared helper must do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
+For attached/current/inspect/manual/no-new-tabs flows, the shared helper must do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
 
 1. `await ensureRelay()` so the HTTP relay exists.
 2. Fetch fresh restrictions via relay HTTP (`/restrictions`). Do not use `cachedBrowserforceRestrictions` for this safety gate.
@@ -710,12 +747,12 @@ For attached/manual/no-new-tabs flows, the shared helper must do all of this bef
 6. Only then call `ensureBrowser()`.
 
 ```js
-async function preflightAttachedPageBeforeCdp() {
+async function preflightAttachedPageBeforeCdp({ intent = 'inspect' } = {}) {
   await ensureRelay();
   const baseUrl = getRelayHttpUrl();
   const restrictions = await fetchBrowserforceRestrictionsForSession({ forceRefresh: true });
   const extensionStatus = await getExtensionStatus({ baseUrl });
-  assertAttachedPageAvailable({ extensionStatus, restrictions });
+  assertAttachedPageAvailable({ extensionStatus, restrictions, intent });
   return restrictions;
 }
 
@@ -723,21 +760,23 @@ const extensionStatus = await getExtensionStatus({ baseUrl: getRelayHttpUrl() })
 assertAttachedPageAvailable({ extensionStatus, restrictions: browserforceRestrictions });
 ```
 
-In `execute`, call `preflightAttachedPageBeforeCdp()` before `ensureBrowser()`, then reuse the returned fresh restrictions instead of immediately refetching/cached restrictions.
+In `execute`, default `intent` to `'inspect'`, call `preflightAttachedPageBeforeCdp({ intent })` before `ensureBrowser()`, then reuse the returned fresh restrictions instead of immediately refetching/cached restrictions. Only `intent: 'open'` may bypass attached-page availability when restrictions also allow new tabs.
 
-In `reset`, call `preflightAttachedPageBeforeCdp()` before reconnecting with `ensureBrowser()`. If it returns `BF_NO_ATTACHED_PAGE`, reset should fail with the same structured error rather than opening or connecting to CDP.
+In `reset`, call `preflightAttachedPageBeforeCdp({ intent: 'inspect' })` before reconnecting with `ensureBrowser()`. If it returns `BF_NO_ATTACHED_PAGE`, reset should fail with the same structured error rather than opening or connecting to CDP.
 
 Add an explicit call-site audit in the implementation commit. Search `mcp/src/index.js` and `mcp/src/exec-engine.js` for every `ensureBrowser(`, `chromium.connectOverCDP`, `connectOverCDP`, `ctx.newPage(`, and helper that can indirectly call them. For each execute/reset branch, either route through `preflightAttachedPageBeforeCdp()` first or document why the branch is unrelated to attached/manual/no-new-tabs startup. The audit result should be reflected in tests, preferably with one behavior-level test for the manual/no-attached path and one source contract that catches any new direct `ensureBrowser()` before preflight.
 
 Minimum behavior coverage:
 
 - `execute` with `{ mode: 'manual', noNewTabs: true }` and no manual attached tabs returns `BF_NO_ATTACHED_PAGE`; injected/observable `ensureBrowser` is not called.
+- `execute` with default/omitted `intent` and `{ mode: 'auto', noNewTabs: false }` still returns `BF_NO_ATTACHED_PAGE` when no manual tab exists; this protects inspect/current/attached asks even outside manual mode.
+- `execute` with `intent: 'open'` may continue past attached-page preflight only when restrictions allow new tabs.
 - `reset` with `{ mode: 'manual', noNewTabs: true }` and no manual attached tabs returns `BF_NO_ATTACHED_PAGE`; injected/observable `ensureBrowser` is not called.
 - `execute` in legacy auto mode creates no implicit page unless `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1`.
 
 Keep this scoped: do not remove explicit `context.newPage()` from user-provided code. The first fix only stops BrowserForce from doing it automatically. For explicit open/navigate tasks, the agent can still call `context.newPage()` in its execute snippet when `mode !== 'manual'` and `noNewTabs !== true`; the relay guard in Task 6 remains the runtime backstop.
 
-Do not add a vague env var named `BF_MCP_STARTUP_INTENT`. If a future iteration needs first-class intent, add a real tool-schema field such as `intent: 'inspect' | 'open'` and update the MCP prompt, tests, and callers together.
+Do not add a vague env var named `BF_MCP_STARTUP_INTENT`; the explicit `intent` tool field is the startup-intent contract for this patch.
 
 **Step 4: Update MCP prompt**
 
@@ -849,9 +888,10 @@ it('rejects Target.createTarget when no-new-tabs restriction is active', async (
   ext.close();
 });
 
-it('rejects Target.createTarget when restrictions cannot be read', async () => {
-  for (const failureMode of ['extension-missing', 'timeout', 'malformed-response', 'extension-error']) {
-    const cleanup = await installRestrictionsFailureFixture(failureMode);
+it('rejects Target.createTarget without createTab when restrictions cannot be read', async () => {
+  for (const failureMode of ['extension-missing', 'timeout', 'malformed-response', 'extension-error', 'transport-failure']) {
+    const seenExtensionCommands = [];
+    const cleanup = await installRestrictionsFailureFixture(failureMode, { seenExtensionCommands });
     const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
     const messages = [];
     cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
@@ -862,6 +902,11 @@ it('rejects Target.createTarget when restrictions cannot be read', async () => {
     const response = messages.find((m) => m.id === 1);
     assert.ok(response?.error, `expected createTarget to fail closed for ${failureMode}`);
     assert.match(response.error.message || response.error, /New tabs are disabled|Cannot read BrowserForce restrictions|attached-tab mode/);
+    assert.equal(
+      seenExtensionCommands.filter((msg) => msg.method === 'createTab').length,
+      0,
+      `createTab must not be sent when restrictions fail via ${failureMode}`,
+    );
 
     cdp.close();
     await cleanup?.();
@@ -890,7 +935,7 @@ if (restrictions.mode === 'manual' || restrictions.noNewTabs) {
 
 Add `_getRestrictionsSafe()` without an allow-open fallback. Every inability-to-read path must block `Target.createTarget` deterministically: extension missing, timeout, parse error, malformed response, network/WS failure, and explicit extension error. Return a fail-closed restriction object such as `{ mode: 'manual', noNewTabs: true }` or throw a structured error that causes `_createTarget()` to reject. Do not silently fall back to auto mode in this guard. Do not cache inside relay in this task; settings can change from popup.
 
-Implement the failure fixture or equivalent focused tests for all listed failure modes in the same commit as `_getRestrictionsSafe()`. The pass condition is that no failure mode reaches the extension `createTab` command.
+Implement the failure fixture or equivalent focused tests for all listed failure modes in the same commit as `_getRestrictionsSafe()`. The pass condition is mandatory per mode: each mode returns a CDP error and records zero extension `createTab` commands.
 
 **Step 4: Verify**
 
