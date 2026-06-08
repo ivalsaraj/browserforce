@@ -635,6 +635,20 @@ it('reset also runs attached-page preflight before reconnecting over CDP', () =>
   assert.ok(resetBlock.includes('preflightAttachedPageBeforeCdp'), 'reset should preflight before ensureBrowser');
   assert.ok(resetBlock.indexOf('preflightAttachedPageBeforeCdp') < resetBlock.indexOf('ensureBrowser()'));
 });
+
+it('execute and reset are the only MCP tool handlers allowed to reach CDP startup', () => {
+  const source = readFileSync(
+    join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+    'utf8'
+  );
+  const directEnsureBrowserCalls = [...source.matchAll(/await ensureBrowser\(/g)].map((match) => match.index);
+  assert.equal(directEnsureBrowserCalls.length, 2, 'all CDP startup should remain auditable through execute/reset');
+  for (const idx of directEnsureBrowserCalls) {
+    const surroundingBlock = source.slice(Math.max(0, idx - 1000), idx + 500);
+    assert.match(surroundingBlock, /preflightAttachedPageBeforeCdp/, 'CDP startup must be preflighted in the same branch');
+  }
+  assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
+});
 ```
 
 **Step 2: Add behavior test for predicate**
@@ -684,6 +698,8 @@ if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
 
 Preflight ordering is mandatory for crash-safety. Add a shared `preflightAttachedPageBeforeCdp()` helper in `mcp/src/index.js` or `mcp/src/exec-engine.js` and call it before every path that can trigger `ensureBrowser()` / `chromium.connectOverCDP()`, including both `execute` and `reset`.
 
+Centralization requirement: keep `chromium.connectOverCDP()` reachable only from `ensureBrowser()`, and keep `ensureBrowser()` reachable from MCP tool handlers only after the same branch has successfully called `preflightAttachedPageBeforeCdp()`. Do not add another helper that calls `ensureBrowser()` indirectly unless it accepts and verifies a preflight result.
+
 For attached/manual/no-new-tabs flows, the shared helper must do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
 
 1. `await ensureRelay()` so the HTTP relay exists.
@@ -712,6 +728,12 @@ In `execute`, call `preflightAttachedPageBeforeCdp()` before `ensureBrowser()`, 
 In `reset`, call `preflightAttachedPageBeforeCdp()` before reconnecting with `ensureBrowser()`. If it returns `BF_NO_ATTACHED_PAGE`, reset should fail with the same structured error rather than opening or connecting to CDP.
 
 Add an explicit call-site audit in the implementation commit. Search `mcp/src/index.js` and `mcp/src/exec-engine.js` for every `ensureBrowser(`, `chromium.connectOverCDP`, `connectOverCDP`, `ctx.newPage(`, and helper that can indirectly call them. For each execute/reset branch, either route through `preflightAttachedPageBeforeCdp()` first or document why the branch is unrelated to attached/manual/no-new-tabs startup. The audit result should be reflected in tests, preferably with one behavior-level test for the manual/no-attached path and one source contract that catches any new direct `ensureBrowser()` before preflight.
+
+Minimum behavior coverage:
+
+- `execute` with `{ mode: 'manual', noNewTabs: true }` and no manual attached tabs returns `BF_NO_ATTACHED_PAGE`; injected/observable `ensureBrowser` is not called.
+- `reset` with `{ mode: 'manual', noNewTabs: true }` and no manual attached tabs returns `BF_NO_ATTACHED_PAGE`; injected/observable `ensureBrowser` is not called.
+- `execute` in legacy auto mode creates no implicit page unless `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1`.
 
 Keep this scoped: do not remove explicit `context.newPage()` from user-provided code. The first fix only stops BrowserForce from doing it automatically. For explicit open/navigate tasks, the agent can still call `context.newPage()` in its execute snippet when `mode !== 'manual'` and `noNewTabs !== true`; the relay guard in Task 6 remains the runtime backstop.
 
@@ -826,6 +848,25 @@ it('rejects Target.createTarget when no-new-tabs restriction is active', async (
   cdp.close();
   ext.close();
 });
+
+it('rejects Target.createTarget when restrictions cannot be read', async () => {
+  for (const failureMode of ['extension-missing', 'timeout', 'malformed-response', 'extension-error']) {
+    const cleanup = await installRestrictionsFailureFixture(failureMode);
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const messages = [];
+    cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'about:blank' } }));
+    await sleep(300);
+
+    const response = messages.find((m) => m.id === 1);
+    assert.ok(response?.error, `expected createTarget to fail closed for ${failureMode}`);
+    assert.match(response.error.message || response.error, /New tabs are disabled|Cannot read BrowserForce restrictions|attached-tab mode/);
+
+    cdp.close();
+    await cleanup?.();
+  }
+});
 ```
 
 **Step 2: Run relay tests and verify failure**
@@ -848,6 +889,8 @@ if (restrictions.mode === 'manual' || restrictions.noNewTabs) {
 ```
 
 Add `_getRestrictionsSafe()` without an allow-open fallback. Every inability-to-read path must block `Target.createTarget` deterministically: extension missing, timeout, parse error, malformed response, network/WS failure, and explicit extension error. Return a fail-closed restriction object such as `{ mode: 'manual', noNewTabs: true }` or throw a structured error that causes `_createTarget()` to reject. Do not silently fall back to auto mode in this guard. Do not cache inside relay in this task; settings can change from popup.
+
+Implement the failure fixture or equivalent focused tests for all listed failure modes in the same commit as `_getRestrictionsSafe()`. The pass condition is that no failure mode reaches the extension `createTab` command.
 
 **Step 4: Verify**
 
