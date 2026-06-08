@@ -102,6 +102,7 @@ it('GET /extension/status includes manually attached tab metadata', async () => 
       tabId: 44,
       sessionId: 'manual-44-1',
       targetId: 'bf-target-44',
+      origin: 'manual',
       targetInfo: { url: 'https://example.com', title: 'Example' },
     },
   }));
@@ -197,7 +198,7 @@ if ((req.headers.host && !host) || (host && !ALLOWED_HTTP_HOSTS.has(host))) {
 }
 ```
 
-Missing Host headers from non-browser local clients may remain allowed for local-only compatibility, but malformed/non-local Host values must be rejected before URL parsing.
+Missing Host headers from non-browser local clients may remain allowed for local-only compatibility, but malformed/non-local Host values must be rejected before URL parsing. Document missing `Host` as a deliberate compatibility exception for local non-browser clients, not as a relaxation of the local-only security model.
 
 **Step 4: Stop global wildcard CORS from applying to introspection endpoints**
 
@@ -251,7 +252,7 @@ _getExtensionStatusBody() {
 }
 ```
 
-In the `manualTabAttached` handler, store `origin: 'manual'` unless the extension explicitly sends a different allowed provenance. In `_createTarget()`, store `origin: 'agent-created'`. Do not let untrusted client-supplied CDP params choose origin.
+In the `manualTabAttached` handler, store `origin: 'manual'` only when the extension explicitly sends allowed provenance `origin: 'manual'`. Preserve allowed `agent-created` and `relay-attached` values. If `origin` is omitted or unrecognized, store `origin: 'unknown'` and exclude that tab from `manualAttachedTabs`. In `_createTarget()`, store `origin: 'agent-created'`. Do not let untrusted client-supplied CDP params choose origin.
 
 Add routes in `_handleHttp()` before `/json/version`:
 
@@ -710,6 +711,8 @@ In `execute`, call `preflightAttachedPageBeforeCdp()` before `ensureBrowser()`, 
 
 In `reset`, call `preflightAttachedPageBeforeCdp()` before reconnecting with `ensureBrowser()`. If it returns `BF_NO_ATTACHED_PAGE`, reset should fail with the same structured error rather than opening or connecting to CDP.
 
+Add an explicit call-site audit in the implementation commit. Search `mcp/src/index.js` and `mcp/src/exec-engine.js` for every `ensureBrowser(`, `chromium.connectOverCDP`, `connectOverCDP`, `ctx.newPage(`, and helper that can indirectly call them. For each execute/reset branch, either route through `preflightAttachedPageBeforeCdp()` first or document why the branch is unrelated to attached/manual/no-new-tabs startup. The audit result should be reflected in tests, preferably with one behavior-level test for the manual/no-attached path and one source contract that catches any new direct `ensureBrowser()` before preflight.
+
 Keep this scoped: do not remove explicit `context.newPage()` from user-provided code. The first fix only stops BrowserForce from doing it automatically. For explicit open/navigate tasks, the agent can still call `context.newPage()` in its execute snippet when `mode !== 'manual'` and `noNewTabs !== true`; the relay guard in Task 6 remains the runtime backstop.
 
 Do not add a vague env var named `BF_MCP_STARTUP_INTENT`. If a future iteration needs first-class intent, add a real tool-schema field such as `intent: 'inspect' | 'open'` and update the MCP prompt, tests, and callers together.
@@ -844,7 +847,7 @@ if (restrictions.mode === 'manual' || restrictions.noNewTabs) {
 }
 ```
 
-Add `_getRestrictionsSafe()` without an allow-open fallback. If extension restrictions cannot be read, return a fail-closed restriction object such as `{ mode: 'manual', noNewTabs: true }` or throw a structured error that causes `_createTarget()` to reject. Do not silently fall back to auto mode in this guard. Do not cache inside relay in this task; settings can change from popup.
+Add `_getRestrictionsSafe()` without an allow-open fallback. Every inability-to-read path must block `Target.createTarget` deterministically: extension missing, timeout, parse error, malformed response, network/WS failure, and explicit extension error. Return a fail-closed restriction object such as `{ mode: 'manual', noNewTabs: true }` or throw a structured error that causes `_createTarget()` to reject. Do not silently fall back to auto mode in this guard. Do not cache inside relay in this task; settings can change from popup.
 
 **Step 4: Verify**
 
