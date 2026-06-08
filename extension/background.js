@@ -116,6 +116,7 @@ function connect(relayUrl) {
       connectionState = 'connected';
       restrictionExplained = false; // Reset for new agent session
       updateBadge();
+      notifyRelayAttachedTabs();
       console.log('[bf] Connected to relay');
       resolve();
     });
@@ -767,6 +768,24 @@ function send(msg) {
   }
 }
 
+function notifyRelayManualTabAttached(tabId, entry) {
+  send({
+    method: 'manualTabAttached',
+    params: {
+      tabId,
+      sessionId: entry.sessionId,
+      targetId: entry.targetId,
+      targetInfo: entry.targetInfo,
+    },
+  });
+}
+
+function notifyRelayAttachedTabs() {
+  for (const [tabId, entry] of attachedTabs) {
+    notifyRelayManualTabAttached(tabId, entry);
+  }
+}
+
 function updateBadge() {
   const count = attachedTabs.size;
 
@@ -910,17 +929,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       try {
         const sessionId = `manual-${tab.id}-${Date.now()}`;
-        await attachTab(tab.id, sessionId);
-        // Notify relay about the manually attached tab
-        send({
-          method: 'manualTabAttached',
-          params: {
-            tabId: tab.id,
-            sessionId,
-            targetId: attachedTabs.get(tab.id)?.targetId,
-            targetInfo: attachedTabs.get(tab.id)?.targetInfo,
-          },
-        });
+        const entry = await attachTab(tab.id, sessionId);
+        notifyRelayManualTabAttached(tab.id, entry);
         sendResponse({ ok: true, tabId: tab.id });
       } catch (err) {
         sendResponse({ error: err.message });

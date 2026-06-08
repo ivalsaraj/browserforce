@@ -841,7 +841,8 @@ class RelayServer {
 
     if (msg.method === 'manualTabAttached') {
       const { tabId, sessionId, targetId, targetInfo } = msg.params;
-      const relaySessionId = `bf-session-${++this.sessionCounter}`;
+      const existingSessionId = this.tabToSession.get(tabId);
+      const relaySessionId = existingSessionId || `bf-session-${++this.sessionCounter}`;
       this.targets.set(relaySessionId, {
         tabId,
         targetId: targetId || `bf-target-${tabId}`,
@@ -851,9 +852,11 @@ class RelayServer {
       this.tabToSession.set(tabId, relaySessionId);
 
       // Notify connected CDP clients
-      for (const client of this.clients) {
-        if (client.readyState === 1) { // WebSocket.OPEN
-          this._sendAttachedEvent(client, relaySessionId, this.targets.get(relaySessionId));
+      if (!existingSessionId) {
+        for (const client of this.clients) {
+          if (client.readyState === 1) { // WebSocket.OPEN
+            this._sendAttachedEvent(client, relaySessionId, this.targets.get(relaySessionId));
+          }
         }
       }
       return;

@@ -27,3 +27,10 @@ test('background reconciles tab groups when attached tabs move between windows',
   assert.match(backgroundJs, /if \(!attachedTabs\.has\(tabId\)\) return;/);
   assert.match(backgroundJs, /queueSyncTabGroup\(\);/);
 });
+
+test('background re-announces manually attached tabs after relay reconnect', () => {
+  assert.match(backgroundJs, /function notifyRelayManualTabAttached\(tabId,\s*entry\)/);
+  assert.match(backgroundJs, /function notifyRelayAttachedTabs\(\)/);
+  assert.match(backgroundJs, /for \(const \[tabId,\s*entry\] of attachedTabs\)/);
+  assert.match(backgroundJs, /notifyRelayAttachedTabs\(\);/);
+});

@@ -2072,6 +2072,58 @@ describe('manualTabAttached handler', () => {
     ext.close();
     await sleep(100);
   });
+
+  it('updates existing manual tab target instead of duplicating it', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); }
+    });
+
+    await sleep(50);
+
+    const firstAttach = {
+      method: 'manualTabAttached',
+      params: {
+        tabId: 777,
+        sessionId: 'manual-777-1',
+        targetId: 'bf-target-777',
+        targetInfo: { url: 'https://first.example', title: 'First' },
+      },
+    };
+    ext.send(JSON.stringify(firstAttach));
+    await sleep(100);
+
+    const sessionId = relay.tabToSession.get(777);
+    assert.ok(sessionId, 'tabToSession should contain tabId 777');
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 777,
+        sessionId: 'manual-777-2',
+        targetId: 'bf-target-777-updated',
+        targetInfo: { url: 'https://second.example', title: 'Second' },
+      },
+    }));
+    await sleep(100);
+
+    assert.equal(relay.tabToSession.get(777), sessionId, 'tab should keep the original relay session');
+    assert.equal([...relay.targets.values()].filter((target) => target.tabId === 777).length, 1);
+    const target = relay.targets.get(sessionId);
+    assert.equal(target.targetId, 'bf-target-777-updated');
+    assert.equal(target.targetInfo.url, 'https://second.example');
+    assert.equal(target.targetInfo.title, 'Second');
+
+    const list = await httpGet(`http://127.0.0.1:${port}/json/list`);
+    assert.equal(list.body.filter((target) => target.url === 'https://second.example').length, 1);
+
+    ext.close();
+    await sleep(100);
+  });
 });
 
 // ─── Auto-start Relay ─────────────────────────────────────────────────────

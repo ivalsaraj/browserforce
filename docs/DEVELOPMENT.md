@@ -52,6 +52,14 @@ Example shape:
 
 Fallback (if you cannot pass `RELAY_PORT` in MCP config): set `BF_CDP_URL` to the exact ws URL from `~/.browserforce/cdp-url`.
 
+## Manual Tab Attach During Relay Reconnects
+
+When a user manually attaches a tab from the extension popup, the extension
+re-announces that tab after reconnecting to the relay. The relay treats repeated
+manual attach announcements for the same tab as updates to the existing target,
+not as new targets. This keeps attached tabs visible to MCP after Codex or the
+relay process restarts.
+
 ## Debug Side-Panel Streaming Events
 
 The side-panel receives SSE from chatd (`/v1/events`). You can inspect the same stream directly.
