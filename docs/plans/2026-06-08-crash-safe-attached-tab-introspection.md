@@ -121,15 +121,19 @@ it('GET /extension/status includes manually attached tab metadata', async () => 
 });
 
 it('rejects HTTP requests with non-local Host header before URL parsing', async () => {
-  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+  const res = await rawHttpGet({
+    port,
+    path: '/extension/status',
     headers: { Host: 'evil.example' },
   });
   assert.equal(res.status, 403);
-  assert.match(await res.text(), /Invalid Host header/);
+  assert.match(res.text, /Invalid Host header/);
 });
 
 it('allows localhost Host headers for status endpoints', async () => {
-  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+  const res = await rawHttpGet({
+    port,
+    path: '/extension/status',
     headers: { Host: `127.0.0.1:${port}` },
   });
   assert.equal(res.status, 200);
@@ -150,6 +154,8 @@ node --test relay/test/relay-server.test.js
 ```
 
 Expected: fails because `/extension/status` and Host validation are not implemented.
+
+Use a raw `http.request()` test helper for Host-header cases instead of Undici `fetch`, so the test controls the exact inbound `Host` header.
 
 **Step 3: Implement Host validation before URL parsing**
 
@@ -449,6 +455,8 @@ This prevents lazy relay attachment from being counted as a user-attached page.
 
 In relay `manualTabAttached` handling, allowlist incoming `origin` to `manual`, `agent-created`, or `relay-attached`; otherwise store `unknown`. The handler name is legacy protocol wording, not proof that the tab is manual.
 
+Backward compatibility rule: when older extensions omit `origin`, treat reconnect replay as `unknown` rather than `manual`. This may require the user to reload/update the extension before attached-tab readiness is recognized, but it is safer than accidentally treating agent-created tabs as manual.
+
 Do not add a new extension command for this feature area. Relay state is authoritative for `/extension/status` and `/attached-tabs` in this patch; the extension only needs to preserve and replay provenance on the existing `manualTabAttached` message.
 
 **Step 4: Verify**
@@ -571,7 +579,7 @@ export function assertAttachedPageAvailable({ extensionStatus, restrictions }) {
 }
 ```
 
-Update `assertExtensionConnected()` to prefer `/extension/status` but keep `/` fallback during rollout.
+Update `assertExtensionConnected()` to use `/extension/status` for BrowserForce attached-page/status readiness. Do not fall back to `/` inside attached-page preflight or any path that can continue to `ensureBrowser()` / `chromium.connectOverCDP()`. The root endpoint may remain as a generic relay health check elsewhere, but it is not proof that an attached page exists.
 
 **Step 4: Verify**
 
@@ -715,6 +723,8 @@ Change "Empty tabs/targets handling" from "create/reuse dedicated tab" to:
 
 Also update existing MCP prompt/source-contract tests that assert empty-tab handling or reset behavior, not only the renamed auto-create startup test.
 
+Document this as a compatibility change: legacy auto-mode bootstrap can be restored with `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1`, but the new default favors crash-safe attached-tab inspection.
+
 **Step 4.5: Format structured MCP errors**
 
 In `mcp/src/index.js`, when catching `BrowserForceMcpError`, return stable machine-readable text:
@@ -834,7 +844,7 @@ if (restrictions.mode === 'manual' || restrictions.noNewTabs) {
 }
 ```
 
-Add `_getRestrictionsSafe()` with fallback auto mode if extension is unavailable. Do not cache inside relay in this task; settings can change from popup.
+Add `_getRestrictionsSafe()` without an allow-open fallback. If extension restrictions cannot be read, return a fail-closed restriction object such as `{ mode: 'manual', noNewTabs: true }` or throw a structured error that causes `_createTarget()` to reject. Do not silently fall back to auto mode in this guard. Do not cache inside relay in this task; settings can change from popup.
 
 **Step 4: Verify**
 
