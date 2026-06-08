@@ -4,7 +4,7 @@
 
 **Goal:** Make BrowserForce safe for "work on the attached tab" flows by preventing accidental tab creation during inspection and by exposing low-risk relay/extension status APIs that agents can query before opening a Playwright CDP session.
 
-**Architecture:** Add relay-owned status/introspection endpoints that read existing relay state and, when the extension is connected, optionally ask the extension for its attached-tab snapshot. Then update MCP startup and execute behavior so attached/manual flows fail clearly when no attached page is available instead of calling `context.newPage()` or triggering `Target.createTarget`. Keep the first pass narrow: no new dependencies, no multi-extension refactor, no direct-CDP mode.
+**Architecture:** Add relay-owned status/introspection endpoints that read existing relay state only. The extension may replay attached-tab provenance over the existing reconnect event path, but the relay remains the authoritative source for status. Then update MCP startup and execute behavior so attached/manual flows fail clearly when no attached page is available instead of calling `context.newPage()` or triggering `Target.createTarget`. Keep the first pass narrow: no new dependencies, no multi-extension refactor, no direct-CDP mode.
 
 **Tech Stack:** Node.js CommonJS relay with `ws`, MV3 Chrome extension service worker, MCP ESM server using `@modelcontextprotocol/sdk` and `playwright-core`, Node test runner.
 
@@ -340,7 +340,7 @@ git add relay/src/index.js relay/test/relay-server.test.js docs/DEVELOPMENT.md
 git commit -m "test(relay): cover status endpoint host validation"
 ```
 
-## Task 3: Extension Attached-Tab Snapshot Command
+## Task 3: Extension Attached-Tab Provenance And Reconnect Replay
 
 **Files:**
 
@@ -353,13 +353,11 @@ git commit -m "test(relay): cover status endpoint host validation"
 Extend the existing agent contract test:
 
 ```js
-test('background exposes attached tab status snapshot command', () => {
-  assert.match(backgroundJs, /case 'getAttachedTabs':/);
-  assert.match(backgroundJs, /function getAttachedTabsSnapshot\(\)/);
-  assert.match(backgroundJs, /attachedTabs\.entries\(\)/);
+test('background tracks attached tab provenance without adding a new relay command', () => {
   assert.match(backgroundJs, /origin:\s*'manual'/);
   assert.match(backgroundJs, /origin:\s*'agent-created'/);
   assert.match(backgroundJs, /origin:\s*entry\.origin/);
+  assert.doesNotMatch(backgroundJs, /case 'getAttachedTabs':/);
 });
 
 test('background reconnect replay preserves attached tab provenance', () => {
@@ -378,43 +376,7 @@ node --test test/agent/relay-url-reconnect-contract.test.js
 
 Expected: FAIL.
 
-**Step 3: Implement extension command**
-
-Add:
-
-```js
-function getAttachedTabsSnapshot() {
-  return {
-    tabs: [...attachedTabs.entries()].map(([tabId, entry]) => ({
-      tabId,
-      sessionId: entry.sessionId,
-      targetId: entry.targetId,
-      title: entry.targetInfo?.title || '',
-      url: entry.targetInfo?.url || '',
-      origin: entry.origin || 'unknown',
-    })),
-    manualAttachedTabs: [...attachedTabs.entries()]
-      .filter(([, entry]) => entry.origin === 'manual')
-      .map(([tabId, entry]) => ({
-        tabId,
-        sessionId: entry.sessionId,
-        targetId: entry.targetId,
-        title: entry.targetInfo?.title || '',
-        url: entry.targetInfo?.url || '',
-        origin: 'manual',
-      })),
-  };
-}
-```
-
-Add to `executeCommand()`:
-
-```js
-case 'getAttachedTabs':
-  return getAttachedTabsSnapshot();
-```
-
-**Step 4: Add provenance at attachment sources**
+**Step 3: Add provenance at attachment sources**
 
 In `attachTab(tabId, sessionId, options = {})`, store:
 
@@ -485,13 +447,11 @@ const result = await this._sendToExt('attachTab', {
 
 This prevents lazy relay attachment from being counted as a user-attached page.
 
-**Step 4.5: Use command as optional enrichment**
-
-In relay `/extension/status`, when `this.ext` is connected, optional extension enrichment may use `getAttachedTabs`, but relay state must still store provenance and the status response must expose `manualAttachedTabs`. MCP must treat `manualAttachedTabs` as authoritative for attached-tab availability.
-
 In relay `manualTabAttached` handling, allowlist incoming `origin` to `manual`, `agent-created`, or `relay-attached`; otherwise store `unknown`. The handler name is legacy protocol wording, not proof that the tab is manual.
 
-**Step 5: Verify**
+Do not add a new extension command for this feature area. Relay state is authoritative for `/extension/status` and `/attached-tabs` in this patch; the extension only needs to preserve and replay provenance on the existing `manualTabAttached` message.
+
+**Step 4: Verify**
 
 ```bash
 node --test test/agent/relay-url-reconnect-contract.test.js
@@ -500,11 +460,11 @@ node --test relay/test/relay-server.test.js
 
 Expected: PASS.
 
-**Step 6: Commit**
+**Step 5: Commit**
 
 ```bash
 git add extension/background.js test/agent/relay-url-reconnect-contract.test.js
-git commit -m "feat(extension): report attached tab snapshot"
+git commit -m "fix(extension): preserve attached tab provenance"
 ```
 
 ## Task 4: MCP Status Helpers
@@ -651,7 +611,20 @@ it('execute does not create a page for attached/manual inspection mode when cont
   );
 
   assert.ok(source.includes('assertAttachedPageAvailable'), 'execute should preflight attached-page availability');
+  assert.ok(source.includes('preflightAttachedPageBeforeCdp'), 'execute should use the shared no-CDP preflight');
   assert.ok(source.includes('if (!page && shouldCreateImplicitStartupPage'), 'implicit page creation should be gated behind an explicit predicate');
+});
+
+it('reset also runs attached-page preflight before reconnecting over CDP', () => {
+  const source = readFileSync(
+    join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+    'utf8'
+  );
+
+  const resetIdx = source.indexOf("'reset'");
+  const resetBlock = source.slice(resetIdx, resetIdx + 3000);
+  assert.ok(resetBlock.includes('preflightAttachedPageBeforeCdp'), 'reset should preflight before ensureBrowser');
+  assert.ok(resetBlock.indexOf('preflightAttachedPageBeforeCdp') < resetBlock.indexOf('ensureBrowser()'));
 });
 ```
 
@@ -700,18 +673,34 @@ if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
 }
 ```
 
-Preflight ordering is mandatory for crash-safety. For attached/manual/no-new-tabs flows, do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
+Preflight ordering is mandatory for crash-safety. Add a shared `preflightAttachedPageBeforeCdp()` helper in `mcp/src/index.js` or `mcp/src/exec-engine.js` and call it before every path that can trigger `ensureBrowser()` / `chromium.connectOverCDP()`, including both `execute` and `reset`.
+
+For attached/manual/no-new-tabs flows, the shared helper must do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
 
 1. `await ensureRelay()` so the HTTP relay exists.
-2. Fetch restrictions via relay HTTP (`/restrictions`).
+2. Fetch fresh restrictions via relay HTTP (`/restrictions`). Do not use `cachedBrowserforceRestrictions` for this safety gate.
 3. Fetch attached status via relay HTTP (`/extension/status`).
 4. Run `assertAttachedPageAvailable(...)`.
-5. Only then call `ensureBrowser()`.
+5. Return the fresh restrictions to the caller so `execute` can use the same value for the rest of the turn.
+6. Only then call `ensureBrowser()`.
 
 ```js
+async function preflightAttachedPageBeforeCdp() {
+  await ensureRelay();
+  const baseUrl = getRelayHttpUrl();
+  const restrictions = await fetchBrowserforceRestrictionsForSession({ forceRefresh: true });
+  const extensionStatus = await getExtensionStatus({ baseUrl });
+  assertAttachedPageAvailable({ extensionStatus, restrictions });
+  return restrictions;
+}
+
 const extensionStatus = await getExtensionStatus({ baseUrl: getRelayHttpUrl() });
 assertAttachedPageAvailable({ extensionStatus, restrictions: browserforceRestrictions });
 ```
+
+In `execute`, call `preflightAttachedPageBeforeCdp()` before `ensureBrowser()`, then reuse the returned fresh restrictions instead of immediately refetching/cached restrictions.
+
+In `reset`, call `preflightAttachedPageBeforeCdp()` before reconnecting with `ensureBrowser()`. If it returns `BF_NO_ATTACHED_PAGE`, reset should fail with the same structured error rather than opening or connecting to CDP.
 
 Keep this scoped: do not remove explicit `context.newPage()` from user-provided code. The first fix only stops BrowserForce from doing it automatically. For explicit open/navigate tasks, the agent can still call `context.newPage()` in its execute snippet when `mode !== 'manual'` and `noNewTabs !== true`; the relay guard in Task 6 remains the runtime backstop.
 
@@ -723,6 +712,8 @@ Change "Empty tabs/targets handling" from "create/reuse dedicated tab" to:
 
 - For inspect/current/attached-tab tasks: report no attached page unless `manualAttachedTabs` is non-empty.
 - For explicit open/navigate tasks: user code may create a tab only when restrictions allow it; BrowserForce itself should not create an implicit startup page unless `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` is set for backward compatibility.
+
+Also update existing MCP prompt/source-contract tests that assert empty-tab handling or reset behavior, not only the renamed auto-create startup test.
 
 **Step 4.5: Format structured MCP errors**
 
