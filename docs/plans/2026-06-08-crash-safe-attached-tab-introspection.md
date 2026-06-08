@@ -22,15 +22,22 @@ Latest Playwriter checked out locally:
   - Extension replacement reconnect waits until the slot is truly disconnected, not merely idle.
   - Empty extension-mode contexts do not auto-create a page unless `PLAYWRITER_AUTO_ENABLE` is set.
 
+Current upstream browser MCP references checked:
+
+- `chrome-devtools-mcp@1.1.1` is the current npm `latest`; the official README recommends `npx -y chrome-devtools-mcp@latest` and exposes explicit page/navigation/debugging tools such as `list_pages`, `select_page`, `take_snapshot`, console/network tools, and performance tools.
+- Chrome DevTools MCP issue `#1921` reports Chrome becoming unresponsive/crashing when MCP connects to a profile with a very large tab count and eagerly initializes per-tab work. The relevant lesson for BrowserForce is to avoid broad eager attachment and to keep "list/inspect attached tabs" metadata-only until a page is explicitly selected.
+- `@playwright/mcp@0.0.75` is the current npm `latest`; keep package freshness as a follow-up because the crash-safe attached-tab fix is a BrowserForce relay/MCP behavior change, not mainly a dependency issue.
+
 BrowserForce outdated/risky areas found during scan:
 
 - `mcp/src/index.js` still auto-creates a page in empty auto mode:
   - `const pages = ctx.pages(); let page = pages[0] || null;`
   - `page = await ctx.newPage();`
 - `relay/src/index.js` exposes only `/`, `/client-slot`, `/json/version`, `/json/list`; no `/extension/status` or attached-tab details.
+- `relay/src/index.js` currently sets `Access-Control-Allow-Origin: *` globally in `_handleHttp()`. New introspection endpoints must not inherit that header because attached tab URLs/titles are local browsing metadata.
 - `mcp/src/exec-engine.js` checks `/` for `extension: true`, so it cannot tell "extension connected but zero attached tabs" from "ready to inspect".
 - `relay/src/index.js` accepts HTTP requests based on the inbound `Host` without Playwriter-style validation.
-- `extension/background.js` re-announces manual tabs after reconnect, but has no command for a status snapshot of attached tabs.
+- `extension/background.js` re-announces manual tabs after reconnect, but attached tab state currently lacks explicit provenance. Manual user-attached tabs and agent-created tabs must be distinguishable before MCP can trust "attached page available".
 - Tests currently assert auto-create behavior, so tests must change before implementation.
 - `pnpm outdated --recursive --format json` shows dependency freshness gaps:
   - `@modelcontextprotocol/sdk` `1.26.0` -> `1.29.0`
@@ -52,11 +59,14 @@ pnpm outdated --recursive --format json
 - Manual/attached-tab mode never creates a new tab as a fallback.
 - When no attached page is available, MCP returns a clear structured error instead of invoking `context.newPage()`.
 - Existing auto/new-tab behavior remains available only for explicit open/navigate flows and when restrictions allow it.
-- Relay status APIs are localhost-safe and tested.
+- Relay status APIs are localhost-safe, not cross-origin readable by arbitrary websites, and tested.
+- MCP attached-page preflight uses manual attached-tab provenance, not generic target count.
 - Extension reconnect preserves and reports attached tabs.
 - Docs explain how to diagnose "MCP shows zero / no attached page".
 
 ## Task 1: Relay Status Model And HTTP Endpoints
+
+**Commit boundary:** This task must include Host header validation and status endpoints in the same deployable commit. Do not ship `/extension/status` or `/attached-tabs` before the Host validation lands.
 
 **Files:**
 
@@ -64,7 +74,7 @@ pnpm outdated --recursive --format json
 - Test: `relay/test/relay-server.test.js`
 - Docs: `README.md`, `docs/DEVELOPMENT.md`
 
-**Step 1: Write failing tests for status endpoints**
+**Step 1: Write failing tests for status endpoints and Host validation**
 
 Add tests near the existing HTTP and manual attach tests:
 
@@ -100,12 +110,36 @@ it('GET /extension/status includes manually attached tab metadata', async () => 
   const status = await httpGet(`http://127.0.0.1:${port}/extension/status`);
   assert.equal(status.body.connected, true);
   assert.equal(status.body.activeTargets, 1);
-  assert.equal(status.body.attachedTabs[0].tabId, 44);
-  assert.equal(status.body.attachedTabs[0].url, 'https://example.com');
-  assert.equal(status.body.attachedTabs[0].title, 'Example');
-  assert.equal(status.body.attachedTabs[0].targetId, 'bf-target-44');
+  assert.equal(status.body.activeManualTargets, 1);
+  assert.equal(status.body.manualAttachedTabs[0].tabId, 44);
+  assert.equal(status.body.manualAttachedTabs[0].url, 'https://example.com');
+  assert.equal(status.body.manualAttachedTabs[0].title, 'Example');
+  assert.equal(status.body.manualAttachedTabs[0].targetId, 'bf-target-44');
+  assert.equal(status.body.manualAttachedTabs[0].origin, 'manual');
 
   ext.close();
+});
+
+it('rejects HTTP requests with non-local Host header before URL parsing', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+    headers: { Host: 'evil.example' },
+  });
+  assert.equal(res.status, 403);
+  assert.match(await res.text(), /Invalid Host header/);
+});
+
+it('allows localhost Host headers for status endpoints', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+    headers: { Host: `127.0.0.1:${port}` },
+  });
+  assert.equal(res.status, 200);
+});
+
+it('does not expose attached-tab status to arbitrary browser origins with CORS', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+    headers: { Origin: 'https://evil.example' },
+  });
+  assert.notEqual(res.headers.get('access-control-allow-origin'), '*');
 });
 ```
 
@@ -115,119 +149,16 @@ it('GET /extension/status includes manually attached tab metadata', async () => 
 node --test relay/test/relay-server.test.js
 ```
 
-Expected: fails because `/extension/status` is not implemented.
+Expected: fails because `/extension/status` and Host validation are not implemented.
 
-**Step 3: Implement local relay status helpers**
+**Step 3: Implement Host validation before URL parsing**
 
-Add small helper methods to `RelayServer`:
-
-```js
-_getAttachedTabInfos() {
-  return [...this.targets.values()].map((target) => ({
-    tabId: target.tabId,
-    sessionId: this.tabToSession.get(target.tabId) || null,
-    targetId: target.targetId,
-    title: target.targetInfo?.title || '',
-    url: target.targetInfo?.url || '',
-    debuggerAttached: !!target.debuggerAttached,
-  }));
-}
-
-_getExtensionStatusBody() {
-  const attachedTabs = this._getAttachedTabInfos();
-  return {
-    connected: !!this.ext,
-    activeTargets: attachedTabs.length,
-    attachedTabs,
-    clients: this.clients.size,
-    startedAt: new Date(this.startedAt).toISOString(),
-  };
-}
-```
-
-Add routes in `_handleHttp()` before `/json/version`:
-
-```js
-if (url.pathname === '/extension/status') {
-  res.end(JSON.stringify(this._getExtensionStatusBody()));
-  return;
-}
-
-if (url.pathname === '/attached-tabs') {
-  res.end(JSON.stringify({ tabs: this._getAttachedTabInfos() }));
-  return;
-}
-```
-
-**Step 4: Verify tests pass**
-
-```bash
-node --test relay/test/relay-server.test.js
-```
-
-Expected: PASS.
-
-**Step 5: Update docs**
-
-Document:
-
-- `GET /extension/status`
-- `GET /attached-tabs`
-- Expected shape
-- How these differ from `/json/list`
-
-**Step 6: Commit**
-
-```bash
-git add relay/src/index.js relay/test/relay-server.test.js README.md docs/DEVELOPMENT.md
-git commit -m "feat(relay): expose attached tab status"
-```
-
-## Task 2: Host Header Validation For Low-Risk HTTP APIs
-
-**Files:**
-
-- Modify: `relay/src/index.js`
-- Test: `relay/test/relay-server.test.js`
-- Docs: `docs/DEVELOPMENT.md`
-
-**Step 1: Write failing tests**
-
-Add tests near HTTP route tests:
-
-```js
-it('rejects HTTP requests with non-local Host header', async () => {
-  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
-    headers: { Host: 'evil.example' },
-  });
-  assert.equal(res.status, 403);
-  assert.match(await res.text(), /Invalid Host header/);
-});
-
-it('allows localhost Host header', async () => {
-  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
-    headers: { Host: `127.0.0.1:${port}` },
-  });
-  assert.equal(res.status, 200);
-});
-```
-
-**Step 2: Run test and verify failure**
-
-```bash
-node --test relay/test/relay-server.test.js
-```
-
-Expected: non-local Host is currently accepted.
-
-**Step 3: Implement validation**
-
-Port the minimal Playwriter pattern into CommonJS:
+Add a small CommonJS helper near the existing relay helpers:
 
 ```js
 const ALLOWED_HTTP_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
-function parseHostHeader(hostHeader) {
+function parseHttpHostHeader(hostHeader) {
   const value = String(hostHeader || '').trim().toLowerCase();
   if (!value) return null;
   if (value.startsWith('[')) {
@@ -248,10 +179,11 @@ function parseHostHeader(hostHeader) {
 }
 ```
 
-At the start of `_handleHttp()`:
+At the very start of `_handleHttp(req, res)`, before `new URL(req.url, ...)`:
 
 ```js
-if (!this._isAllowedHttpHost(req.headers.host)) {
+const host = parseHttpHostHeader(req.headers.host);
+if ((req.headers.host && !host) || (host && !ALLOWED_HTTP_HOSTS.has(host))) {
   res.statusCode = 403;
   res.setHeader('Content-Type', 'text/plain');
   res.end('Forbidden - Invalid Host header');
@@ -259,9 +191,77 @@ if (!this._isAllowedHttpHost(req.headers.host)) {
 }
 ```
 
-Keep CDP WebSocket auth unchanged.
+Missing Host headers from non-browser local clients may remain allowed for local-only compatibility, but malformed/non-local Host values must be rejected before URL parsing.
 
-**Step 4: Verify**
+**Step 4: Stop global wildcard CORS from applying to introspection endpoints**
+
+Current `_handleHttp()` sets `Access-Control-Allow-Origin: *` before route dispatch. Move CORS assignment into an explicit helper so new introspection routes can opt out:
+
+```js
+function shouldAllowWildcardCors(pathname) {
+  return !new Set(['/extension/status', '/attached-tabs']).has(pathname);
+}
+```
+
+After Host validation and URL parsing:
+
+```js
+if (shouldAllowWildcardCors(url.pathname)) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+}
+```
+
+Do not set wildcard CORS on `/extension/status` or `/attached-tabs`. Local CLI/Node callers still work. Browser extension callers can either use extension WebSocket state or a future origin-restricted route; arbitrary websites must not read attached tab URLs/titles.
+
+**Step 5: Implement target provenance and local relay status helpers**
+
+Add small helper methods to `RelayServer`:
+
+```js
+_getAttachedTabInfos() {
+  return [...this.targets.values()].map((target) => ({
+    tabId: target.tabId,
+    sessionId: this.tabToSession.get(target.tabId) || null,
+    targetId: target.targetId,
+    title: target.targetInfo?.title || '',
+    url: target.targetInfo?.url || '',
+    debuggerAttached: !!target.debuggerAttached,
+    origin: target.origin || 'unknown',
+  }));
+}
+
+_getExtensionStatusBody() {
+  const attachedTabs = this._getAttachedTabInfos();
+  const manualAttachedTabs = attachedTabs.filter((tab) => tab.origin === 'manual');
+  return {
+    connected: !!this.ext,
+    activeTargets: attachedTabs.length,
+    activeManualTargets: manualAttachedTabs.length,
+    attachedTabs,
+    manualAttachedTabs,
+    clients: this.clients.size,
+    startedAt: new Date(this.startedAt).toISOString(),
+  };
+}
+```
+
+In the `manualTabAttached` handler, store `origin: 'manual'` unless the extension explicitly sends a different allowed provenance. In `_createTarget()`, store `origin: 'agent-created'`. Do not let untrusted client-supplied CDP params choose origin.
+
+Add routes in `_handleHttp()` before `/json/version`:
+
+```js
+if (url.pathname === '/extension/status') {
+  res.end(JSON.stringify(this._getExtensionStatusBody()));
+  return;
+}
+
+if (url.pathname === '/attached-tabs') {
+  res.end(JSON.stringify({ tabs: this._getAttachedTabInfos() }));
+  return;
+}
+```
+
+**Step 6: Verify tests pass**
 
 ```bash
 node --test relay/test/relay-server.test.js
@@ -269,11 +269,75 @@ node --test relay/test/relay-server.test.js
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 7: Update docs**
+
+Document:
+
+- `GET /extension/status`
+- `GET /attached-tabs`
+- Expected shape
+- How these differ from `/json/list`
+- Host header protection for local HTTP APIs
+- CORS behavior: `/extension/status` and `/attached-tabs` intentionally omit wildcard CORS.
+- Provenance fields: `manualAttachedTabs` are user-attached tabs; `attachedTabs` can include agent-created tabs.
+
+**Step 8: Commit**
+
+```bash
+git add relay/src/index.js relay/test/relay-server.test.js README.md docs/DEVELOPMENT.md
+git commit -m "feat(relay): secure and expose attached tab status"
+```
+
+## Task 2: Relay Status API Security Regression Audit
+
+**Files:**
+
+- Test: `relay/test/relay-server.test.js`
+- Docs: `docs/DEVELOPMENT.md`
+
+**Step 1: Confirm Task 1 already landed the Host guard**
+
+Run:
+
+```bash
+rg -n "parseHttpHostHeader|ALLOWED_HTTP_HOSTS|Invalid Host header|shouldAllowWildcardCors|manualAttachedTabs|activeManualTargets|/extension/status|/attached-tabs" relay/src/index.js relay/test/relay-server.test.js docs/DEVELOPMENT.md
+```
+
+Expected:
+
+- `_handleHttp()` validates `req.headers.host` before calling `new URL(req.url, ...)`.
+- `/extension/status` and `/attached-tabs` tests include both accepted localhost and rejected non-local Host cases.
+- `/extension/status` and `/attached-tabs` do not inherit `Access-Control-Allow-Origin: *`.
+- Status JSON includes `manualAttachedTabs` and `activeManualTargets`; MCP does not rely on generic `activeTargets`.
+- Docs mention Host validation for local HTTP status APIs.
+
+**Step 2: Add any missing negative cases**
+
+If Task 1 did not include malformed Host cases, add:
+
+```js
+it('rejects malformed bracketed Host header', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+    headers: { Host: '[::1' },
+  });
+  assert.equal(res.status, 403);
+  assert.match(await res.text(), /Invalid Host header/);
+});
+```
+
+**Step 3: Run test**
+
+```bash
+node --test relay/test/relay-server.test.js
+```
+
+Expected: PASS.
+
+**Step 4: Commit only if Step 2 added missing tests/docs**
 
 ```bash
 git add relay/src/index.js relay/test/relay-server.test.js docs/DEVELOPMENT.md
-git commit -m "fix(relay): reject non-local HTTP hosts"
+git commit -m "test(relay): cover status endpoint host validation"
 ```
 
 ## Task 3: Extension Attached-Tab Snapshot Command
@@ -293,6 +357,16 @@ test('background exposes attached tab status snapshot command', () => {
   assert.match(backgroundJs, /case 'getAttachedTabs':/);
   assert.match(backgroundJs, /function getAttachedTabsSnapshot\(\)/);
   assert.match(backgroundJs, /attachedTabs\.entries\(\)/);
+  assert.match(backgroundJs, /origin:\s*'manual'/);
+  assert.match(backgroundJs, /origin:\s*'agent-created'/);
+  assert.match(backgroundJs, /origin:\s*entry\.origin/);
+});
+
+test('background reconnect replay preserves attached tab provenance', () => {
+  assert.match(backgroundJs, /function notifyRelayManualTabAttached\(tabId,\s*entry\)/);
+  assert.match(backgroundJs, /origin:\s*entry\.origin/);
+  assert.match(backgroundJs, /function notifyRelayAttachedTabs\(\)/);
+  assert.match(backgroundJs, /for \(const \[tabId,\s*entry\] of attachedTabs\)/);
 });
 ```
 
@@ -317,7 +391,18 @@ function getAttachedTabsSnapshot() {
       targetId: entry.targetId,
       title: entry.targetInfo?.title || '',
       url: entry.targetInfo?.url || '',
+      origin: entry.origin || 'unknown',
     })),
+    manualAttachedTabs: [...attachedTabs.entries()]
+      .filter(([, entry]) => entry.origin === 'manual')
+      .map(([tabId, entry]) => ({
+        tabId,
+        sessionId: entry.sessionId,
+        targetId: entry.targetId,
+        title: entry.targetInfo?.title || '',
+        url: entry.targetInfo?.url || '',
+        origin: 'manual',
+      })),
   };
 }
 ```
@@ -329,9 +414,82 @@ case 'getAttachedTabs':
   return getAttachedTabsSnapshot();
 ```
 
-**Step 4: Use command as optional enrichment**
+**Step 4: Add provenance at attachment sources**
 
-In relay `/extension/status`, when `this.ext` is connected, optionally call `_sendToExt('getAttachedTabs')` with a short timeout helper in a later task. For this task, keep relay state authoritative to avoid adding timeout complexity.
+In `attachTab(tabId, sessionId, options = {})`, store:
+
+```js
+const ALLOWED_TAB_ORIGINS = new Set(['manual', 'agent-created', 'relay-attached']);
+const origin = ALLOWED_TAB_ORIGINS.has(options.origin) ? options.origin : 'unknown';
+const entry = { sessionId, targetId, targetInfo, tabId, origin };
+```
+
+Call sites:
+
+- Popup `attachCurrentTab`: `attachTab(tab.id, sessionId, { origin: 'manual' })`
+- Relay `attachTab` command for existing tabs: pass through `msg.params.origin` only after it is allowlisted by `attachTab()`. Never default relay-driven attachment to manual.
+- `createTab(params)`: after creating the tab, call `attachTab(tab.id, params.sessionId, { origin: 'agent-created' })`
+
+Send `origin` in `notifyRelayManualTabAttached()` for manual tabs. For agent-created tabs, relay already learns provenance from `_createTarget()` and must store `origin: 'agent-created'`.
+
+Despite the legacy message name `manualTabAttached`, reconnect replay must preserve the original provenance for every attached tab:
+
+```js
+function notifyRelayManualTabAttached(tabId, entry) {
+  send({
+    method: 'manualTabAttached',
+    params: {
+      tabId,
+      sessionId: entry.sessionId,
+      targetId: entry.targetId,
+      targetInfo: entry.targetInfo,
+      origin: entry.origin || 'unknown',
+    },
+  });
+}
+```
+
+Add a relay regression test proving replayed non-manual provenance stays non-manual after status rebuild:
+
+```js
+it('preserves non-manual origin when attached tabs are replayed after reconnect', async () => {
+  ext.send(JSON.stringify({
+    method: 'manualTabAttached',
+    params: {
+      tabId: 55,
+      sessionId: 'agent-55-1',
+      targetId: 'bf-target-55',
+      targetInfo: { url: 'https://agent.example', title: 'Agent' },
+      origin: 'agent-created',
+    },
+  }));
+  await sleep(100);
+
+  const status = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+  assert.equal(status.body.activeTargets, 1);
+  assert.equal(status.body.activeManualTargets, 0);
+  assert.equal(status.body.attachedTabs[0].origin, 'agent-created');
+  assert.deepEqual(status.body.manualAttachedTabs, []);
+});
+```
+
+In relay `_ensureDebuggerAttached()`, pass non-manual provenance when asking the extension to attach an already-known tab:
+
+```js
+const result = await this._sendToExt('attachTab', {
+  tabId: target.tabId,
+  sessionId,
+  origin: target.origin === 'manual' ? 'manual' : 'relay-attached',
+});
+```
+
+This prevents lazy relay attachment from being counted as a user-attached page.
+
+**Step 4.5: Use command as optional enrichment**
+
+In relay `/extension/status`, when `this.ext` is connected, optional extension enrichment may use `getAttachedTabs`, but relay state must still store provenance and the status response must expose `manualAttachedTabs`. MCP must treat `manualAttachedTabs` as authoritative for attached-tab availability.
+
+In relay `manualTabAttached` handling, allowlist incoming `origin` to `manual`, `agent-created`, or `relay-attached`; otherwise store `unknown`. The handler name is legacy protocol wording, not proof that the tab is manual.
 
 **Step 5: Verify**
 
@@ -381,10 +539,17 @@ test('getExtensionStatus reads relay /extension/status', async () => {
 test('assertAttachedPageAvailable throws when manual mode has no tabs', async () => {
   await assert.rejects(
     () => assertAttachedPageAvailable({
-      extensionStatus: { connected: true, activeTargets: 0, attachedTabs: [] },
+      extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, attachedTabs: [{ origin: 'agent-created' }], manualAttachedTabs: [] },
       restrictions: { mode: 'manual', noNewTabs: true },
     }),
-    /No attached BrowserForce page available/
+    (err) => {
+      assert.equal(err.code, 'BF_NO_ATTACHED_PAGE');
+      assert.equal(err.details.connected, true);
+      assert.equal(err.details.activeTargets, 1);
+      assert.equal(err.details.activeManualTargets, 0);
+      assert.equal(err.details.restrictions.mode, 'manual');
+      return true;
+    }
   );
 });
 ```
@@ -402,6 +567,15 @@ Expected: FAIL because helpers do not exist.
 Export:
 
 ```js
+export class BrowserForceMcpError extends Error {
+  constructor(message, { code, details = {} }) {
+    super(message);
+    this.name = 'BrowserForceMcpError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export async function getExtensionStatus({ baseUrl = getRelayHttpUrl(), timeoutMs = 2000 } = {}) {
   const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
   const response = await fetch(`${resolvedBaseUrl}/extension/status`, {
@@ -419,9 +593,20 @@ export function assertAttachedPageAvailable({ extensionStatus, restrictions }) {
     restrictions?.noNewTabs === true ||
     process.env.BF_REQUIRE_ATTACHED_PAGE === '1';
   if (!isAttachedOnly) return;
-  if (extensionStatus?.activeTargets > 0) return;
-  throw new Error(
-    'No attached BrowserForce page available. Attach a tab with the BrowserForce extension, then retry.'
+  if (extensionStatus?.activeManualTargets > 0 || extensionStatus?.manualAttachedTabs?.length > 0) return;
+  throw new BrowserForceMcpError(
+    'No attached BrowserForce page available. Attach a tab with the BrowserForce extension, then retry.',
+    {
+      code: 'BF_NO_ATTACHED_PAGE',
+      details: {
+        connected: !!extensionStatus?.connected,
+        activeTargets: Number(extensionStatus?.activeTargets || 0),
+        activeManualTargets: Number(extensionStatus?.activeManualTargets || 0),
+        attachedTabs: extensionStatus?.attachedTabs || [],
+        manualAttachedTabs: extensionStatus?.manualAttachedTabs || [],
+        restrictions: restrictions || {},
+      },
+    },
   );
 }
 ```
@@ -452,7 +637,7 @@ git commit -m "feat(mcp): read BrowserForce attached tab status"
 - Test: `mcp/test/mcp-tools.test.js`
 - Test: `mcp/test/exec-engine-plugins.test.js`
 
-**Step 1: Replace source contract that expects auto page creation**
+**Step 1: Replace source contract that expects automatic page creation during inspection startup**
 
 Update the test currently named `execute auto-creates a working page when auto mode starts empty`.
 
@@ -466,7 +651,7 @@ it('execute does not create a page for attached/manual inspection mode when cont
   );
 
   assert.ok(source.includes('assertAttachedPageAvailable'), 'execute should preflight attached-page availability');
-  assert.ok(source.includes('if (!page && canCreateStartupPage'), 'new page creation should be gated behind an explicit predicate');
+  assert.ok(source.includes('if (!page && shouldCreateImplicitStartupPage'), 'implicit page creation should be gated behind an explicit predicate');
 });
 ```
 
@@ -475,13 +660,22 @@ it('execute does not create a page for attached/manual inspection mode when cont
 In `exec-engine` tests:
 
 ```js
-test('canCreateStartupPage is false in manual/noNewTabs/require-attached modes', () => {
-  assert.equal(canCreateStartupPage({ mode: 'manual', noNewTabs: false }, 'inspect'), false);
-  assert.equal(canCreateStartupPage({ mode: 'auto', noNewTabs: true }, 'inspect'), false);
+test('shouldCreateImplicitStartupPage is false in manual/noNewTabs modes', () => {
+  assert.equal(shouldCreateImplicitStartupPage({ mode: 'manual', noNewTabs: false }), false);
+  assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: true }), false);
 });
 
-test('canCreateStartupPage is true for explicit open task when allowed', () => {
-  assert.equal(canCreateStartupPage({ mode: 'auto', noNewTabs: false }, 'open'), true);
+test('shouldCreateImplicitStartupPage preserves legacy auto bootstrap only when explicitly enabled', () => {
+  const original = process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+  try {
+    delete process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+    assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: false }), false);
+    process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE = '1';
+    assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: false }), true);
+  } finally {
+    if (original === undefined) delete process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+    else process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE = original;
+  }
 });
 ```
 
@@ -490,37 +684,89 @@ test('canCreateStartupPage is true for explicit open task when allowed', () => {
 Add in `exec-engine.js`:
 
 ```js
-export function canCreateStartupPage(restrictions, startupIntent = process.env.BF_MCP_STARTUP_INTENT || 'inspect') {
+export function shouldCreateImplicitStartupPage(restrictions) {
   if (restrictions?.mode === 'manual') return false;
   if (restrictions?.noNewTabs) return false;
-  return startupIntent === 'open' || process.env.BF_ALLOW_STARTUP_PAGE === '1';
+  return process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE === '1';
 }
 ```
 
 In `mcp/src/index.js`, change:
 
 ```js
-if (!page && canCreateStartupPage(browserforceRestrictions)) {
+if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
   page = await ctx.newPage();
   userState.page = page;
 }
 ```
 
-Preflight before `ensureBrowser()` or immediately after status/restrictions are available:
+Preflight ordering is mandatory for crash-safety. For attached/manual/no-new-tabs flows, do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
+
+1. `await ensureRelay()` so the HTTP relay exists.
+2. Fetch restrictions via relay HTTP (`/restrictions`).
+3. Fetch attached status via relay HTTP (`/extension/status`).
+4. Run `assertAttachedPageAvailable(...)`.
+5. Only then call `ensureBrowser()`.
 
 ```js
 const extensionStatus = await getExtensionStatus({ baseUrl: getRelayHttpUrl() });
 assertAttachedPageAvailable({ extensionStatus, restrictions: browserforceRestrictions });
 ```
 
-Keep this scoped: do not remove explicit `context.newPage()` from user-provided code. The first fix only stops BrowserForce from doing it automatically.
+Keep this scoped: do not remove explicit `context.newPage()` from user-provided code. The first fix only stops BrowserForce from doing it automatically. For explicit open/navigate tasks, the agent can still call `context.newPage()` in its execute snippet when `mode !== 'manual'` and `noNewTabs !== true`; the relay guard in Task 6 remains the runtime backstop.
+
+Do not add a vague env var named `BF_MCP_STARTUP_INTENT`. If a future iteration needs first-class intent, add a real tool-schema field such as `intent: 'inspect' | 'open'` and update the MCP prompt, tests, and callers together.
 
 **Step 4: Update MCP prompt**
 
 Change "Empty tabs/targets handling" from "create/reuse dedicated tab" to:
 
-- For inspect/current/attached-tab tasks: report no attached page.
-- For explicit open/navigate tasks: create only when restrictions allow and user intent is explicit.
+- For inspect/current/attached-tab tasks: report no attached page unless `manualAttachedTabs` is non-empty.
+- For explicit open/navigate tasks: user code may create a tab only when restrictions allow it; BrowserForce itself should not create an implicit startup page unless `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` is set for backward compatibility.
+
+**Step 4.5: Format structured MCP errors**
+
+In `mcp/src/index.js`, when catching `BrowserForceMcpError`, return stable machine-readable text:
+
+```js
+if (err?.code === 'BF_NO_ATTACHED_PAGE') {
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: {
+          code: err.code,
+          message: err.message,
+          details: err.details,
+        },
+      }, null, 2),
+    }],
+    isError: true,
+  };
+}
+```
+
+Add a behavior test that asserts the returned text includes `"code": "BF_NO_ATTACHED_PAGE"`.
+
+Add a connection-order test with dependency injection or source-level guard if full mocking is too heavy:
+
+```js
+test('manual attached-page preflight fails before connecting over CDP', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+```
+
+If adding a full helper is too invasive, use a targeted source contract that verifies `assertAttachedPageAvailable` appears before `await ensureBrowser()` in the `execute` handler, then follow up with an integration test once the handler is easier to isolate.
 
 **Step 5: Verify**
 
@@ -629,8 +875,7 @@ Add tests checking for:
 ```js
 assert.match(backgroundJs, /extension\/status/);
 assert.match(backgroundJs, /connected/);
-assert.match(backgroundJs, /activeTargets/);
-assert.match(backgroundJs, /slotAvailable/);
+assert.match(backgroundJs, /connected === false/);
 ```
 
 **Step 2: Implement conservative reconnect polling**
@@ -640,6 +885,7 @@ Borrow the latest Playwriter semantics:
 - If WebSocket closes because this worker was replaced or another extension slot owns the relay, do not immediately reclaim based only on `activeTargets: 0`.
 - Poll `/extension/status`.
 - Reconnect only when `connected === false`.
+- Do not introduce a second `slotAvailable` field; the status schema's `connected` field is the single reconnect slot signal for this patch.
 - Keep current background reconnect for ordinary relay restart.
 
 BrowserForce currently has a single extension slot, so keep this as a small state flag:
@@ -700,7 +946,8 @@ Explain expected outputs:
 
 - `connected: false`: extension not connected to relay.
 - `connected: true, activeTargets: 0`: extension connected but no tab attached.
-- `activeTargets > 0`: attached-tab mode is ready.
+- `activeManualTargets > 0` or `manualAttachedTabs.length > 0`: attached-tab mode is ready.
+- `activeTargets > 0` alone is not enough; it can include agent-created or relay-attached tabs.
 - `clients > 0`: a CDP client is active.
 
 **Step 2: Update "Target.createTarget" troubleshooting**
@@ -796,4 +1043,3 @@ curl -s http://127.0.0.1:19222/attached-tabs | jq
 - Prefer additive APIs first so extension and relay stay compatible during reloads.
 - Avoid adding direct-CDP mode in this patch; it is useful but not necessary for crash-safe attached-tab mode.
 - Keep all status APIs local-only and Host-validated.
-
