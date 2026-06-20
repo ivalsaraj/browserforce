@@ -332,6 +332,16 @@ it('rejects malformed bracketed Host header', async () => {
   assert.equal(res.status, 403);
   assert.match(res.text, /Invalid Host header/);
 });
+
+it('rejects Host header with non-numeric port', async () => {
+  const res = await rawHttpGet({
+    port,
+    path: '/extension/status',
+    headers: { Host: `127.0.0.1:bad` },
+  });
+  assert.equal(res.status, 403);
+  assert.match(res.text, /Invalid Host header/);
+});
 ```
 
 **Step 3: Run test**
@@ -354,8 +364,9 @@ git commit -m "test(relay): cover status endpoint host validation"
 **Files:**
 
 - Modify: `extension/background.js`
+- Modify: `relay/src/index.js` (relay-side `manualTabAttached` origin allowlist + `_ensureDebuggerAttached()` non-manual provenance pass-through)
 - Test: `test/agent/relay-url-reconnect-contract.test.js`
-- Optional Test: `relay/test/relay-server.test.js`
+- Test: `relay/test/relay-server.test.js` (relay regression test for replayed non-manual provenance — mandatory, not optional)
 
 **Step 1: Write contract test**
 
@@ -474,7 +485,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add extension/background.js test/agent/relay-url-reconnect-contract.test.js
+git add extension/background.js relay/src/index.js test/agent/relay-url-reconnect-contract.test.js relay/test/relay-server.test.js
 git commit -m "fix(extension): preserve attached tab provenance"
 ```
 
@@ -523,6 +534,13 @@ test('assertAttachedPageAvailable throws when manual mode has no tabs', async ()
     }
   );
 });
+
+test('isAttachedPageIntent defaults to inspect-safe behavior', () => {
+  assert.equal(isAttachedPageIntent(undefined), true);
+  assert.equal(isAttachedPageIntent('inspect'), true);
+  assert.equal(isAttachedPageIntent('auto'), true);
+  assert.equal(isAttachedPageIntent('open'), false);
+});
 ```
 
 **Step 2: Run tests**
@@ -538,6 +556,10 @@ Expected: FAIL because helpers do not exist.
 Export:
 
 ```js
+export function isAttachedPageIntent(intent) {
+  return intent !== 'open';
+}
+
 export class BrowserForceMcpError extends Error {
   constructor(message, { code, details = {} }) {
     super(message);
@@ -611,6 +633,8 @@ git commit -m "feat(mcp): read BrowserForce attached tab status"
 - Test: `mcp/test/exec-engine-plugins.test.js`
 
 **Step 1: Replace source contract that expects automatic page creation during inspection startup**
+
+> **Test-strategy note (mandatory):** The source-contract tests in this step are SECONDARY guards only — they catch regressions cheaply but cannot prove runtime ordering. The PRIMARY proof that preflight runs before `ensureBrowser()`/`chromium.connectOverCDP()` is the behavior-level tests in Step 4.5, which must be implemented (not skipped) using an exported/injectable startup helper. Do not ship Task 5 with source contracts as the only coverage for the preflight-before-CDP guarantee.
 
 Update the test currently named `execute auto-creates a working page when auto mode starts empty`.
 
@@ -711,13 +735,6 @@ it('execute schema includes an explicit attached-page intent', () => {
   assert.match(execBlock, /intent:\s*z\.enum\(\['inspect', 'open', 'auto'\]\)\.optional\(\)/);
 });
 
-test('isAttachedPageIntent defaults to inspect-safe behavior', () => {
-  assert.equal(isAttachedPageIntent(undefined), true);
-  assert.equal(isAttachedPageIntent('inspect'), true);
-  assert.equal(isAttachedPageIntent('auto'), true);
-  assert.equal(isAttachedPageIntent('open'), false);
-});
-
 test('assertOpenIntentAllowed blocks open intent when restrictions disable new tabs', () => {
   assert.throws(
     () => assertOpenIntentAllowed({ mode: 'manual', noNewTabs: false }),
@@ -733,13 +750,9 @@ test('assertOpenIntentAllowed blocks open intent when restrictions disable new t
 
 **Step 3: Implement minimal predicate**
 
-Add in `exec-engine.js`:
+Add in `exec-engine.js` (`isAttachedPageIntent` was already added in Task 4; reuse it — do not re-declare or diverge):
 
 ```js
-export function isAttachedPageIntent(intent) {
-  return intent !== 'open';
-}
-
 export function assertOpenIntentAllowed(restrictions) {
   if (restrictions?.mode === 'manual' || restrictions?.noNewTabs) {
     throw new BrowserForceMcpError(
@@ -775,7 +788,7 @@ Centralization requirement: keep `chromium.connectOverCDP()` reachable only from
 For attached/current/inspect/manual/no-new-tabs flows, the shared helper must do all of this before `ensureBrowser()` and before any `chromium.connectOverCDP()` call:
 
 1. `await ensureRelay()` so the HTTP relay exists.
-2. Fetch fresh restrictions via relay HTTP (`/restrictions`). Do not use `cachedBrowserforceRestrictions` for this safety gate.
+2. Fetch fresh restrictions via relay HTTP (`/restrictions`) through ONE canonical helper — `fetchBrowserforceRestrictionsForSession({ forceRefresh: true })` — which bypasses the cached value, fetches from the relay, normalizes, updates the cache, and returns the normalized object. Do not read `cachedBrowserforceRestrictions` directly inside the preflight safety gate, and do not hand-roll a second fetcher. `execute`/`reset` must reuse the exact object this helper returns for the rest of the turn (no second fetch, no fallback to the cached value).
 3. Fetch attached status via relay HTTP (`/extension/status`).
 4. Run `assertAttachedPageAvailable(...)`.
 5. Return the fresh restrictions to the caller so `execute` can use the same value for the rest of the turn.
@@ -794,9 +807,6 @@ async function preflightAttachedPageBeforeCdp({ intent = 'inspect' } = {}) {
   }
   return restrictions;
 }
-
-const extensionStatus = await getExtensionStatus({ baseUrl: getRelayHttpUrl() });
-assertAttachedPageAvailable({ extensionStatus, restrictions: browserforceRestrictions });
 ```
 
 In `execute`, default `intent` to `'inspect'`, call `preflightAttachedPageBeforeCdp({ intent })` before `ensureBrowser()`, then reuse the returned fresh restrictions instead of immediately refetching/cached restrictions. Only `intent: 'open'` may bypass attached-page availability, and only after the same preflight has confirmed `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`.
@@ -833,7 +843,7 @@ Document this as a compatibility change: legacy auto-mode bootstrap can be resto
 
 **Step 4.5: Format structured MCP errors**
 
-In `mcp/src/index.js`, when catching `BrowserForceMcpError`, return stable machine-readable text:
+Import `BrowserForceMcpError` (and the `BF_*` error codes it carries) from `mcp/src/exec-engine.js` into `mcp/src/index.js` so the catch site can branch on `err.code` without re-declaring the class. In `mcp/src/index.js`, when catching `BrowserForceMcpError`, return stable machine-readable text:
 
 ```js
 if (err?.code === 'BF_NO_ATTACHED_PAGE') {
@@ -855,7 +865,7 @@ if (err?.code === 'BF_NO_ATTACHED_PAGE') {
 
 Add a behavior test that asserts the returned text includes `"code": "BF_NO_ATTACHED_PAGE"`.
 
-Add a connection-order test with dependency injection or source-level guard if full mocking is too heavy:
+Add a connection-order test that exercises the REAL execute/reset preflight path via dependency injection. This is mandatory, not optional — source-string contracts alone cannot prove `ensureBrowser()`/`chromium.connectOverCDP()` is not reached when preflight fails. Export (or inject) a `runExecuteStartupForTest({ restrictions, extensionStatus, ensureBrowser, ... })` helper from `mcp/src/index.js` (or a testable startup module) that runs the same `preflightAttachedPageBeforeCdp()` → `ensureBrowser()` sequence the live handler uses, with `ensureBrowser`/`fetchBrowserforceRestrictionsForSession`/`getExtensionStatus` injectable so the test can assert ordering and assert `ensureBrowser` is never called when preflight throws.
 
 ```js
 test('manual attached-page preflight fails before connecting over CDP', async () => {
@@ -871,9 +881,38 @@ test('manual attached-page preflight fails before connecting over CDP', async ()
   assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
   assert.deepEqual(calls, []);
 });
+
+test('reset preflight fails before connecting over CDP when no manual tab is attached', async () => {
+  const calls = [];
+  const result = await runResetStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('open intent with no-new-tabs returns BF_NEW_TABS_DISABLED before ensureBrowser', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'open',
+    restrictions: { mode: 'auto', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NEW_TABS_DISABLED');
+  assert.deepEqual(calls, []);
+});
 ```
 
-If adding a full helper is too invasive, use a targeted source contract that verifies `assertAttachedPageAvailable` appears before `await ensureBrowser()` in the `execute` handler, then follow up with an integration test once the handler is easier to isolate.
+If the handler cannot be isolated without significant refactor, extract the preflight+startup sequence into a small `mcp/src/startup.js` that both the live handler and the test import — this is the preferred approach (avoid exporting test helpers from `mcp/src/index.js`, which auto-runs `main()` at module load). Source contracts from Step 1 remain as secondary regression guards only.
 
 **Step 5: Verify**
 
