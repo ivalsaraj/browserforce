@@ -11,7 +11,14 @@ import {
   assertAttachedPageAvailable,
   isAttachedPageIntent,
   BrowserForceMcpError,
+  assertOpenIntentAllowed,
+  shouldCreateImplicitStartupPage,
 } from '../src/exec-engine.js';
+import {
+  runExecuteStartupForTest,
+  runResetStartupForTest,
+  formatBrowserForceMcpError,
+} from '../src/startup.js';
 
 /** Mock globalThis.fetch for a set of URL → body mappings. Returns a restore fn. */
 function mockFetch(urlToBody) {
@@ -1545,4 +1552,132 @@ test('assertAttachedPageAvailable does not throw when restrictions allow new tab
       intent: 'open',
     })
   );
+});
+
+test('assertOpenIntentAllowed blocks open intent when restrictions disable new tabs', () => {
+  assert.throws(
+    () => assertOpenIntentAllowed({ mode: 'manual', noNewTabs: false }),
+    /New tabs are disabled/,
+  );
+  assert.throws(
+    () => assertOpenIntentAllowed({ mode: 'auto', noNewTabs: true }),
+    /New tabs are disabled/,
+  );
+  assert.doesNotThrow(() => assertOpenIntentAllowed({ mode: 'auto', noNewTabs: false }));
+});
+
+test('shouldCreateImplicitStartupPage is false in manual/noNewTabs modes', () => {
+  assert.equal(shouldCreateImplicitStartupPage({ mode: 'manual', noNewTabs: false }), false);
+  assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: true }), false);
+});
+
+test('shouldCreateImplicitStartupPage preserves legacy auto bootstrap only when explicitly enabled', () => {
+  const original = process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+  try {
+    delete process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+    assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: false }), false);
+    process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE = '1';
+    assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: false }), true);
+  } finally {
+    if (original === undefined) delete process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+    else process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE = original;
+  }
+});
+
+// ─── Crash-safe startup ordering (behavior tests via dependency injection) ────
+// These prove ensureBrowser()/chromium.connectOverCDP() is NOT reached when the
+// preflight fails — the primary guarantee of the crash-safe attached-tab change.
+
+test('manual attached-page preflight fails before connecting over CDP', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('default intent returns BF_NO_ATTACHED_PAGE when no manual tab exists in auto mode', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'inspect',
+    restrictions: { mode: 'auto', noNewTabs: false },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('reset preflight fails before connecting over CDP when no manual tab is attached', async () => {
+  const calls = [];
+  const result = await runResetStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('open intent with no-new-tabs returns BF_NEW_TABS_DISABLED before ensureBrowser', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'open',
+    restrictions: { mode: 'auto', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NEW_TABS_DISABLED');
+  assert.deepEqual(calls, []);
+});
+
+test('open intent proceeds to ensureBrowser when restrictions allow new tabs', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'open',
+    restrictions: { mode: 'auto', noNewTabs: false },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => { calls.push('ensureBrowser'); },
+  });
+  assert.equal(result.error, undefined);
+  assert.deepEqual(calls, ['ensureBrowser']);
+});
+
+test('inspect intent proceeds to ensureBrowser when a manual tab is attached', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'inspect',
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 1, manualAttachedTabs: [{ tabId: 7, origin: 'manual' }] },
+    ensureBrowser: async () => { calls.push('ensureBrowser'); },
+  });
+  assert.equal(result.error, undefined);
+  assert.deepEqual(calls, ['ensureBrowser']);
+});
+
+test('formatBrowserForceMcpError returns structured text containing the error code', async () => {
+  const err = new BrowserForceMcpError('No attached BrowserForce page available.', {
+    code: 'BF_NO_ATTACHED_PAGE',
+    details: { activeManualTargets: 0 },
+  });
+  const result = formatBrowserForceMcpError(err);
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].type, 'text');
+  assert.match(result.content[0].text, /"code": "BF_NO_ATTACHED_PAGE"/);
+  assert.match(result.content[0].text, /No attached BrowserForce page available/);
 });

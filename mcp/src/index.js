@@ -7,10 +7,17 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { chromium } from 'playwright-core';
 import {
-  getCdpUrl, getRelayHttpUrl, getRelayHttpUrlFromCdpUrl, assertExtensionConnected,
+  getCdpUrl, getRelayHttpUrl, getRelayHttpUrlFromCdpUrl,
   ensureRelay, connectOverCdpWithBusyRetry,
   CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
+  BrowserForceMcpError, shouldCreateImplicitStartupPage,
 } from './exec-engine.js';
+import {
+  preflightAttachedPageBeforeCdp,
+  runExecuteStartupForTest,
+  runResetStartupForTest,
+  formatBrowserForceMcpError,
+} from './startup.js';
 import {
   loadPlugins,
   buildPluginHelpers,
@@ -155,7 +162,10 @@ async function ensureBrowser() {
     await ensureRelay();
     const cdpUrl = withClientLabel(await getCdpUrl());
     const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
-    await assertExtensionConnected({ baseUrl });
+    // Note: extension readiness is asserted by preflightAttachedPageBeforeCdp()
+    // (via /extension/status) before this point is reached. ensureBrowser itself
+    // must NOT prove readiness via the root / health check — that is not proof
+    // an attached page exists.
     const nextBrowser = await connectOverCdpWithBusyRetry({
       connect: (url) => chromium.connectOverCDP(url),
       cdpUrl,
@@ -256,8 +266,8 @@ function normalizeRestrictions(raw) {
   };
 }
 
-async function getBrowserforceRestrictionsForSession() {
-  if (cachedBrowserforceRestrictions) {
+async function getBrowserforceRestrictionsForSession({ forceRefresh = false } = {}) {
+  if (cachedBrowserforceRestrictions && !forceRefresh) {
     return cachedBrowserforceRestrictions;
   }
 
@@ -398,7 +408,8 @@ Read browserforceSettings + browserforceRestrictions before planning execution.
 - instructions: treat as mandatory policy text for this session.
 
 Empty tabs/targets handling:
-- If tabs/targets are empty, treat it as normal startup state and create/reuse a dedicated tab with context.newPage().
+- For inspect/current/attached-tab tasks (default intent): if there are no manually attached tabs, BrowserForce returns a structured "No attached BrowserForce page available" error instead of creating a tab. Attach a tab with the extension, then retry.
+- For explicit open/navigate tasks (intent: 'open'): user code may create a tab via context.newPage() only when restrictions allow it (mode !== manual and noNewTabs !== true). BrowserForce itself does not create an implicit startup page unless BF_ALLOW_IMPLICIT_STARTUP_PAGE=1 is set for backward compatibility.
 - Do not ask the user to click Attach/Share by default.
 - Ask for manual Attach/Share only when mode=manual or noNewTabs=true, or when the user explicitly asks to use their current tab and it is not available in context.pages().
 
@@ -525,25 +536,27 @@ function registerExecuteTool(skillAppendix = '') {
     {
       code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/getCDPSession/waitForPageLoad/getLogs/getExecConsoleLogs/cleanHTML/pageMarkdown in scope'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
+      intent: z.enum(['inspect', 'open', 'auto']).optional()
+        .describe('Use inspect for current/attached-tab work; use open only when the user explicitly asked to open/navigate. Defaults to inspect.'),
     },
-    async ({ code, timeout = 30000 }) => {
+    async ({ code, intent = 'inspect', timeout = 30000 }) => {
       try {
         beginBrowserOperation();
+        // Preflight BEFORE the CDP connect. This throws BF_NO_ATTACHED_PAGE /
+        // BF_NEW_TABS_DISABLED for attached-only flows with no manual tab, so
+        // CDP startup is never reached for those cases.
+        const browserforceRestrictions = await preflightAttachedPageBeforeCdp({
+          intent,
+          fetchBrowserforceRestrictions: getBrowserforceRestrictionsForSession,
+        });
         await ensureBrowser();
         ensureAllPagesCapture();
-        const [agentPreferences, browserforceRestrictions] = await Promise.all([
-          getAgentPreferencesForSession(),
-          getBrowserforceRestrictionsForSession(),
-        ]);
+        const agentPreferences = await getAgentPreferencesForSession();
         const ctx = getContext();
         const pages = ctx.pages();
         let page = pages[0] || null;
 
-        if (
-          !page &&
-          browserforceRestrictions.mode !== 'manual' &&
-          !browserforceRestrictions.noNewTabs
-        ) {
+        if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
           page = await ctx.newPage();
           userState.page = page;
         }
@@ -569,6 +582,12 @@ function registerExecuteTool(skillAppendix = '') {
             isError: true,
           };
         }
+      } catch (err) {
+        // Structured crash-safe errors from the preflight/startup gate.
+        if (err instanceof BrowserForceMcpError) {
+          return formatBrowserForceMcpError(err);
+        }
+        throw err;
       } finally {
         endBrowserOperation();
       }
@@ -584,6 +603,13 @@ server.tool(
     try {
       beginBrowserOperation();
       clearIdleBrowserDisconnectTimer();
+      // Preflight BEFORE the CDP reconnect: reset reconnects to the attached
+      // page, so it must fail with BF_NO_ATTACHED_PAGE rather than opening or
+      // connecting to CDP when no manual tab is attached.
+      await preflightAttachedPageBeforeCdp({
+        intent: 'inspect',
+        fetchBrowserforceRestrictions: getBrowserforceRestrictionsForSession,
+      });
       if (browser) {
         try { await browser.close(); } catch { /* connection may already be dead */ }
       }
@@ -600,6 +626,9 @@ server.tool(
         content: [{ type: 'text', text: `Reset complete. ${pages.length} page(s) available. Current URL: ${pages[0]?.url() ?? 'none'}` }],
       };
     } catch (err) {
+      if (err instanceof BrowserForceMcpError) {
+        return formatBrowserForceMcpError(err);
+      }
       return {
         content: [{ type: 'text', text: `Reset failed: ${err.message}` }],
         isError: true,

@@ -367,8 +367,8 @@ describe('Tool Definitions', () => {
 
     assert.ok(source.includes('cachedBrowserforceRestrictions'), 'should track cached browserforce restrictions');
     assert.ok(
-      source.includes('if (cachedBrowserforceRestrictions)'),
-      'should return cached restrictions without refetching'
+      source.includes('cachedBrowserforceRestrictions && !forceRefresh'),
+      'should return cached restrictions without refetching (unless forceRefresh)'
     );
     assert.ok(
       source.includes('/restrictions'),
@@ -376,28 +376,65 @@ describe('Tool Definitions', () => {
     );
   });
 
-  it('execute auto-creates a working page when auto mode starts empty', () => {
+  it('execute does not create a page for attached/manual inspection mode when context is empty', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const startupSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/startup.js'),
+      'utf8'
+    );
+
+    assert.ok(startupSource.includes('assertAttachedPageAvailable'), 'shared startup path should assert attached-page availability');
+    assert.ok(source.includes('preflightAttachedPageBeforeCdp'), 'execute should use the shared no-CDP preflight');
+    assert.ok(source.includes('shouldCreateImplicitStartupPage'), 'implicit page creation should be gated behind an explicit predicate');
+  });
+
+  it('reset also runs attached-page preflight before reconnecting over CDP', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
-    assert.ok(
-      source.includes("browserforceRestrictions.mode !== 'manual'"),
-      'execute should skip auto page creation in manual mode'
+    const resetIdx = source.indexOf("'reset'");
+    const resetBlock = source.slice(resetIdx, resetIdx + 3000);
+    assert.ok(resetBlock.includes('preflightAttachedPageBeforeCdp'), 'reset should preflight before ensureBrowser');
+    assert.ok(resetBlock.indexOf('preflightAttachedPageBeforeCdp') < resetBlock.indexOf('ensureBrowser()'));
+  });
+
+  it('execute and reset are the only MCP tool handlers allowed to reach CDP startup', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
     );
-    assert.ok(
-      source.includes('!browserforceRestrictions.noNewTabs'),
-      'execute should skip auto page creation when noNewTabs is enabled'
+    const directEnsureBrowserCalls = [...source.matchAll(/await ensureBrowser\(/g)].map((match) => match.index);
+    assert.equal(directEnsureBrowserCalls.length, 2, 'all CDP startup should remain auditable through execute/reset');
+    for (const idx of directEnsureBrowserCalls) {
+      const surroundingBlock = source.slice(Math.max(0, idx - 1000), idx + 500);
+      assert.match(surroundingBlock, /preflightAttachedPageBeforeCdp/, 'CDP startup must be preflighted in the same branch');
+    }
+    assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
+  });
+
+  it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
     );
-    assert.ok(
-      source.includes('page = await ctx.newPage()'),
-      'execute should bootstrap a new page when the browser context is empty'
+    const ensureBrowserIdx = source.indexOf('async function ensureBrowser');
+    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('function getContext', ensureBrowserIdx));
+    assert.doesNotMatch(ensureBrowserBlock, /assertExtensionConnected/);
+    assert.doesNotMatch(ensureBrowserBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
+  });
+
+  it('execute schema includes an explicit attached-page intent', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
     );
-    assert.ok(
-      source.includes('userState.page = page'),
-      'execute should persist the auto-created page as state.page'
-    );
+    const execBlock = source.split("'execute'")[1]?.split('async ({ code')[0] || '';
+    assert.match(execBlock, /intent:\s*z\.enum\(\['inspect', 'open', 'auto'\]\)\.optional\(\)/);
   });
 
   it('missing active page hint prefers existing pages before opening a new tab', () => {

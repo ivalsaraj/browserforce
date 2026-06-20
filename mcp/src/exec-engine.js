@@ -177,6 +177,30 @@ export function assertAttachedPageAvailable({ extensionStatus, restrictions, int
   );
 }
 
+/** Throw BF_NEW_TABS_DISABLED when an explicit "open" intent is not permitted. */
+export function assertOpenIntentAllowed(restrictions) {
+  if (restrictions?.mode === 'manual' || restrictions?.noNewTabs) {
+    throw new BrowserForceMcpError(
+      'New tabs are disabled in this BrowserForce session.',
+      {
+        code: 'BF_NEW_TABS_DISABLED',
+        details: { restrictions: restrictions || {}, intent: 'open' },
+      },
+    );
+  }
+}
+
+/**
+ * Predicate gating implicit startup page creation. BrowserForce no longer
+ * auto-creates a tab by default; legacy auto-mode bootstrap is opt-in via
+ * BF_ALLOW_IMPLICIT_STARTUP_PAGE=1. Manual/no-new-tabs modes never create.
+ */
+export function shouldCreateImplicitStartupPage(restrictions) {
+  if (restrictions?.mode === 'manual') return false;
+  if (restrictions?.noNewTabs) return false;
+  return process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE === '1';
+}
+
 export function isCdpBusyError(err) {
   const message = String(err?.message || '').toLowerCase();
   return (
