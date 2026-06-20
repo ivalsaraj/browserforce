@@ -28,6 +28,18 @@ test('background reconciles tab groups when attached tabs move between windows',
   assert.match(backgroundJs, /queueSyncTabGroup\(\);/);
 });
 
+test('background suppresses recursive group resync while BrowserForce is applying its own group changes', () => {
+  assert.match(backgroundJs, /let isSyncingTabGroup = false;/);
+  assert.match(backgroundJs, /if \(changeInfo\.groupId !== undefined && !isSyncingTabGroup\) \{/);
+  assert.match(backgroundJs, /isSyncingTabGroup = true;/);
+  assert.match(backgroundJs, /isSyncingTabGroup = false;/);
+});
+
+test('background delays tab-group reconciliation until after manual attach settles', () => {
+  assert.match(backgroundJs, /setTimeout\(\(\) => queueSyncTabGroup\(\), TAB_GROUP_SYNC_AFTER_ATTACH_MS\)/);
+  assert.match(backgroundJs, /const TAB_GROUP_SYNC_AFTER_ATTACH_MS = \d+;/);
+});
+
 test('background re-announces manually attached tabs after relay reconnect', () => {
   assert.match(backgroundJs, /function notifyRelayManualTabAttached\(tabId,\s*entry\)/);
   assert.match(backgroundJs, /function notifyRelayAttachedTabs\(\)/);

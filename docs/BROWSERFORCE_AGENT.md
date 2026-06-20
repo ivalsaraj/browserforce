@@ -54,6 +54,7 @@ browserforce agent stop
 - When you ask the agent to `check`, `inspect`, `look at`, `review`, or `read` an attached page, it should start with `context.pages()` and reuse the matching existing tab.
 - In that flow, it should not call `context.newPage()` or `page.goto()` just to find a page that is already open.
 - If the page you want is not present in `context.pages()`, the agent should tell you instead of opening a fresh copy.
+- BrowserForce now defers tab-group reconciliation briefly after attach and suppresses self-triggered regroup loops while a group sync is already in progress. This reduces attach-time Chrome churn for manually attached tabs.
 
 ## Session Model
 

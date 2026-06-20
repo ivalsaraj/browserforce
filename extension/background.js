@@ -8,6 +8,7 @@ const RECONNECT_DELAY_MS = 3000;
 const CDP_VERSION = '1.3';
 const RELAY_HTTP_DEFAULT = 'http://127.0.0.1:19222';
 const TAB_GROUP_COLOR = 'orange';
+const TAB_GROUP_SYNC_AFTER_ATTACH_MS = 750;
 const BADGE_COLORS = {
   connected: '#C15F3C',
   connecting: '#B1ADA1',
@@ -29,6 +30,7 @@ const childSessions = new Map();
 
 /** Serializes tab group operations to avoid races (same pattern as playwriter) */
 let tabGroupQueue = Promise.resolve();
+let isSyncingTabGroup = false;
 
 /** Tracks last CDP activity per attached tab (tabId → timestamp ms) */
 const tabLastActivity = new Map();
@@ -300,7 +302,7 @@ async function attachTab(tabId, sessionId) {
     const existing = attachedTabs.get(tabId);
     existing.sessionId = sessionId;
     // Ensure attached tabs are always reconciled into the browserforce group.
-    queueSyncTabGroup();
+    setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
     return existing;
   }
 
@@ -333,7 +335,7 @@ async function attachTab(tabId, sessionId) {
   attachedTabs.set(tabId, entry);
   updateBadge();
   tabLastActivity.set(tabId, Date.now());
-  queueSyncTabGroup();
+  setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
 
   return entry;
 }
@@ -584,7 +586,7 @@ function onTabUpdated(tabId, changeInfo) {
   if (!changeInfo.url && !changeInfo.title && changeInfo.groupId === undefined) return;
 
   // Reconcile group membership/title if user or Chrome moved this attached tab.
-  if (changeInfo.groupId !== undefined) {
+  if (changeInfo.groupId !== undefined && !isSyncingTabGroup) {
     queueSyncTabGroup();
   }
 
@@ -699,6 +701,7 @@ chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) =
  * Modeled after playwriter's syncTabGroup — always queries by title, never caches group ID.
  */
 async function syncTabGroup() {
+  isSyncingTabGroup = true;
   try {
     const connectedTabIds = Array.from(attachedTabs.keys());
     const existingGroups = await chrome.tabGroups.query({ title: 'browserforce' });
@@ -753,6 +756,8 @@ async function syncTabGroup() {
     }
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);
+  } finally {
+    isSyncingTabGroup = false;
   }
 }
 
