@@ -2247,6 +2247,26 @@ describe('Extension Status Endpoints', () => {
     assert.match(res.text, /Invalid Host header/);
   });
 
+  it('rejects malformed bracketed Host header', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: '[::1' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.text, /Invalid Host header/);
+  });
+
+  it('rejects Host header with non-numeric port', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: '127.0.0.1:bad' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.text, /Invalid Host header/);
+  });
+
   it('allows localhost Host headers for status endpoints', async () => {
     const res = await rawHttpGet({
       port,
