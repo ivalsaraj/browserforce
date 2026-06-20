@@ -46,3 +46,17 @@ test('background re-announces manually attached tabs after relay reconnect', () 
   assert.match(backgroundJs, /for \(const \[tabId,\s*entry\] of attachedTabs\)/);
   assert.match(backgroundJs, /notifyRelayAttachedTabs\(\);/);
 });
+
+test('background tracks attached tab provenance without adding a new relay command', () => {
+  assert.match(backgroundJs, /origin:\s*'manual'/);
+  assert.match(backgroundJs, /origin:\s*'agent-created'/);
+  assert.match(backgroundJs, /origin:\s*entry\.origin/);
+  assert.doesNotMatch(backgroundJs, /case 'getAttachedTabs':/);
+});
+
+test('background reconnect replay preserves attached tab provenance', () => {
+  assert.match(backgroundJs, /function notifyRelayManualTabAttached\(tabId,\s*entry\)/);
+  assert.match(backgroundJs, /origin:\s*entry\.origin/);
+  assert.match(backgroundJs, /function notifyRelayAttachedTabs\(\)/);
+  assert.match(backgroundJs, /for \(const \[tabId,\s*entry\] of attachedTabs\)/);
+});

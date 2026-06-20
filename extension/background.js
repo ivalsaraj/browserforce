@@ -22,8 +22,11 @@ let connectionState = 'disconnected'; // disconnected | connecting | connected
 let maintainLoopActive = false;
 let currentRelayUrl = RELAY_URL_DEFAULT;
 
-/** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object }>} */
+/** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object, origin: string }>} */
 const attachedTabs = new Map();
+
+/** Allowlisted tab attachment provenance. Unrecognized origins fall back to 'unknown'. */
+const ALLOWED_TAB_ORIGINS = new Set(['manual', 'agent-created', 'relay-attached']);
 
 /** @type {Map<string, number>} Chrome child sessionId -> parent tabId */
 const childSessions = new Map();
@@ -217,7 +220,7 @@ async function executeCommand(msg) {
     case 'listTabs':
       return listTabs();
     case 'attachTab':
-      return attachTab(msg.params.tabId, msg.params.sessionId);
+      return attachTab(msg.params.tabId, msg.params.sessionId, { origin: msg.params.origin });
     case 'detachTab':
       return detachTab(msg.params.tabId);
     case 'createTab':
@@ -296,11 +299,14 @@ async function listTabs() {
   };
 }
 
-async function attachTab(tabId, sessionId) {
+async function attachTab(tabId, sessionId, options = {}) {
+  const origin = ALLOWED_TAB_ORIGINS.has(options.origin) ? options.origin : 'unknown';
   // If already attached, update sessionId and return existing info
   if (attachedTabs.has(tabId)) {
     const existing = attachedTabs.get(tabId);
     existing.sessionId = sessionId;
+    // Preserve provenance: only overwrite origin when the incoming value is allowlisted.
+    if (ALLOWED_TAB_ORIGINS.has(options.origin)) existing.origin = origin;
     // Ensure attached tabs are always reconciled into the browserforce group.
     setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
     return existing;
@@ -331,7 +337,7 @@ async function attachTab(tabId, sessionId) {
     targetInfo = { targetId, type: 'page', title: tab.title, url: tab.url };
   }
 
-  const entry = { sessionId, targetId, targetInfo, tabId };
+  const entry = { sessionId, targetId, targetInfo, tabId, origin };
   attachedTabs.set(tabId, entry);
   updateBadge();
   tabLastActivity.set(tabId, Date.now());
@@ -392,7 +398,7 @@ async function createTab(params) {
   // Brief delay for Chrome to finalize tab creation
   await sleep(200);
 
-  const result = await attachTab(tab.id, params.sessionId);
+  const result = await attachTab(tab.id, params.sessionId, { origin: 'agent-created' });
   agentCreatedTabs.add(tab.id);
   return result;
 }
@@ -781,6 +787,7 @@ function notifyRelayManualTabAttached(tabId, entry) {
       sessionId: entry.sessionId,
       targetId: entry.targetId,
       targetInfo: entry.targetInfo,
+      origin: entry.origin || 'unknown',
     },
   });
 }
@@ -934,7 +941,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       try {
         const sessionId = `manual-${tab.id}-${Date.now()}`;
-        const entry = await attachTab(tab.id, sessionId);
+        const entry = await attachTab(tab.id, sessionId, { origin: 'manual' });
         notifyRelayManualTabAttached(tab.id, entry);
         sendResponse({ ok: true, tabId: tab.id });
       } catch (err) {

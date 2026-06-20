@@ -1303,6 +1303,8 @@ class RelayServer {
       const result = await this._sendToExt('attachTab', {
         tabId: target.tabId,
         sessionId,
+        // Preserve manual provenance; any other origin is a relay-driven lazy attach.
+        origin: target.origin === 'manual' ? 'manual' : 'relay-attached',
       });
       if (result.targetId) target.targetId = result.targetId;
       if (result.targetInfo) target.targetInfo = result.targetInfo;

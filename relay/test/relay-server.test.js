@@ -2237,6 +2237,37 @@ describe('Extension Status Endpoints', () => {
     await sleep(100);
   });
 
+  it('preserves non-manual origin when attached tabs are replayed after reconnect', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 55,
+        sessionId: 'agent-55-1',
+        targetId: 'bf-target-55',
+        targetInfo: { url: 'https://agent.example', title: 'Agent' },
+        origin: 'agent-created',
+      },
+    }));
+    await sleep(100);
+
+    const status = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+    assert.equal(status.body.activeTargets, 1);
+    assert.equal(status.body.activeManualTargets, 0);
+    assert.equal(status.body.attachedTabs[0].origin, 'agent-created');
+    assert.deepEqual(status.body.manualAttachedTabs, []);
+
+    ext.close();
+    await sleep(100);
+  });
+
   it('rejects HTTP requests with non-local Host header before URL parsing', async () => {
     const res = await rawHttpGet({
       port,
