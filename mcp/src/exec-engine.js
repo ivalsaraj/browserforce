@@ -92,39 +92,89 @@ export function getRelayHttpUrlFromCdpUrl(cdpUrl) {
 }
 
 export async function assertExtensionConnected({ baseUrl = getRelayHttpUrl(), timeoutMs = 2000 } = {}) {
+  // Use the relay-owned /extension/status endpoint (not the root / health check)
+  // so this never doubles as proof that an attached page exists — it only proves
+  // the extension is connected. Attached-page readiness is asserted separately
+  // via assertAttachedPageAvailable() in the MCP startup preflight.
   const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
-  let response;
+  let status;
   try {
-    response = await fetch(`${resolvedBaseUrl}/`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch {
+    status = await getExtensionStatus({ baseUrl: resolvedBaseUrl, timeoutMs });
+  } catch (err) {
     throw new Error(
       `Cannot reach BrowserForce relay at ${resolvedBaseUrl}. ` +
       'Start it with `browserforce serve`.'
     );
   }
 
-  if (!response.ok) {
-    throw new Error(
-      `Cannot reach BrowserForce relay at ${resolvedBaseUrl} (HTTP ${response.status}).`
-    );
-  }
-
-  let status;
-  try {
-    status = await response.json();
-  } catch {
-    throw new Error(`Relay at ${resolvedBaseUrl} returned invalid status JSON.`);
-  }
-
-  if (status?.extension !== true) {
+  if (!status?.connected) {
     throw new Error(
       `BrowserForce extension is not connected to relay at ${resolvedBaseUrl}.`
     );
   }
 
   return status;
+}
+
+// ─── Attached-Page Status Helpers ────────────────────────────────────────────
+
+/** Inspect/open intent predicate. Anything that is not an explicit "open" is
+ * treated as attached-page-safe (inspect/current/auto all reuse existing tabs). */
+export function isAttachedPageIntent(intent) {
+  return intent !== 'open';
+}
+
+/** Structured MCP error carrying a stable machine-readable code + details. */
+export class BrowserForceMcpError extends Error {
+  constructor(message, { code, details = {} }) {
+    super(message);
+    this.name = 'BrowserForceMcpError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/** Read relay-owned attached-tab introspection without opening a CDP connection. */
+export async function getExtensionStatus({ baseUrl = getRelayHttpUrl(), timeoutMs = 2000 } = {}) {
+  const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
+  const response = await fetch(`${resolvedBaseUrl}/extension/status`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`Cannot read BrowserForce extension status (HTTP ${response.status}).`);
+  }
+  return await response.json();
+}
+
+/**
+ * Assert that a manually attached page is available for inspect/current-tab flows.
+ * Throws BF_NO_ATTACHED_PAGE (a BrowserForceMcpError) when the session is in an
+ * attached-only mode but no manual tab is attached. No-op when the intent is
+ * "open" and restrictions allow new tabs.
+ */
+export function assertAttachedPageAvailable({ extensionStatus, restrictions, intent = 'inspect' }) {
+  const isAttachedOnly =
+    isAttachedPageIntent(intent) ||
+    restrictions?.mode === 'manual' ||
+    restrictions?.noNewTabs === true ||
+    process.env.BF_REQUIRE_ATTACHED_PAGE === '1';
+  if (!isAttachedOnly) return;
+  if (extensionStatus?.activeManualTargets > 0 || extensionStatus?.manualAttachedTabs?.length > 0) return;
+  throw new BrowserForceMcpError(
+    'No attached BrowserForce page available. Attach a tab with the BrowserForce extension, then retry.',
+    {
+      code: 'BF_NO_ATTACHED_PAGE',
+      details: {
+        connected: !!extensionStatus?.connected,
+        activeTargets: Number(extensionStatus?.activeTargets || 0),
+        activeManualTargets: Number(extensionStatus?.activeManualTargets || 0),
+        attachedTabs: extensionStatus?.attachedTabs || [],
+        manualAttachedTabs: extensionStatus?.manualAttachedTabs || [],
+        restrictions: restrictions || {},
+        intent,
+      },
+    },
+  );
 }
 
 export function isCdpBusyError(err) {

@@ -7,7 +7,25 @@ import {
   getRelayHttpUrl,
   getCdpUrl,
   assertExtensionConnected,
+  getExtensionStatus,
+  assertAttachedPageAvailable,
+  isAttachedPageIntent,
+  BrowserForceMcpError,
 } from '../src/exec-engine.js';
+
+/** Mock globalThis.fetch for a set of URL → body mappings. Returns a restore fn. */
+function mockFetch(urlToBody) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const key = String(url);
+    const body = urlToBody[key];
+    if (body === undefined) {
+      return { ok: false, status: 404, json: async () => ({ error: 'not mocked' }) };
+    }
+    return { ok: true, status: 200, json: async () => body };
+  };
+  return () => { globalThis.fetch = originalFetch; };
+}
 
 const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => 'Test' };
 const mockCtx = { pages: () => [mockPage] };
@@ -1413,7 +1431,7 @@ test('assertExtensionConnected throws a clear error when extension is disconnect
   try {
     globalThis.fetch = async () => ({
       ok: true,
-      json: async () => ({ status: 'ok', extension: false }),
+      json: async () => ({ connected: false, activeTargets: 0 }),
     });
     await assert.rejects(
       () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' }),
@@ -1429,7 +1447,7 @@ test('assertExtensionConnected succeeds when extension is connected', async () =
   try {
     globalThis.fetch = async () => ({
       ok: true,
-      json: async () => ({ status: 'ok', extension: true }),
+      json: async () => ({ connected: true, activeTargets: 0 }),
     });
     await assert.doesNotReject(
       () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' })
@@ -1437,4 +1455,94 @@ test('assertExtensionConnected succeeds when extension is connected', async () =
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('assertExtensionConnected throws when relay is unreachable', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    await assert.rejects(
+      () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' }),
+      /Cannot reach BrowserForce relay/i
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getExtensionStatus reads relay /extension/status', async () => {
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 1,
+      activeManualTargets: 0,
+      attachedTabs: [{ tabId: 1, url: 'https://example.com', title: 'Example', origin: 'agent-created' }],
+      manualAttachedTabs: [],
+    },
+  });
+  try {
+    const status = await getExtensionStatus({ baseUrl: 'http://127.0.0.1:19222' });
+    assert.equal(status.connected, true);
+    assert.equal(status.activeTargets, 1);
+    assert.equal(status.activeManualTargets, 0);
+    assert.deepEqual(status.manualAttachedTabs, []);
+  } finally {
+    restore();
+  }
+});
+
+test('getExtensionStatus throws when relay returns non-ok response', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({ ok: false, status: 502 });
+    await assert.rejects(
+      () => getExtensionStatus({ baseUrl: 'http://127.0.0.1:19222' }),
+      /Cannot read BrowserForce extension status/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('isAttachedPageIntent defaults to inspect-safe behavior', () => {
+  assert.equal(isAttachedPageIntent(undefined), true);
+  assert.equal(isAttachedPageIntent('inspect'), true);
+  assert.equal(isAttachedPageIntent('auto'), true);
+  assert.equal(isAttachedPageIntent('open'), false);
+});
+
+test('assertAttachedPageAvailable throws BF_NO_ATTACHED_PAGE when manual mode has no tabs', async () => {
+  await assert.rejects(
+    async () => assertAttachedPageAvailable({
+      extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, attachedTabs: [{ origin: 'agent-created' }], manualAttachedTabs: [] },
+      restrictions: { mode: 'manual', noNewTabs: true },
+    }),
+    (err) => {
+      assert.equal(err.code, 'BF_NO_ATTACHED_PAGE');
+      assert.equal(err.details.connected, true);
+      assert.equal(err.details.activeTargets, 1);
+      assert.equal(err.details.activeManualTargets, 0);
+      assert.equal(err.details.restrictions.mode, 'manual');
+      return true;
+    }
+  );
+});
+
+test('assertAttachedPageAvailable does not throw when a manual tab is attached', () => {
+  assert.doesNotThrow(() =>
+    assertAttachedPageAvailable({
+      extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 1, manualAttachedTabs: [{ tabId: 7, origin: 'manual' }] },
+      restrictions: { mode: 'manual', noNewTabs: true },
+    })
+  );
+});
+
+test('assertAttachedPageAvailable does not throw when restrictions allow new tabs and intent is open', () => {
+  assert.doesNotThrow(() =>
+    assertAttachedPageAvailable({
+      extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+      restrictions: { mode: 'auto', noNewTabs: false },
+      intent: 'open',
+    })
+  );
 });
