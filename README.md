@@ -971,12 +971,19 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 | ------------------------ | --------------------------------------------- |
 | `GET /`                  | Health check (extension status, target count) |
 | `GET /client-slot`       | Client-slot state: `{ mode, busy, activeClientId, connectedAt }` |
+| `GET /extension/status`  | Attached-tab introspection: `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }` (no wildcard CORS) |
+| `GET /attached-tabs`     | Attached-tab list: `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }` (no wildcard CORS) |
 | `GET /json/version`      | CDP discovery                                 |
 | `GET /json/list`         | List attached targets                         |
 | `GET /logs/status` | Logs viewer status (extension-only origin) |
 | `GET /logs/cdp?after=&limit=` | Incremental CDP log polling feed (extension-only origin) |
 | `ws://.../extension` | Chrome extension WebSocket |
 | `ws://.../cdp?token=...` | Agent CDP connection |
+
+**Local HTTP API security:**
+- **Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients (curl, Node).
+- **CORS:** `/extension/status` and `/attached-tabs` intentionally omit `Access-Control-Allow-Origin` because they expose local browsing metadata (tab URLs/titles); arbitrary websites must not read them. Other routes retain wildcard CORS for CDP discovery.
+- **`/extension/status` vs `/json/list`:** `/json/list` returns CDP-discovery-shaped targets for Playwright; `/extension/status` returns relay-owned provenance — `manualAttachedTabs` are user-attached tabs (`origin: 'manual'`), while `attachedTabs` can also include `agent-created` and `relay-attached` tabs. Use `activeManualTargets`/`manualAttachedTabs` to confirm an attached page is ready for inspect/current-tab flows.
 
 Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
 

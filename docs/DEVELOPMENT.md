@@ -60,6 +60,25 @@ manual attach announcements for the same tab as updates to the existing target,
 not as new targets. This keeps attached tabs visible to MCP after Codex or the
 relay process restarts.
 
+## Relay Status & Introspection Endpoints
+
+The relay exposes localhost-only status endpoints that read existing relay state
+without opening a Playwright CDP connection:
+
+```bash
+curl -s http://127.0.0.1:19222/extension/status | jq
+curl -s http://127.0.0.1:19222/attached-tabs | jq
+```
+
+- `GET /extension/status` → `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }`.
+- `GET /attached-tabs` → `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }`.
+- `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). `attachedTabs` also includes `agent-created` and `relay-attached` tabs. Use `activeManualTargets > 0` to confirm an attached page is ready for inspect/current-tab flows.
+- These differ from `/json/list` (CDP-discovery shape for Playwright) — the status endpoints carry relay-owned provenance.
+
+**Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients.
+
+**CORS:** `/extension/status` and `/attached-tabs` intentionally omit `Access-Control-Allow-Origin` because they expose local browsing metadata (tab URLs/titles); arbitrary websites must not read them.
+
 ## Debug Side-Panel Streaming Events
 
 The side-panel receives SSE from chatd (`/v1/events`). You can inspect the same stream directly.

@@ -58,6 +58,25 @@ function httpGetWithHeaders(url, headers = {}) {
   });
 }
 
+/** Raw HTTP GET that lets the test control the exact inbound Host header (bypasses URL-derived host). */
+function rawHttpGet({ port, path: reqPath = '/', headers = {} }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: reqPath,
+      method: 'GET',
+      headers,
+    }, (res) => {
+      let text = '';
+      res.on('data', (d) => (text += d));
+      res.on('end', () => resolve({ status: res.statusCode, text, headers: res.headers }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** Connect a WebSocket and wait for open */
 function connectWs(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -2123,6 +2142,125 @@ describe('manualTabAttached handler', () => {
 
     ext.close();
     await sleep(100);
+  });
+});
+
+// ─── Extension Status Endpoints ─────────────────────────────────────────────
+
+describe('Extension Status Endpoints', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('GET /extension/status reports extension connection and active targets', async () => {
+    const statusBefore = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+    assert.equal(statusBefore.status, 200);
+    assert.equal(statusBefore.body.connected, false);
+    assert.equal(statusBefore.body.activeTargets, 0);
+    assert.deepEqual(statusBefore.body.attachedTabs, []);
+  });
+
+  it('GET /extension/status includes manually attached tab metadata', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 44,
+        sessionId: 'manual-44-1',
+        targetId: 'bf-target-44',
+        origin: 'manual',
+        targetInfo: { url: 'https://example.com', title: 'Example' },
+      },
+    }));
+    await sleep(100);
+
+    const status = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+    assert.equal(status.body.connected, true);
+    assert.equal(status.body.activeTargets, 1);
+    assert.equal(status.body.activeManualTargets, 1);
+    assert.equal(status.body.manualAttachedTabs[0].tabId, 44);
+    assert.equal(status.body.manualAttachedTabs[0].url, 'https://example.com');
+    assert.equal(status.body.manualAttachedTabs[0].title, 'Example');
+    assert.equal(status.body.manualAttachedTabs[0].targetId, 'bf-target-44');
+    assert.equal(status.body.manualAttachedTabs[0].origin, 'manual');
+
+    ext.close();
+    await sleep(100);
+  });
+
+  it('GET /attached-tabs returns the attached tab list', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+    });
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 45,
+        sessionId: 'manual-45-1',
+        targetId: 'bf-target-45',
+        origin: 'manual',
+        targetInfo: { url: 'https://attached.example', title: 'Attached' },
+      },
+    }));
+    await sleep(100);
+
+    const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.tabs));
+    assert.equal(res.body.tabs.length, 1);
+    assert.equal(res.body.tabs[0].tabId, 45);
+    assert.equal(res.body.tabs[0].origin, 'manual');
+
+    ext.close();
+    await sleep(100);
+  });
+
+  it('rejects HTTP requests with non-local Host header before URL parsing', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: 'evil.example' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.text, /Invalid Host header/);
+  });
+
+  it('allows localhost Host headers for status endpoints', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: `127.0.0.1:${port}` },
+    });
+    assert.equal(res.status, 200);
+  });
+
+  it('does not expose attached-tab status to arbitrary browser origins with CORS', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+      headers: { Origin: 'https://evil.example' },
+    });
+    assert.notEqual(res.headers.get('access-control-allow-origin'), '*');
   });
 });
 
