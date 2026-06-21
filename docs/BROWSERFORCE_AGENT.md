@@ -154,6 +154,15 @@ Optional external config:
   - Token mismatch/stale bootstrap. Restart daemon and reopen side panel.
 - `Context: unavailable` chip:
   - No `run.usage` emitted yet for that session. Send a run and re-open session metadata.
+- "MCP shows zero / no attached page" (BF_NO_ATTACHED_PAGE):
+  - Attach a tab with the BrowserForce extension popup, then retry. Confirm attached-tab readiness directly:
+    ```bash
+    curl -s http://127.0.0.1:19222/extension/status | jq '.activeManualTargets, .manualAttachedTabs'
+    curl -s http://127.0.0.1:19222/attached-tabs | jq '.tabs'
+    ```
+  - `activeManualTargets > 0` / `manualAttachedTabs` non-empty means inspect/current-tab flows are ready. `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs.
+- BF_NEW_TABS_DISABLED from execute({ intent: 'open' }):
+  - The session is attached-only. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`. Set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process to restore the legacy auto-bootstrap.
 
 ## Screenshots (Add Later)
 

@@ -1042,6 +1042,41 @@ curl -s http://127.0.0.1:19222/client-slot | jq
 
 Expected: `cdp-url` points to `ws://127.0.0.1:19222/...` and `/client-slot` returns `{ mode, busy, activeClientId, connectedAt }`.
 
+### Diagnose attached-tab readiness
+
+Before inspecting or asking MCP to open a new tab, query the relay-owned status endpoints to confirm what is connected and what is attached:
+
+```bash
+curl -s http://127.0.0.1:19222/extension/status | jq
+curl -s http://127.0.0.1:19222/attached-tabs | jq
+curl -s http://127.0.0.1:19222/client-slot | jq
+```
+
+Expected outputs:
+
+- `connected: false` — extension not connected to relay.
+- `connected: true, activeTargets: 0` — extension connected but no tab attached.
+- `activeManualTargets > 0` or `manualAttachedTabs.length > 0` — attached-tab mode is ready; MCP can inspect the current page.
+- `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs, which are not user-attached. Use `manualAttachedTabs` / `activeManualTargets` to confirm inspect/current-tab readiness.
+- `clients > 0` — a CDP client is currently active.
+
+### MCP Error: `New tabs are disabled in BrowserForce attached-tab mode.`
+
+This is the structured `BF_NEW_TABS_DISABLED` / `BF_NO_ATTACHED_PAGE` response. It means the current session is in an attached-only mode and either no manual tab is attached, or an explicit new-tab request is not allowed.
+
+Recovery depends on the flow:
+
+- **Attached / inspect / current-tab flow:** attach a tab with the BrowserForce extension popup first, then retry. Confirm with `curl -s http://127.0.0.1:19222/extension/status | jq` that `manualAttachedTabs` is non-empty (or `activeManualTargets > 0`).
+- **Explicit open / navigate flow (`execute({ intent: 'open' })`):** the relay guard will only honor this when `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`.
+- **Crash-safe default:** BrowserForce no longer auto-creates a tab. To restore the legacy auto-bootstrap, set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process.
+
+Quick checks:
+
+```bash
+curl -s http://127.0.0.1:19222/extension/status | jq '.activeManualTargets, .manualAttachedTabs'
+curl -s http://127.0.0.1:19222/client-slot | jq
+```
+
 ### MCP Error: `Unexpected server response: 409`
 
 This appears when `BF_CLIENT_MODE=single-active` and another CDP client currently holds the slot.
