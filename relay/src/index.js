@@ -12,6 +12,8 @@ const DEFAULT_PORT = 19222;
 const COMMAND_TIMEOUT_MS = 30000;
 const PING_INTERVAL_MS = 5000;
 const DEFAULT_CDP_LOG_BUFFER_LIMIT = 10000;
+const RESTRICTIONS_FETCH_TIMEOUT_MS = 2000;
+const RESTRICTIONS_FAIL_CLOSED = Object.freeze({ mode: 'manual', noNewTabs: true });
 
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
@@ -40,6 +42,45 @@ function sanitizeClientLabel(label) {
   const cleaned = label.trim().replace(/[^\w .:@/-]/g, '');
   if (!cleaned) return null;
   return cleaned.slice(0, 80);
+}
+
+// ─── HTTP Host Validation ────────────────────────────────────────────────────
+//
+// Local-only protection against DNS rebinding: reject non-local Host headers
+// before URL parsing so a public hostname cannot be mapped onto relay routes.
+// A missing Host header is deliberately allowed for local non-browser clients
+// (curl, Node scripts) — this is a compatibility exception, not a relaxation
+// of the local-only security model (the relay still binds 127.0.0.1 only).
+
+const ALLOWED_HTTP_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+function parseHttpHostHeader(hostHeader) {
+  const value = String(hostHeader || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    if (end === -1) return null;
+    const host = value.slice(0, end + 1);
+    const rest = value.slice(end + 1);
+    if (rest && !/^:\d+$/.test(rest)) return null;
+    return host;
+  }
+  if (value === '::1') return '::1';
+  const colon = value.indexOf(':');
+  if (colon === -1) return value;
+  const host = value.slice(0, colon);
+  const port = value.slice(colon + 1);
+  if (!/^\d+$/.test(port)) return null;
+  return host || null;
+}
+
+// Introspection endpoints carry local browsing metadata (tab URLs/titles) and
+// must not be readable cross-origin by arbitrary websites. Wildcard CORS stays
+// the default for CDP-discovery/health routes only.
+const NO_WILDCARD_CORS_PATHS = new Set(['/extension/status', '/attached-tabs']);
+
+function shouldAllowWildcardCors(pathname) {
+  return !NO_WILDCARD_CORS_PATHS.has(pathname);
 }
 
 // ─── Token Persistence ──────────────────────────────────────────────────────
@@ -280,9 +321,22 @@ class RelayServer {
   // ─── HTTP ────────────────────────────────────────────────────────────────
 
   async _handleHttp(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    // Host validation runs before URL parsing so a non-local Host cannot be
+    // mapped onto relay routes (DNS rebinding protection). A missing Host
+    // header is allowed for local non-browser clients.
+    const parsedHost = parseHttpHostHeader(req.headers.host);
+    if ((req.headers.host && !parsedHost) || (parsedHost && !ALLOWED_HTTP_HOSTS.has(parsedHost))) {
+      res.statusCode = 403;
+      res.setHeader('Content-Type', 'text/plain');
+      res.end('Forbidden - Invalid Host header');
+      return;
+    }
+
+    const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
     res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (shouldAllowWildcardCors(url.pathname)) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
 
     if (url.pathname === '/') {
       res.end(JSON.stringify({
@@ -304,6 +358,16 @@ class RelayServer {
         connectedAt: busy ? this.activeClient.connectedAt : null,
         clients: this.clients.size,
       }));
+      return;
+    }
+
+    if (url.pathname === '/extension/status') {
+      res.end(JSON.stringify(this._getExtensionStatusBody()));
+      return;
+    }
+
+    if (url.pathname === '/attached-tabs') {
+      res.end(JSON.stringify({ tabs: this._getAttachedTabInfos() }));
       return;
     }
 
@@ -612,6 +676,34 @@ class RelayServer {
     return true;
   }
 
+  // ─── Attached Tab Status ────────────────────────────────────────────────
+
+  _getAttachedTabInfos() {
+    return [...this.targets.values()].map((target) => ({
+      tabId: target.tabId,
+      sessionId: this.tabToSession.get(target.tabId) || null,
+      targetId: target.targetId,
+      title: target.targetInfo?.title || '',
+      url: target.targetInfo?.url || '',
+      debuggerAttached: !!target.debuggerAttached,
+      origin: target.origin || 'unknown',
+    }));
+  }
+
+  _getExtensionStatusBody() {
+    const attachedTabs = this._getAttachedTabInfos();
+    const manualAttachedTabs = attachedTabs.filter((tab) => tab.origin === 'manual');
+    return {
+      connected: !!this.ext,
+      activeTargets: attachedTabs.length,
+      activeManualTargets: manualAttachedTabs.length,
+      attachedTabs,
+      manualAttachedTabs,
+      clients: this.clients.size,
+      startedAt: new Date(this.startedAt).toISOString(),
+    };
+  }
+
   _logsStatus() {
     const clients = [];
     for (const client of this.clients) {
@@ -840,20 +932,31 @@ class RelayServer {
     }
 
     if (msg.method === 'manualTabAttached') {
-      const { tabId, sessionId, targetId, targetInfo } = msg.params;
-      const relaySessionId = `bf-session-${++this.sessionCounter}`;
+      const { tabId, sessionId, targetId, targetInfo, origin } = msg.params;
+      const allowedOrigins = new Set(['manual', 'agent-created', 'relay-attached']);
+      const storedOrigin = allowedOrigins.has(origin) ? origin : 'unknown';
+      const existingSessionId = this.tabToSession.get(tabId);
+      const relaySessionId = existingSessionId || `bf-session-${++this.sessionCounter}`;
+      const existing = this.targets.get(relaySessionId);
       this.targets.set(relaySessionId, {
         tabId,
         targetId: targetId || `bf-target-${tabId}`,
         targetInfo: targetInfo || { url: '', title: '' },
         debuggerAttached: true,
+        // Preserve provenance when updating an existing tab; only overwrite when
+        // the incoming origin is an allowlisted value. The legacy message name
+        // is "manualTabAttached" but the payload may carry agent-created or
+        // relay-attached provenance during reconnect replay.
+        origin: existing?.origin && !allowedOrigins.has(origin) ? existing.origin : storedOrigin,
       });
       this.tabToSession.set(tabId, relaySessionId);
 
       // Notify connected CDP clients
-      for (const client of this.clients) {
-        if (client.readyState === 1) { // WebSocket.OPEN
-          this._sendAttachedEvent(client, relaySessionId, this.targets.get(relaySessionId));
+      if (!existingSessionId) {
+        for (const client of this.clients) {
+          if (client.readyState === 1) { // WebSocket.OPEN
+            this._sendAttachedEvent(client, relaySessionId, this.targets.get(relaySessionId));
+          }
         }
       }
       return;
@@ -861,7 +964,7 @@ class RelayServer {
   }
 
   /** Send command to extension, returns promise */
-  _sendToExt(method, params = {}) {
+  _sendToExt(method, params = {}, { timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
     return new Promise((resolve, reject) => {
       if (!this.ext || this.ext.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Extension not connected'));
@@ -871,12 +974,36 @@ class RelayServer {
       const id = ++this.extMsgId;
       const timer = setTimeout(() => {
         this.extPending.delete(id);
-        reject(new Error(`Extension command '${method}' timed out after ${COMMAND_TIMEOUT_MS}ms`));
-      }, COMMAND_TIMEOUT_MS);
+        reject(new Error(`Extension command '${method}' timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
 
       this.extPending.set(id, { resolve, reject, timer });
       this.ext.ws.send(JSON.stringify({ id, method, params }));
     });
+  }
+
+  // ─── Restrictions Guard (fail-closed) ──────────────────────────────────────
+
+  /**
+   * Fetch restrictions for the Target.createTarget guard. Fail-closed: every
+   * inability-to-read path (extension missing, timeout, malformed response,
+   * extension error, transport failure) returns manual+noNewTabs so tab
+   * creation is blocked deterministically. Do not cache — settings can change
+   * from the popup between requests.
+   */
+  async _getRestrictionsSafe() {
+    try {
+      const raw = await this._sendToExt('getRestrictions', {}, { timeoutMs: RESTRICTIONS_FETCH_TIMEOUT_MS });
+      if (!raw || typeof raw !== 'object') {
+        return RESTRICTIONS_FAIL_CLOSED;
+      }
+      return {
+        mode: raw.mode === 'manual' ? 'manual' : 'auto',
+        noNewTabs: !!raw.noNewTabs,
+      };
+    } catch {
+      return RESTRICTIONS_FAIL_CLOSED;
+    }
   }
 
   // ─── CDP Events from Extension ──────────────────────────────────────────
@@ -1202,6 +1329,8 @@ class RelayServer {
       const result = await this._sendToExt('attachTab', {
         tabId: target.tabId,
         sessionId,
+        // Preserve manual provenance; any other origin is a relay-driven lazy attach.
+        origin: target.origin === 'manual' ? 'manual' : 'relay-attached',
       });
       if (result.targetId) target.targetId = result.targetId;
       if (result.targetInfo) target.targetInfo = result.targetInfo;
@@ -1236,6 +1365,13 @@ class RelayServer {
   }
 
   async _createTarget(ws, params) {
+    // Fail-closed guard: block tab creation in attached-only/no-new-tabs
+    // sessions, including when restrictions cannot be read from the extension.
+    const restrictions = await this._getRestrictionsSafe();
+    if (restrictions.mode === 'manual' || restrictions.noNewTabs) {
+      throw new Error('New tabs are disabled in BrowserForce attached-tab mode.');
+    }
+
     const sessionId = `s${++this.sessionCounter}`;
     const result = await this._sendToExt('createTab', {
       url: params.url || 'about:blank',
@@ -1248,6 +1384,7 @@ class RelayServer {
       targetInfo: result.targetInfo,
       debuggerAttached: true, // createTab attaches debugger immediately
       attachPromise: null,
+      origin: 'agent-created',
     });
     this.tabToSession.set(result.tabId, sessionId);
 

@@ -1,3 +1,5 @@
+import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
+
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
 
@@ -6,6 +8,7 @@ const RECONNECT_DELAY_MS = 3000;
 const CDP_VERSION = '1.3';
 const RELAY_HTTP_DEFAULT = 'http://127.0.0.1:19222';
 const TAB_GROUP_COLOR = 'orange';
+const TAB_GROUP_SYNC_AFTER_ATTACH_MS = 750;
 const BADGE_COLORS = {
   connected: '#C15F3C',
   connecting: '#B1ADA1',
@@ -18,15 +21,24 @@ let ws = null;
 let connectionState = 'disconnected'; // disconnected | connecting | connected
 let maintainLoopActive = false;
 let currentRelayUrl = RELAY_URL_DEFAULT;
+/** When true, the maintain loop polls /extension/status and only reconnects
+ *  once the relay confirms connected === false. This prevents a stale worker
+ *  from reclaiming a slot that's legitimately owned by another extension
+ *  (e.g. service-worker replacement or extension slot handoff). */
+let shouldWaitForExtensionSlot = false;
 
-/** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object }>} */
+/** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object, origin: string }>} */
 const attachedTabs = new Map();
+
+/** Allowlisted tab attachment provenance. Unrecognized origins fall back to 'unknown'. */
+const ALLOWED_TAB_ORIGINS = new Set(['manual', 'agent-created', 'relay-attached']);
 
 /** @type {Map<string, number>} Chrome child sessionId -> parent tabId */
 const childSessions = new Map();
 
 /** Serializes tab group operations to avoid races (same pattern as playwriter) */
 let tabGroupQueue = Promise.resolve();
+let isSyncingTabGroup = false;
 
 /** Tracks last CDP activity per attached tab (tabId → timestamp ms) */
 const tabLastActivity = new Map();
@@ -51,6 +63,8 @@ let restrictionExplained = false;
   // Tab lifecycle
   chrome.tabs.onRemoved.addListener(onTabRemoved);
   chrome.tabs.onUpdated.addListener(onTabUpdated);
+  chrome.tabs.onAttached.addListener(onTabAttachedToWindow);
+  chrome.tabs.onDetached.addListener(onTabDetachedFromWindow);
 
   // Alarm-based fallback: wakes the service worker if it was killed
   chrome.alarms.create('bf-reconnect', { periodInMinutes: 0.5 });
@@ -74,6 +88,21 @@ function startMaintainLoop() {
 async function maintainConnection() {
   while (true) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // If the previous worker was replaced or another extension owns the
+      // slot, do not immediately reclaim based only on local target state.
+      // Poll the relay's /extension/status and only reconnect once the
+      // relay confirms no extension is connected. This avoids a race where
+      // two workers fight for the single extension slot.
+      if (shouldWaitForExtensionSlot) {
+        const status = await getRelayExtensionStatus();
+        if (status && status.connected === false) {
+          shouldWaitForExtensionSlot = false;
+        } else {
+          await sleep(RECONNECT_DELAY_MS);
+          continue;
+        }
+      }
+
       if (connectionState !== 'connecting') {
         connectionState = 'connecting';
         updateBadge();
@@ -112,6 +141,7 @@ function connect(relayUrl) {
       connectionState = 'connected';
       restrictionExplained = false; // Reset for new agent session
       updateBadge();
+      notifyRelayAttachedTabs();
       console.log('[bf] Connected to relay');
       resolve();
     });
@@ -128,6 +158,11 @@ function connect(relayUrl) {
       clearTimeout(timeout);
       ws = null;
       connectionState = 'disconnected';
+      // The WS was open and got closed (or the upgrade failed). Don't
+      // immediately reclaim — another extension may own the slot, or the
+      // relay may be in the middle of a slot handoff. The maintain loop
+      // will poll /extension/status before reconnecting.
+      shouldWaitForExtensionSlot = true;
       updateBadge();
       console.log('[bf] Disconnected from relay');
       if (!settled) {
@@ -210,7 +245,7 @@ async function executeCommand(msg) {
     case 'listTabs':
       return listTabs();
     case 'attachTab':
-      return attachTab(msg.params.tabId, msg.params.sessionId);
+      return attachTab(msg.params.tabId, msg.params.sessionId, { origin: msg.params.origin });
     case 'detachTab':
       return detachTab(msg.params.tabId);
     case 'createTab':
@@ -289,13 +324,16 @@ async function listTabs() {
   };
 }
 
-async function attachTab(tabId, sessionId) {
+async function attachTab(tabId, sessionId, options = {}) {
+  const origin = ALLOWED_TAB_ORIGINS.has(options.origin) ? options.origin : 'unknown';
   // If already attached, update sessionId and return existing info
   if (attachedTabs.has(tabId)) {
     const existing = attachedTabs.get(tabId);
     existing.sessionId = sessionId;
+    // Preserve provenance: only overwrite origin when the incoming value is allowlisted.
+    if (ALLOWED_TAB_ORIGINS.has(options.origin)) existing.origin = origin;
     // Ensure attached tabs are always reconciled into the browserforce group.
-    queueSyncTabGroup();
+    setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
     return existing;
   }
 
@@ -324,11 +362,11 @@ async function attachTab(tabId, sessionId) {
     targetInfo = { targetId, type: 'page', title: tab.title, url: tab.url };
   }
 
-  const entry = { sessionId, targetId, targetInfo, tabId };
+  const entry = { sessionId, targetId, targetInfo, tabId, origin };
   attachedTabs.set(tabId, entry);
   updateBadge();
   tabLastActivity.set(tabId, Date.now());
-  queueSyncTabGroup();
+  setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
 
   return entry;
 }
@@ -385,7 +423,7 @@ async function createTab(params) {
   // Brief delay for Chrome to finalize tab creation
   await sleep(200);
 
-  const result = await attachTab(tab.id, params.sessionId);
+  const result = await attachTab(tab.id, params.sessionId, { origin: 'agent-created' });
   agentCreatedTabs.add(tab.id);
   return result;
 }
@@ -579,7 +617,7 @@ function onTabUpdated(tabId, changeInfo) {
   if (!changeInfo.url && !changeInfo.title && changeInfo.groupId === undefined) return;
 
   // Reconcile group membership/title if user or Chrome moved this attached tab.
-  if (changeInfo.groupId !== undefined) {
+  if (changeInfo.groupId !== undefined && !isSyncingTabGroup) {
     queueSyncTabGroup();
   }
 
@@ -597,6 +635,16 @@ function onTabUpdated(tabId, changeInfo) {
       },
     });
   }
+}
+
+function onTabAttachedToWindow(tabId) {
+  if (!attachedTabs.has(tabId)) return;
+  queueSyncTabGroup();
+}
+
+function onTabDetachedFromWindow(tabId) {
+  if (!attachedTabs.has(tabId)) return;
+  queueSyncTabGroup();
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -684,64 +732,63 @@ chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) =
  * Modeled after playwriter's syncTabGroup — always queries by title, never caches group ID.
  */
 async function syncTabGroup() {
+  isSyncingTabGroup = true;
   try {
     const connectedTabIds = Array.from(attachedTabs.keys());
     const existingGroups = await chrome.tabGroups.query({ title: 'browserforce' });
-
-    if (connectedTabIds.length === 0) {
-      for (const group of existingGroups) {
-        const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
-        const tabIdsToUngroup = tabsInGroup.map((t) => t.id).filter((id) => id !== undefined);
-        if (tabIdsToUngroup.length > 0) {
-          await chrome.tabs.ungroup(tabIdsToUngroup);
-        }
-      }
-      return;
-    }
-
-    // Consolidate duplicate groups into one
-    let groupId = existingGroups[0]?.id;
-    if (existingGroups.length > 1) {
-      const [keep, ...duplicates] = existingGroups;
-      groupId = keep.id;
-      for (const group of duplicates) {
-        const tabsInDupe = await chrome.tabs.query({ groupId: group.id });
-        const tabIdsToUngroup = tabsInDupe.map((t) => t.id).filter((id) => id !== undefined);
-        if (tabIdsToUngroup.length > 0) {
-          await chrome.tabs.ungroup(tabIdsToUngroup);
-        }
-      }
-    }
-
     const allTabs = await chrome.tabs.query({});
-    const tabsInGroup = allTabs.filter((t) => t.groupId === groupId && t.id !== undefined);
-    const tabIdsInGroup = new Set(tabsInGroup.map((t) => t.id));
+    const plan = buildBrowserforceTabGroupPlan({
+      attachedTabIds: connectedTabIds,
+      allTabs,
+      existingGroups,
+    });
 
-    const tabsToAdd = connectedTabIds.filter((id) => !tabIdsInGroup.has(id));
-    const tabsToRemove = Array.from(tabIdsInGroup).filter((id) => !connectedTabIds.includes(id));
-
-    if (tabsToRemove.length > 0) {
+    for (const group of plan.groupsToClear) {
+      if (group.tabIdsToUngroup.length === 0) continue;
       try {
-        await chrome.tabs.ungroup(tabsToRemove);
+        await chrome.tabs.ungroup(group.tabIdsToUngroup);
       } catch {
         // Tab may have been closed already
       }
     }
 
-    if (tabsToAdd.length > 0) {
-      if (groupId === undefined) {
-        groupId = await chrome.tabs.group({ tabIds: tabsToAdd });
-      } else {
-        await chrome.tabs.group({ tabIds: tabsToAdd, groupId });
+    for (const windowPlan of plan.windows) {
+      if (windowPlan.duplicateTabIdsToUngroup.length > 0) {
+        try {
+          await chrome.tabs.ungroup(windowPlan.duplicateTabIdsToUngroup);
+        } catch {
+          // Tab may have been closed already
+        }
       }
-    }
 
-    // Always ensure group title/color are correct
-    if (groupId !== undefined) {
-      await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
+      if (windowPlan.tabsToRemove.length > 0) {
+        try {
+          await chrome.tabs.ungroup(windowPlan.tabsToRemove);
+        } catch {
+          // Tab may have been closed already
+        }
+      }
+
+      let groupId = windowPlan.createNewGroup ? null : windowPlan.existingGroupId;
+      if (windowPlan.tabsToAdd.length > 0) {
+        if (groupId == null) {
+          groupId = await chrome.tabs.group({
+            tabIds: windowPlan.tabsToAdd,
+            createProperties: { windowId: windowPlan.windowId },
+          });
+        } else {
+          await chrome.tabs.group({ tabIds: windowPlan.tabsToAdd, groupId });
+        }
+      }
+
+      if (groupId != null) {
+        await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
+      }
     }
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);
+  } finally {
+    isSyncingTabGroup = false;
   }
 }
 
@@ -754,6 +801,25 @@ function queueSyncTabGroup() {
 function send(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
+  }
+}
+
+function notifyRelayManualTabAttached(tabId, entry) {
+  send({
+    method: 'manualTabAttached',
+    params: {
+      tabId,
+      sessionId: entry.sessionId,
+      targetId: entry.targetId,
+      targetInfo: entry.targetInfo,
+      origin: entry.origin || 'unknown',
+    },
+  });
+}
+
+function notifyRelayAttachedTabs() {
+  for (const [tabId, entry] of attachedTabs) {
+    notifyRelayManualTabAttached(tabId, entry);
   }
 }
 
@@ -796,6 +862,19 @@ async function getMcpClientCount() {
     return Number.isFinite(data?.clients) ? data.clients : 0;
   } catch {
     return 0;
+  }
+}
+
+/** Poll the relay's /extension/status so the maintain loop can wait until the
+ *  relay confirms no extension is connected before reclaiming the slot. */
+async function getRelayExtensionStatus() {
+  const base = relayWsToHttpBase(currentRelayUrl);
+  try {
+    const response = await fetch(`${base}/extension/status`, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
   }
 }
 
@@ -900,17 +979,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       try {
         const sessionId = `manual-${tab.id}-${Date.now()}`;
-        await attachTab(tab.id, sessionId);
-        // Notify relay about the manually attached tab
-        send({
-          method: 'manualTabAttached',
-          params: {
-            tabId: tab.id,
-            sessionId,
-            targetId: attachedTabs.get(tab.id)?.targetId,
-            targetInfo: attachedTabs.get(tab.id)?.targetInfo,
-          },
-        });
+        const entry = await attachTab(tab.id, sessionId, { origin: 'manual' });
+        notifyRelayManualTabAttached(tab.id, entry);
         sendResponse({ ok: true, tabId: tab.id });
       } catch (err) {
         sendResponse({ error: err.message });

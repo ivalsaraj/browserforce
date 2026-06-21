@@ -222,6 +222,37 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('execute prompt prefers existing attached tabs before creating new ones', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const promptStart = source.indexOf('const EXECUTE_PROMPT');
+    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptBlock = source.slice(promptStart, promptEnd);
+
+    assert.ok(
+      promptBlock.includes('ALWAYS inspect existing attached/open tabs first'),
+      'should tell the agent to inspect existing tabs before creating or navigating'
+    );
+    assert.ok(
+      promptBlock.includes("When the user says 'check', 'inspect', 'look at', 'review', or 'read'"),
+      'should treat page inspection requests as existing-tab tasks'
+    );
+    assert.ok(
+      promptBlock.includes('NEVER call context.newPage() or page.goto() just to find a page that is already open'),
+      'should forbid opening tabs to locate an already open page'
+    );
+    assert.ok(
+      promptBlock.includes("If the target page isn't present in context.pages(), report that clearly instead of opening it"),
+      'should require reporting missing targets instead of silently opening them'
+    );
+    assert.ok(
+      !promptBlock.includes('Always create or reuse a dedicated tab'),
+      'should remove the old dedicated-tab-first instruction'
+    );
+  });
+
   it('execute tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
@@ -336,8 +367,8 @@ describe('Tool Definitions', () => {
 
     assert.ok(source.includes('cachedBrowserforceRestrictions'), 'should track cached browserforce restrictions');
     assert.ok(
-      source.includes('if (cachedBrowserforceRestrictions)'),
-      'should return cached restrictions without refetching'
+      source.includes('cachedBrowserforceRestrictions && !forceRefresh'),
+      'should return cached restrictions without refetching (unless forceRefresh)'
     );
     assert.ok(
       source.includes('/restrictions'),
@@ -345,27 +376,80 @@ describe('Tool Definitions', () => {
     );
   });
 
-  it('execute auto-creates a working page when auto mode starts empty', () => {
+  it('execute does not create a page for attached/manual inspection mode when context is empty', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const startupSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/startup.js'),
+      'utf8'
+    );
+
+    assert.ok(startupSource.includes('assertAttachedPageAvailable'), 'shared startup path should assert attached-page availability');
+    assert.ok(source.includes('preflightAttachedPageBeforeCdp'), 'execute should use the shared no-CDP preflight');
+    assert.ok(source.includes('shouldCreateImplicitStartupPage'), 'implicit page creation should be gated behind an explicit predicate');
+  });
+
+  it('reset also runs attached-page preflight before reconnecting over CDP', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
+    const resetIdx = source.indexOf("'reset'");
+    const resetBlock = source.slice(resetIdx, resetIdx + 3000);
+    assert.ok(resetBlock.includes('preflightAttachedPageBeforeCdp'), 'reset should preflight before ensureBrowser');
+    assert.ok(resetBlock.indexOf('preflightAttachedPageBeforeCdp') < resetBlock.indexOf('ensureBrowser()'));
+  });
+
+  it('execute and reset are the only MCP tool handlers allowed to reach CDP startup', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const directEnsureBrowserCalls = [...source.matchAll(/await ensureBrowser\(/g)].map((match) => match.index);
+    assert.equal(directEnsureBrowserCalls.length, 2, 'all CDP startup should remain auditable through execute/reset');
+    for (const idx of directEnsureBrowserCalls) {
+      const surroundingBlock = source.slice(Math.max(0, idx - 1000), idx + 500);
+      assert.match(surroundingBlock, /preflightAttachedPageBeforeCdp/, 'CDP startup must be preflighted in the same branch');
+    }
+    assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
+  });
+
+  it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const ensureBrowserIdx = source.indexOf('async function ensureBrowser');
+    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('function getContext', ensureBrowserIdx));
+    assert.doesNotMatch(ensureBrowserBlock, /assertExtensionConnected/);
+    assert.doesNotMatch(ensureBrowserBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
+  });
+
+  it('execute schema includes an explicit attached-page intent', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const execBlock = source.split("'execute'")[1]?.split('async ({ code')[0] || '';
+    assert.match(execBlock, /intent:\s*z\.enum\(\['inspect', 'open', 'auto'\]\)\.optional\(\)/);
+  });
+
+  it('missing active page hint prefers existing pages before opening a new tab', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
     assert.ok(
-      source.includes("browserforceRestrictions.mode !== 'manual'"),
-      'execute should skip auto page creation in manual mode'
+      source.includes('No active page. Reuse an existing one first: state.page = context.pages()[0]'),
+      'missing-page hint should prefer context.pages() before context.newPage()'
     );
     assert.ok(
-      source.includes('!browserforceRestrictions.noNewTabs'),
-      'execute should skip auto page creation when noNewTabs is enabled'
-    );
-    assert.ok(
-      source.includes('page = await ctx.newPage()'),
-      'execute should bootstrap a new page when the browser context is empty'
-    );
-    assert.ok(
-      source.includes('userState.page = page'),
-      'execute should persist the auto-created page as state.page'
+      source.includes("If there isn't one, create one with: state.page = await context.newPage()"),
+      'missing-page hint should still explain how to create a tab when needed'
     );
   });
 
@@ -385,6 +469,65 @@ describe('Tool Definitions', () => {
     assert.ok(
       resetBlock.includes('cachedBrowserforceRestrictions = null'),
       'reset should clear cached browserforce restrictions'
+    );
+  });
+
+  it('MCP server starts the relay on startup without opening a browser connection', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('MCP server running'),
+      'startup log should remain present'
+    );
+    const mainStart = source.indexOf('async function main()');
+    const connectIdx = source.indexOf('await server.connect(transport)');
+    const ensureIdx = source.indexOf('await ensureRelay()', mainStart);
+    assert.ok(mainStart !== -1, 'main function should exist');
+    assert.ok(ensureIdx !== -1, 'main should ensure relay during MCP startup');
+    assert.ok(connectIdx !== -1, 'server connect should remain present');
+    assert.ok(
+      ensureIdx < connectIdx,
+      'relay should be ensured before MCP reports as connected'
+    );
+    assert.ok(
+      !source.includes('startBackgroundConnectionLoop();'),
+      'server startup should not launch an eager background CDP connect loop'
+    );
+    assert.ok(
+      !source.includes('BACKGROUND_CONNECT_RETRY_INTERVAL_MS'),
+      'background eager-connect interval should be removed'
+    );
+    const mainBlock = source.slice(mainStart, source.indexOf('main().catch', mainStart));
+    assert.ok(
+      !mainBlock.includes('ensureBrowser()'),
+      'startup should not open a Playwright/CDP browser connection'
+    );
+  });
+
+  it('MCP server includes idle disconnect handling for browser connections', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(
+      source.includes('BF_MCP_IDLE_DISCONNECT_MS'),
+      'idle disconnect timeout should be configurable'
+    );
+    assert.ok(
+      source.includes('scheduleIdleBrowserDisconnect'),
+      'should define idle browser disconnect scheduler'
+    );
+    assert.ok(
+      source.includes('clearIdleBrowserDisconnectTimer'),
+      'should clear pending idle disconnect timers when activity resumes'
+    );
+    assert.ok(
+      source.includes('activeBrowserOperations'),
+      'should track in-flight browser operations before disconnecting'
     );
   });
 });

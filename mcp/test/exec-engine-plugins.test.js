@@ -7,7 +7,33 @@ import {
   getRelayHttpUrl,
   getCdpUrl,
   assertExtensionConnected,
+  getExtensionStatus,
+  assertAttachedPageAvailable,
+  isAttachedPageIntent,
+  BrowserForceMcpError,
+  assertOpenIntentAllowed,
+  shouldCreateImplicitStartupPage,
 } from '../src/exec-engine.js';
+import {
+  runExecuteStartupForTest,
+  runResetStartupForTest,
+  preflightAttachedPageBeforeCdp,
+  formatBrowserForceMcpError,
+} from '../src/startup.js';
+
+/** Mock globalThis.fetch for a set of URL → body mappings. Returns a restore fn. */
+function mockFetch(urlToBody) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const key = String(url);
+    const body = urlToBody[key];
+    if (body === undefined) {
+      return { ok: false, status: 404, json: async () => ({ error: 'not mocked' }) };
+    }
+    return { ok: true, status: 200, json: async () => body };
+  };
+  return () => { globalThis.fetch = originalFetch; };
+}
 
 const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => 'Test' };
 const mockCtx = { pages: () => [mockPage] };
@@ -1413,7 +1439,7 @@ test('assertExtensionConnected throws a clear error when extension is disconnect
   try {
     globalThis.fetch = async () => ({
       ok: true,
-      json: async () => ({ status: 'ok', extension: false }),
+      json: async () => ({ connected: false, activeTargets: 0 }),
     });
     await assert.rejects(
       () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' }),
@@ -1429,12 +1455,263 @@ test('assertExtensionConnected succeeds when extension is connected', async () =
   try {
     globalThis.fetch = async () => ({
       ok: true,
-      json: async () => ({ status: 'ok', extension: true }),
+      json: async () => ({ connected: true, activeTargets: 0 }),
     });
     await assert.doesNotReject(
       () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' })
     );
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('assertExtensionConnected throws when relay is unreachable', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    await assert.rejects(
+      () => assertExtensionConnected({ baseUrl: 'http://127.0.0.1:19222' }),
+      /Cannot reach BrowserForce relay/i
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getExtensionStatus reads relay /extension/status', async () => {
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 1,
+      activeManualTargets: 0,
+      attachedTabs: [{ tabId: 1, url: 'https://example.com', title: 'Example', origin: 'agent-created' }],
+      manualAttachedTabs: [],
+    },
+  });
+  try {
+    const status = await getExtensionStatus({ baseUrl: 'http://127.0.0.1:19222' });
+    assert.equal(status.connected, true);
+    assert.equal(status.activeTargets, 1);
+    assert.equal(status.activeManualTargets, 0);
+    assert.deepEqual(status.manualAttachedTabs, []);
+  } finally {
+    restore();
+  }
+});
+
+test('getExtensionStatus throws when relay returns non-ok response', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({ ok: false, status: 502 });
+    await assert.rejects(
+      () => getExtensionStatus({ baseUrl: 'http://127.0.0.1:19222' }),
+      /Cannot read BrowserForce extension status/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('isAttachedPageIntent defaults to inspect-safe behavior', () => {
+  assert.equal(isAttachedPageIntent(undefined), true);
+  assert.equal(isAttachedPageIntent('inspect'), true);
+  assert.equal(isAttachedPageIntent('auto'), true);
+  assert.equal(isAttachedPageIntent('open'), false);
+});
+
+test('assertAttachedPageAvailable throws BF_NO_ATTACHED_PAGE when manual mode has no tabs', async () => {
+  await assert.rejects(
+    async () => assertAttachedPageAvailable({
+      extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, attachedTabs: [{ origin: 'agent-created' }], manualAttachedTabs: [] },
+      restrictions: { mode: 'manual', noNewTabs: true },
+    }),
+    (err) => {
+      assert.equal(err.code, 'BF_NO_ATTACHED_PAGE');
+      assert.equal(err.details.connected, true);
+      assert.equal(err.details.activeTargets, 1);
+      assert.equal(err.details.activeManualTargets, 0);
+      assert.equal(err.details.restrictions.mode, 'manual');
+      return true;
+    }
+  );
+});
+
+test('assertAttachedPageAvailable does not throw when a manual tab is attached', () => {
+  assert.doesNotThrow(() =>
+    assertAttachedPageAvailable({
+      extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 1, manualAttachedTabs: [{ tabId: 7, origin: 'manual' }] },
+      restrictions: { mode: 'manual', noNewTabs: true },
+    })
+  );
+});
+
+test('assertAttachedPageAvailable does not throw when restrictions allow new tabs and intent is open', () => {
+  assert.doesNotThrow(() =>
+    assertAttachedPageAvailable({
+      extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+      restrictions: { mode: 'auto', noNewTabs: false },
+      intent: 'open',
+    })
+  );
+});
+
+test('assertOpenIntentAllowed blocks open intent when restrictions disable new tabs', () => {
+  assert.throws(
+    () => assertOpenIntentAllowed({ mode: 'manual', noNewTabs: false }),
+    /New tabs are disabled/,
+  );
+  assert.throws(
+    () => assertOpenIntentAllowed({ mode: 'auto', noNewTabs: true }),
+    /New tabs are disabled/,
+  );
+  assert.doesNotThrow(() => assertOpenIntentAllowed({ mode: 'auto', noNewTabs: false }));
+});
+
+test('shouldCreateImplicitStartupPage is false in manual/noNewTabs modes', () => {
+  assert.equal(shouldCreateImplicitStartupPage({ mode: 'manual', noNewTabs: false }), false);
+  assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: true }), false);
+});
+
+test('shouldCreateImplicitStartupPage preserves legacy auto bootstrap only when explicitly enabled', () => {
+  const original = process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+  try {
+    delete process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+    assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: false }), false);
+    process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE = '1';
+    assert.equal(shouldCreateImplicitStartupPage({ mode: 'auto', noNewTabs: false }), true);
+  } finally {
+    if (original === undefined) delete process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE;
+    else process.env.BF_ALLOW_IMPLICIT_STARTUP_PAGE = original;
+  }
+});
+
+// ─── Crash-safe startup ordering (behavior tests via dependency injection) ────
+// These prove ensureBrowser()/chromium.connectOverCDP() is NOT reached when the
+// preflight fails — the primary guarantee of the crash-safe attached-tab change.
+
+test('manual attached-page preflight fails before connecting over CDP', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('default intent returns BF_NO_ATTACHED_PAGE when no manual tab exists in auto mode', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'inspect',
+    restrictions: { mode: 'auto', noNewTabs: false },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('reset preflight fails before connecting over CDP when no manual tab is attached', async () => {
+  const calls = [];
+  const result = await runResetStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NO_ATTACHED_PAGE');
+  assert.deepEqual(calls, []);
+});
+
+test('open intent with no-new-tabs returns BF_NEW_TABS_DISABLED before ensureBrowser', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'open',
+    restrictions: { mode: 'auto', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+      throw new Error('ensureBrowser should not be called');
+    },
+  });
+  assert.equal(result.error.code, 'BF_NEW_TABS_DISABLED');
+  assert.deepEqual(calls, []);
+});
+
+test('open intent proceeds to ensureBrowser when restrictions allow new tabs', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'open',
+    restrictions: { mode: 'auto', noNewTabs: false },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => { calls.push('ensureBrowser'); },
+  });
+  assert.equal(result.error, undefined);
+  assert.deepEqual(calls, ['ensureBrowser']);
+});
+
+test('inspect intent proceeds to ensureBrowser when a manual tab is attached', async () => {
+  const calls = [];
+  const result = await runExecuteStartupForTest({
+    intent: 'inspect',
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 1, manualAttachedTabs: [{ tabId: 7, origin: 'manual' }] },
+    ensureBrowser: async () => { calls.push('ensureBrowser'); },
+  });
+  assert.equal(result.error, undefined);
+  assert.deepEqual(calls, ['ensureBrowser']);
+});
+
+test('formatBrowserForceMcpError returns structured text containing the error code', async () => {
+  const err = new BrowserForceMcpError('No attached BrowserForce page available.', {
+    code: 'BF_NO_ATTACHED_PAGE',
+    details: { activeManualTargets: 0 },
+  });
+  const result = formatBrowserForceMcpError(err);
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].type, 'text');
+  assert.match(result.content[0].text, /"code": "BF_NO_ATTACHED_PAGE"/);
+  assert.match(result.content[0].text, /No attached BrowserForce page available/);
+});
+
+test('preflightAttachedPageBeforeCdp throws BF_RESTRICTIONS_UNAVAILABLE when restrictions fetch throws', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalPort = process.env.RELAY_PORT;
+  const fetchCalls = [];
+  try {
+    process.env.RELAY_PORT = '1';
+    globalThis.fetch = async (url) => {
+      fetchCalls.push(String(url));
+      if (String(url).endsWith('/restrictions')) {
+        throw new Error('simulated restrictions fetch failure');
+      }
+      return { ok: true, json: async () => ({ connected: true, activeManualTargets: 0, activeTargets: 0, attachedTabs: [], manualAttachedTabs: [] }) };
+    };
+    await assert.rejects(
+      () => preflightAttachedPageBeforeCdp({
+        intent: 'inspect',
+        fetchBrowserforceRestrictions: async () => {
+          throw new Error('restrictions unavailable');
+        },
+      }),
+      (err) => {
+        assert.equal(err.code, 'BF_RESTRICTIONS_UNAVAILABLE');
+        assert.match(err.message, /restrictions are unavailable/i);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalPort === undefined) delete process.env.RELAY_PORT;
+    else process.env.RELAY_PORT = originalPort;
   }
 });

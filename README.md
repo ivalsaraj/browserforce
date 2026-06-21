@@ -12,6 +12,8 @@ Give AI agents controlled access to the browser you already use.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
+When you ask an agent to inspect an attached page, BrowserForce is intended to reuse that existing tab via `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no page exists yet.
+
 ## Why BrowserForce?
 
 
@@ -348,6 +350,10 @@ command = "env"
 args = ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp"]
 startup_timeout_sec = 45
 ```
+
+The MCP process starts or verifies the local relay during startup. You do not need
+to run `browserforce serve` separately for the default setup; keep the Chrome
+extension pointed at the same relay URL.
 
 </details>
 
@@ -827,6 +833,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
 | **Parallel visibility** | `foreground-tab` keeps new tabs visible in the current window             |
+| **Tab grouping**        | Attached tabs stay grouped as `browserforce` inside their own Chrome window |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
@@ -883,19 +890,13 @@ If that port is already in use, you can see:
 
 Switch all components to the same new port (example: `19333`):
 
-1. Start relay on the new port:
-
-```bash
-RELAY_PORT=19333 browserforce serve
-```
-
-2. In extension popup, set relay URL to:
+1. In extension popup, set relay URL to:
 
 ```text
 ws://127.0.0.1:19333/extension
 ```
 
-3. Start MCP on the same port:
+2. Start MCP on the same port. MCP will start or verify the relay on that port:
 
 **Cursor** (`~/.cursor/mcp.json`)
 ```json
@@ -960,6 +961,8 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 
 **MCP standby polling (single-active mode):** if MCP sees a busy/`409` connect error, it enters standby and polls `GET /client-slot` until `busy: false` (about every 200-400ms, up to 30s), then retries connect.
 
+**MCP relay usage:** `browserforce mcp` now connects lazily when a tool call actually needs the browser, and drops its relay/CDP connection after an idle period. This keeps installed-but-idle MCP clients from inflating the relay client count. Override the idle timeout with `BF_MCP_IDLE_DISCONNECT_MS` (`0` disables auto-disconnect).
+
 **Operational non-goals:** canonical list is maintained in [AGENTS.md](AGENTS.md#operational-non-goals).
 
 ## API
@@ -968,12 +971,19 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 | ------------------------ | --------------------------------------------- |
 | `GET /`                  | Health check (extension status, target count) |
 | `GET /client-slot`       | Client-slot state: `{ mode, busy, activeClientId, connectedAt }` |
+| `GET /extension/status`  | Attached-tab introspection: `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }` (no wildcard CORS) |
+| `GET /attached-tabs`     | Attached-tab list: `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }` (no wildcard CORS) |
 | `GET /json/version`      | CDP discovery                                 |
 | `GET /json/list`         | List attached targets                         |
 | `GET /logs/status` | Logs viewer status (extension-only origin) |
 | `GET /logs/cdp?after=&limit=` | Incremental CDP log polling feed (extension-only origin) |
 | `ws://.../extension` | Chrome extension WebSocket |
 | `ws://.../cdp?token=...` | Agent CDP connection |
+
+**Local HTTP API security:**
+- **Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients (curl, Node).
+- **CORS:** `/extension/status` and `/attached-tabs` intentionally omit `Access-Control-Allow-Origin` because they expose local browsing metadata (tab URLs/titles); arbitrary websites must not read them. Other routes retain wildcard CORS for CDP discovery.
+- **`/extension/status` vs `/json/list`:** `/json/list` returns CDP-discovery-shaped targets for Playwright; `/extension/status` returns relay-owned provenance — `manualAttachedTabs` are user-attached tabs (`origin: 'manual'`), while `attachedTabs` can also include `agent-created` and `relay-attached` tabs. Use `activeManualTargets`/`manualAttachedTabs` to confirm an attached page is ready for inspect/current-tab flows.
 
 Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
 
@@ -1032,6 +1042,45 @@ curl -s http://127.0.0.1:19222/client-slot | jq
 
 Expected: `cdp-url` points to `ws://127.0.0.1:19222/...` and `/client-slot` returns `{ mode, busy, activeClientId, connectedAt }`.
 
+### Diagnose attached-tab readiness
+
+Before inspecting or asking MCP to open a new tab, query the relay-owned status endpoints to confirm what is connected and what is attached:
+
+```bash
+curl -s http://127.0.0.1:19222/extension/status | jq
+curl -s http://127.0.0.1:19222/attached-tabs | jq
+curl -s http://127.0.0.1:19222/client-slot | jq
+```
+
+Expected outputs:
+
+- `connected: false` — extension not connected to relay.
+- `connected: true, activeTargets: 0` — extension connected but no tab attached.
+- `activeManualTargets > 0` or `manualAttachedTabs.length > 0` — attached-tab mode is ready; MCP can inspect the current page.
+- `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs, which are not user-attached. Use `manualAttachedTabs` / `activeManualTargets` to confirm inspect/current-tab readiness.
+- `clients > 0` — a CDP client is currently active.
+
+### MCP Error: `New tabs are disabled in BrowserForce attached-tab mode.`
+
+This is the structured `BF_NEW_TABS_DISABLED` / `BF_NO_ATTACHED_PAGE` response. It means the current session is in an attached-only mode and either no manual tab is attached, or an explicit new-tab request is not allowed.
+
+Recovery depends on the flow:
+
+- **Attached / inspect / current-tab flow:** attach a tab with the BrowserForce extension popup first, then retry. Confirm with `curl -s http://127.0.0.1:19222/extension/status | jq` that `manualAttachedTabs` is non-empty (or `activeManualTargets > 0`).
+- **Explicit open / navigate flow (`execute({ intent: 'open' })`):** the relay guard will only honor this when `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`.
+- **Crash-safe default:** BrowserForce no longer auto-creates a tab. To restore the legacy auto-bootstrap, set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process.
+
+### MCP Error: `BF_RESTRICTIONS_UNAVAILABLE`
+
+The MCP preflight could not read the active restrictions from the extension/relay, so CDP startup was blocked to avoid running with an unknown policy. Ensure the relay is running and the BrowserForce extension is connected, then retry.
+
+Quick checks:
+
+```bash
+curl -s http://127.0.0.1:19222/extension/status | jq '.activeManualTargets, .manualAttachedTabs'
+curl -s http://127.0.0.1:19222/client-slot | jq
+```
+
 ### MCP Error: `Unexpected server response: 409`
 
 This appears when `BF_CLIENT_MODE=single-active` and another CDP client currently holds the slot.
@@ -1048,7 +1097,7 @@ If `busy: true`, either close the current active MCP/CDP session, or remove sing
 
 This is most common when you intentionally run `single-active` mode and a second MCP session starts while the slot is busy.
 
-Why: the MCP process currently attempts browser connection during startup, and Codex's default MCP startup timeout can be shorter than BrowserForce's connect retry window.
+Why: the MCP process starts or verifies the relay during startup, and Codex's default MCP startup timeout can be shorter than a cold local relay start.
 
 Fix in Codex config (`~/.codex/config.toml`):
 
@@ -1059,15 +1108,9 @@ args = ["BF_CLIENT_MODE=single-active", "npx", "-y", "browserforce@latest", "mcp
 startup_timeout_sec = 45
 ```
 
-Recommended reliable workflow:
-
-```bash
-# Terminal A: run one shared relay
-npx -y browserforce@latest serve
-
-# MCP clients (Codex/Cursor/Claude): run mcp only
-npx -y browserforce@latest mcp
-```
+Recommended reliable workflow: configure MCP with the desired `RELAY_PORT` and
+let `browserforce mcp` own relay startup. Run `browserforce serve` manually only
+when you intentionally want a separately managed shared relay process.
 
 If startup still times out, verify the relay endpoint and slot state:
 

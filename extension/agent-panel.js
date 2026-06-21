@@ -1,5 +1,9 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
+  normalizePluginHelperNames,
+  normalizePluginHelperPrefix,
+} from './plugin-helper-normalization.js';
+import {
   assignSessionRunId,
   buildDisplayStreamEvents,
   buildGoogleSheetsRangeUrl,
@@ -31,8 +35,6 @@ const STREAM_CHUNK_LOOKAHEAD_CHARS = 14;
 const STREAM_CHUNK_INTERVAL_MS = 26;
 const COPY_CODE_FEEDBACK_MS = 1400;
 const MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024;
-const PLUGIN_HELPER_CALL_RE = /^[A-Za-z_$][\w$]{0,127}$/;
-const PLUGIN_HELPER_PREFIX_RE = /^[a-z][a-z0-9]{1,31}$/;
 
 const state = {
   value: initialState,
@@ -51,8 +53,6 @@ const state = {
   pendingAgentOpenRequest: null,
   localImageBlobUrlByPath: {},
   localImageLoadsByPath: {},
-  initialTabAttachInFlight: false,
-  initialTabAttachStarted: false,
   editingSessionId: null,
   sessionTitleDrafts: {},
   eventController: null,
@@ -518,16 +518,6 @@ function setTabAttachBannerState({
   attachCurrentTabBtn.textContent = busy ? 'Attaching...' : 'Attach current tab';
 }
 
-function getTabAttachInProgressState() {
-  if (!state.initialTabAttachInFlight) return null;
-  return {
-    hidden: false,
-    text: 'Currently attaching active tab...',
-    canAttach: false,
-    busy: true,
-  };
-}
-
 function dispatch(action) {
   state.value = reduceState(state.value, action);
   render();
@@ -731,33 +721,6 @@ function normalizeEnabledPlugins(input) {
     normalized.push(value);
   }
   return normalized;
-}
-
-function normalizePluginHelperName(value) {
-  const text = String(value || '').trim();
-  if (!text || !PLUGIN_HELPER_CALL_RE.test(text)) return '';
-  return text;
-}
-
-function normalizePluginHelperNames(input) {
-  const source = Array.isArray(input) ? input : [];
-  const seen = new Set();
-  const normalized = [];
-  for (const rawValue of source) {
-    const helperName = normalizePluginHelperName(rawValue);
-    if (!helperName) continue;
-    const key = helperName.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    normalized.push(helperName);
-  }
-  return normalized;
-}
-
-function normalizePluginHelperPrefix(value) {
-  const text = String(value || '').trim().toLowerCase();
-  if (!text || !PLUGIN_HELPER_PREFIX_RE.test(text)) return '';
-  return text;
 }
 
 function activeSessionEnabledPlugins() {
@@ -2633,11 +2596,6 @@ async function getCurrentTabAttachmentState() {
 
 async function refreshTabAttachBanner() {
   const token = ++tabAttachRefreshToken;
-  const inProgressState = getTabAttachInProgressState();
-  if (inProgressState) {
-    setTabAttachBannerState(inProgressState);
-    return;
-  }
   const next = await getCurrentTabAttachmentState();
   if (token !== tabAttachRefreshToken) return;
   setTabAttachBannerState(next);
@@ -2670,25 +2628,6 @@ function bindTabAttachWatchers() {
       scheduleTabAttachRefresh(80);
     });
   }
-}
-
-function startInitialTabAttach() {
-  if (state.initialTabAttachStarted) return;
-  state.initialTabAttachStarted = true;
-  state.initialTabAttachInFlight = true;
-  setTabAttachBannerState(getTabAttachInProgressState() || undefined);
-  renderContextUsageChip();
-  window.setTimeout(() => {
-    ensureCurrentTabAttached()
-      .catch(() => {
-        // best-effort only
-      })
-      .finally(() => {
-        state.initialTabAttachInFlight = false;
-        renderContextUsageChip();
-        scheduleTabAttachRefresh(0);
-      });
-  }, 2000);
 }
 
 async function getActiveTabContext() {
@@ -3302,7 +3241,6 @@ async function sendMessage(text) {
     messages: optimisticMessages,
   });
 
-  await ensureCurrentTabAttached();
   scheduleTabAttachRefresh(0);
   await pollSheetSelection();
   const browserContext = await getActiveTabContext();
@@ -3347,7 +3285,6 @@ async function initializePanel() {
     shouldStartFreshSession = true;
     state.pendingAgentOpenRequest = null;
   }
-  startInitialTabAttach();
   await loadAuth();
   bindTabAttachWatchers();
   try {

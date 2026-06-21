@@ -58,6 +58,78 @@ function httpGetWithHeaders(url, headers = {}) {
   });
 }
 
+/** Raw HTTP GET that lets the test control the exact inbound Host header (bypasses URL-derived host). */
+function rawHttpGet({ port, path: reqPath = '/', headers = {} }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: reqPath,
+      method: 'GET',
+      headers,
+    }, (res) => {
+      let text = '';
+      res.on('data', (d) => (text += d));
+      res.on('end', () => resolve({ status: res.statusCode, text, headers: res.headers }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/**
+ * Install an extension fixture that makes relay getRestrictions fail in a
+ * specific mode, for the Target.createTarget fail-closed guard tests.
+ * Returns a cleanup function (or null for extension-missing). Records every
+ * command the extension sees into seenExtensionCommands.
+ */
+async function installRestrictionsFailureFixture(mode, { seenExtensionCommands, port }) {
+  if (mode === 'extension-missing') {
+    return null; // no extension connected; cleanup is a no-op
+  }
+
+  const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+    headers: { Origin: 'chrome-extension://test' },
+  });
+
+  ext.on('message', (data) => {
+    const msg = JSON.parse(data.toString());
+    if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+    if (msg.id !== undefined) seenExtensionCommands.push(msg);
+
+    if (msg.id && msg.method === 'getRestrictions') {
+      if (mode === 'timeout') {
+        // Intentionally do not respond — let the relay time out.
+        return;
+      }
+      if (mode === 'malformed-response') {
+        ext.send(JSON.stringify({ id: msg.id, result: 'not-an-object' }));
+        return;
+      }
+      if (mode === 'extension-error') {
+        ext.send(JSON.stringify({ id: msg.id, error: 'restrictions unavailable' }));
+        return;
+      }
+      if (mode === 'transport-failure') {
+        // Drop the transport mid-request to simulate a WS failure.
+        ext.close();
+        return;
+      }
+    }
+
+    if (msg.id && msg.method === 'createTab') {
+      // Defensive: should never be reached, but respond so a regression
+      // doesn't hang the test.
+      ext.send(JSON.stringify({
+        id: msg.id,
+        result: { tabId: 999, targetId: 't-999', targetInfo: { url: 'about:blank', title: '' } },
+      }));
+    }
+  });
+
+  return async () => { ext.close(); await sleep(50); };
+}
+
 /** Connect a WebSocket and wait for open */
 function connectWs(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -226,6 +298,7 @@ describe('Chatd URL Endpoint', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
@@ -247,6 +320,7 @@ describe('Chatd URL Endpoint', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
@@ -266,6 +340,7 @@ describe('Chatd URL Endpoint', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
@@ -285,6 +360,7 @@ describe('Chatd URL Endpoint', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/chatd-url`, {
@@ -334,6 +410,7 @@ describe('Logs Viewer Endpoints', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
@@ -364,6 +441,7 @@ describe('Logs Viewer Endpoints', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/status`, {
@@ -383,6 +461,7 @@ describe('Logs Viewer Endpoints', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
@@ -419,6 +498,7 @@ describe('Logs Viewer Endpoints', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
     });
 
     const { status, body } = await httpGetWithHeaders(`http://127.0.0.1:${port}/logs/status`, {
@@ -1060,6 +1140,7 @@ describe('Auto-attach Flow', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({
@@ -1115,6 +1196,7 @@ describe('Auto-attach Flow', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         extCommands.push(msg.method);
         if (msg.method === 'listTabs') {
@@ -1208,6 +1290,7 @@ describe('CDP Command Forwarding', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
@@ -1311,6 +1394,7 @@ describe('CDP Event Forwarding', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
@@ -1368,6 +1452,7 @@ describe('CDP Event Forwarding', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
@@ -1515,6 +1600,7 @@ describe('CDP JSONL Logging', () => {
       ext.on('message', (data) => {
         const msg = JSON.parse(data.toString());
         if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
         if (msg.id === undefined) return;
 
         if (msg.method === 'createTab') {
@@ -1621,6 +1707,7 @@ describe('Tab Lifecycle', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
@@ -1676,6 +1763,7 @@ describe('Tab Lifecycle', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
@@ -1748,6 +1836,7 @@ describe('Extension Disconnect', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
@@ -1928,6 +2017,7 @@ describe('GET /agent-preferences endpoint', () => {
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined && msg.method === 'getAgentPreferences') {
         ext.send(JSON.stringify({
           id: msg.id,
@@ -2071,6 +2161,319 @@ describe('manualTabAttached handler', () => {
     cdp.close();
     ext.close();
     await sleep(100);
+  });
+
+  it('updates existing manual tab target instead of duplicating it', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); }
+    });
+
+    await sleep(50);
+
+    const firstAttach = {
+      method: 'manualTabAttached',
+      params: {
+        tabId: 777,
+        sessionId: 'manual-777-1',
+        targetId: 'bf-target-777',
+        targetInfo: { url: 'https://first.example', title: 'First' },
+      },
+    };
+    ext.send(JSON.stringify(firstAttach));
+    await sleep(100);
+
+    const sessionId = relay.tabToSession.get(777);
+    assert.ok(sessionId, 'tabToSession should contain tabId 777');
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 777,
+        sessionId: 'manual-777-2',
+        targetId: 'bf-target-777-updated',
+        targetInfo: { url: 'https://second.example', title: 'Second' },
+      },
+    }));
+    await sleep(100);
+
+    assert.equal(relay.tabToSession.get(777), sessionId, 'tab should keep the original relay session');
+    assert.equal([...relay.targets.values()].filter((target) => target.tabId === 777).length, 1);
+    const target = relay.targets.get(sessionId);
+    assert.equal(target.targetId, 'bf-target-777-updated');
+    assert.equal(target.targetInfo.url, 'https://second.example');
+    assert.equal(target.targetInfo.title, 'Second');
+
+    const list = await httpGet(`http://127.0.0.1:${port}/json/list`);
+    assert.equal(list.body.filter((target) => target.url === 'https://second.example').length, 1);
+
+    ext.close();
+    await sleep(100);
+  });
+});
+
+// ─── Extension Status Endpoints ─────────────────────────────────────────────
+
+describe('Extension Status Endpoints', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('GET /extension/status reports extension connection and active targets', async () => {
+    const statusBefore = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+    assert.equal(statusBefore.status, 200);
+    assert.equal(statusBefore.body.connected, false);
+    assert.equal(statusBefore.body.activeTargets, 0);
+    assert.deepEqual(statusBefore.body.attachedTabs, []);
+  });
+
+  it('GET /extension/status includes manually attached tab metadata', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+    });
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 44,
+        sessionId: 'manual-44-1',
+        targetId: 'bf-target-44',
+        origin: 'manual',
+        targetInfo: { url: 'https://example.com', title: 'Example' },
+      },
+    }));
+    await sleep(100);
+
+    const status = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+    assert.equal(status.body.connected, true);
+    assert.equal(status.body.activeTargets, 1);
+    assert.equal(status.body.activeManualTargets, 1);
+    assert.equal(status.body.manualAttachedTabs[0].tabId, 44);
+    assert.equal(status.body.manualAttachedTabs[0].url, 'https://example.com');
+    assert.equal(status.body.manualAttachedTabs[0].title, 'Example');
+    assert.equal(status.body.manualAttachedTabs[0].targetId, 'bf-target-44');
+    assert.equal(status.body.manualAttachedTabs[0].origin, 'manual');
+
+    ext.close();
+    await sleep(100);
+  });
+
+  it('GET /attached-tabs returns the attached tab list', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+    });
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 45,
+        sessionId: 'manual-45-1',
+        targetId: 'bf-target-45',
+        origin: 'manual',
+        targetInfo: { url: 'https://attached.example', title: 'Attached' },
+      },
+    }));
+    await sleep(100);
+
+    const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.tabs));
+    assert.equal(res.body.tabs.length, 1);
+    assert.equal(res.body.tabs[0].tabId, 45);
+    assert.equal(res.body.tabs[0].origin, 'manual');
+
+    ext.close();
+    await sleep(100);
+  });
+
+  it('preserves non-manual origin when attached tabs are replayed after reconnect', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') ext.send(JSON.stringify({ method: 'pong' }));
+      if (msg.id && msg.method === 'getRestrictions') ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+    });
+
+    ext.send(JSON.stringify({
+      method: 'manualTabAttached',
+      params: {
+        tabId: 55,
+        sessionId: 'agent-55-1',
+        targetId: 'bf-target-55',
+        targetInfo: { url: 'https://agent.example', title: 'Agent' },
+        origin: 'agent-created',
+      },
+    }));
+    await sleep(100);
+
+    const status = await httpGet(`http://127.0.0.1:${port}/extension/status`);
+    assert.equal(status.body.activeTargets, 1);
+    assert.equal(status.body.activeManualTargets, 0);
+    assert.equal(status.body.attachedTabs[0].origin, 'agent-created');
+    assert.deepEqual(status.body.manualAttachedTabs, []);
+
+    ext.close();
+    await sleep(100);
+  });
+
+  it('rejects HTTP requests with non-local Host header before URL parsing', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: 'evil.example' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.text, /Invalid Host header/);
+  });
+
+  it('rejects malformed bracketed Host header', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: '[::1' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.text, /Invalid Host header/);
+  });
+
+  it('rejects Host header with non-numeric port', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: '127.0.0.1:bad' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.text, /Invalid Host header/);
+  });
+
+  it('allows localhost Host headers for status endpoints', async () => {
+    const res = await rawHttpGet({
+      port,
+      path: '/extension/status',
+      headers: { Host: `127.0.0.1:${port}` },
+    });
+    assert.equal(res.status, 200);
+  });
+
+  it('does not expose attached-tab status to arbitrary browser origins with CORS', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/extension/status`, {
+      headers: { Origin: 'https://evil.example' },
+    });
+    assert.notEqual(res.headers.get('access-control-allow-origin'), '*');
+  });
+});
+
+// ─── Target.createTarget Restrictions Guard ─────────────────────────────────
+
+describe('Target.createTarget restrictions guard', () => {
+  let relay;
+  let port;
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(200);
+  });
+
+  after(() => {
+    relay.stop();
+  });
+
+  it('rejects Target.createTarget when no-new-tabs restriction is active', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const seenCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id !== undefined) seenCommands.push(msg);
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { mode: 'manual', noNewTabs: true, lockUrl: false, readOnly: false, instructions: '' },
+        }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const messages = [];
+    cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+    await sleep(50);
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'about:blank' } }));
+    await sleep(300);
+
+    const response = messages.find((m) => m.id === 1);
+    assert.ok(response?.error, 'createTarget should fail');
+    assert.match(response.error.message || response.error, /New tabs are disabled|manual attached-tab mode/);
+    assert.equal(
+      seenCommands.filter((msg) => msg.method === 'createTab').length,
+      0,
+      'createTab must not be sent when restrictions block new tabs',
+    );
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('rejects Target.createTarget without createTab when restrictions cannot be read', async () => {
+    for (const failureMode of ['extension-missing', 'timeout', 'malformed-response', 'extension-error', 'transport-failure']) {
+      const seenExtensionCommands = [];
+      const cleanup = await installRestrictionsFailureFixture(failureMode, { seenExtensionCommands, port });
+      const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      const messages = [];
+      cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'about:blank' } }));
+      // timeout mode waits up to ~2s for the restrictions fetch to time out
+      await sleep(failureMode === 'timeout' ? 2600 : 400);
+
+      const response = messages.find((m) => m.id === 1);
+      assert.ok(response?.error, `expected createTarget to fail closed for ${failureMode}`);
+      assert.match(
+        response.error.message || response.error,
+        /New tabs are disabled|Cannot read BrowserForce restrictions|attached-tab mode/,
+        `expected fail-closed error for ${failureMode}`,
+      );
+      assert.equal(
+        seenExtensionCommands.filter((msg) => msg.method === 'createTab').length,
+        0,
+        `createTab must not be sent when restrictions fail via ${failureMode}`,
+      );
+
+      cdp.close();
+      await cleanup?.();
+      await sleep(100);
+    }
   });
 });
 

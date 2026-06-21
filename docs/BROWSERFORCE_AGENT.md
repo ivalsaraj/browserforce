@@ -28,7 +28,9 @@ browserforce agent status
 
 3. In the extension popup, click `Open BrowserForce Agent`.
 
-4. Send a message in the side panel.
+4. Attach the current tab only when you want the agent to control that tab.
+
+5. Send a message in the side panel.
 
 Stop daemon when needed:
 
@@ -42,6 +44,17 @@ browserforce agent stop
 2. Relay validates extension origin/ID and returns `{ port, token }` from `~/.browserforce/chatd-url.json`.
 3. Side panel calls chatd directly on `127.0.0.1:<port>` with `Authorization: Bearer <token>`.
 4. Chat events stream over SSE from `/v1/events`.
+
+## Current Tab Attachment
+
+- Opening the BrowserForce side panel does not auto-attach the active tab.
+- Sending a message does not auto-attach the active tab.
+- Use `Attach current tab` only when you want the agent to drive that tab through Chrome DevTools.
+- This keeps fragile pages from being debugger-attached implicitly and reduces surprise automation on the tab you are viewing.
+- When you ask the agent to `check`, `inspect`, `look at`, `review`, or `read` an attached page, it should start with `context.pages()` and reuse the matching existing tab.
+- In that flow, it should not call `context.newPage()` or `page.goto()` just to find a page that is already open.
+- If the page you want is not present in `context.pages()`, the agent should tell you instead of opening a fresh copy.
+- BrowserForce now defers tab-group reconciliation briefly after attach and suppresses self-triggered regroup loops while a group sync is already in progress. This reduces attach-time Chrome churn for manually attached tabs.
 
 ## Session Model
 
@@ -141,6 +154,17 @@ Optional external config:
   - Token mismatch/stale bootstrap. Restart daemon and reopen side panel.
 - `Context: unavailable` chip:
   - No `run.usage` emitted yet for that session. Send a run and re-open session metadata.
+- "MCP shows zero / no attached page" (BF_NO_ATTACHED_PAGE):
+  - Attach a tab with the BrowserForce extension popup, then retry. Confirm attached-tab readiness directly:
+    ```bash
+    curl -s http://127.0.0.1:19222/extension/status | jq '.activeManualTargets, .manualAttachedTabs'
+    curl -s http://127.0.0.1:19222/attached-tabs | jq '.tabs'
+    ```
+  - `activeManualTargets > 0` / `manualAttachedTabs` non-empty means inspect/current-tab flows are ready. `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs.
+- BF_NEW_TABS_DISABLED from execute({ intent: 'open' }):
+  - The session is attached-only. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`. Set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process to restore the legacy auto-bootstrap.
+- BF_RESTRICTIONS_UNAVAILABLE from execute/reset preflight:
+  - The MCP could not read restrictions from the extension/relay. Ensure the relay is running, the BrowserForce extension is connected, and retry. CDP startup is intentionally blocked when the active policy is unknown.
 
 ## Screenshots (Add Later)
 

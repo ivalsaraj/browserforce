@@ -10,12 +10,14 @@ This guide is for contributors who need a fast local dev/debug loop.
 pnpm install
 ```
 
-2. Run relay and MCP from this repo:
+2. Run MCP from this repo. MCP starts or verifies the relay automatically:
 
 ```bash
-pnpm relay
 pnpm mcp
 ```
+
+Run `pnpm relay` separately only when you intentionally want to debug the relay
+process in its own terminal.
 
 3. Load extension from this repo in Chrome (`chrome://extensions` -> Load unpacked -> `extension/`).
 
@@ -29,19 +31,13 @@ ws://127.0.0.1:19222/extension
 
 Use this when another BrowserForce instance is already running or you want isolated debugging.
 
-1. Start relay on a non-default port:
-
-```bash
-RELAY_PORT=19333 pnpm relay
-```
-
-2. In extension popup, set Relay URL to:
+1. In extension popup, set Relay URL to:
 
 ```text
 ws://127.0.0.1:19333/extension
 ```
 
-3. Make MCP use the same relay port.
+2. Make MCP use the same relay port. MCP starts or verifies the relay on that port.
 
 If your MCP client is configured with `npx browserforce@latest mcp`, inject `RELAY_PORT=19333` in the MCP command.
 
@@ -55,6 +51,33 @@ Example shape:
 ```
 
 Fallback (if you cannot pass `RELAY_PORT` in MCP config): set `BF_CDP_URL` to the exact ws URL from `~/.browserforce/cdp-url`.
+
+## Manual Tab Attach During Relay Reconnects
+
+When a user manually attaches a tab from the extension popup, the extension
+re-announces that tab after reconnecting to the relay. The relay treats repeated
+manual attach announcements for the same tab as updates to the existing target,
+not as new targets. This keeps attached tabs visible to MCP after Codex or the
+relay process restarts.
+
+## Relay Status & Introspection Endpoints
+
+The relay exposes localhost-only status endpoints that read existing relay state
+without opening a Playwright CDP connection:
+
+```bash
+curl -s http://127.0.0.1:19222/extension/status | jq
+curl -s http://127.0.0.1:19222/attached-tabs | jq
+```
+
+- `GET /extension/status` → `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }`.
+- `GET /attached-tabs` → `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }`.
+- `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). `attachedTabs` also includes `agent-created` and `relay-attached` tabs. Use `activeManualTargets > 0` to confirm an attached page is ready for inspect/current-tab flows.
+- These differ from `/json/list` (CDP-discovery shape for Playwright) — the status endpoints carry relay-owned provenance.
+
+**Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients.
+
+**CORS:** `/extension/status` and `/attached-tabs` intentionally omit `Access-Control-Allow-Origin` because they expose local browsing metadata (tab URLs/titles); arbitrary websites must not read them.
 
 ## Debug Side-Panel Streaming Events
 
@@ -141,3 +164,7 @@ node --test test/agent/codex-runner.test.js
 node --test test/agent/session-store.test.js
 node --test test/agent/agent-panel-contract.test.js test/agent/agent-panel-send-contract.test.js
 ```
+
+## Shared Agent/Panel Normalizers
+
+The agent daemon and extension side panel both normalize run timeline events. Keep shared, browser-safe helpers in `extension/agent-timeline-labels.js` and plugin helper metadata normalization in `extension/plugin-helper-normalization.js`. The daemon can import these modules directly because the published package includes `extension/`.
