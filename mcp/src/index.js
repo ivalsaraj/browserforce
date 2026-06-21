@@ -14,8 +14,6 @@ import {
 } from './exec-engine.js';
 import {
   preflightAttachedPageBeforeCdp,
-  runExecuteStartupForTest,
-  runResetStartupForTest,
   formatBrowserForceMcpError,
 } from './startup.js';
 import {
