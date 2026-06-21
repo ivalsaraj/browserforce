@@ -24,7 +24,7 @@ When you ask an agent to inspect an existing page, BrowserForce exposes open Chr
 | Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Open tabs + manual attached tabs** |
 | Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB), also support screenshots**          |
-| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset` + extend via plugins**      |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **3 tools: `execute`, `help`, `reset` + extend via plugins** |
 | Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
 | Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
 
@@ -576,8 +576,14 @@ state.results = await page.evaluate(() => document.title);
 
 | Tool      | Description                                                                                                                                                                                                                    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `execute` | Run Playwright JavaScript in your real Chrome. Access `page`, `context`, `state`, `snapshot()`, `waitForPageLoad()`, `getLogs()`, `screenshotWithAccessibilityLabels()`, `cleanHTML()`, `pageMarkdown()`, and Node.js globals. |
+| `execute` | Run Playwright JavaScript in your real Chrome. The prompt is intentionally small so agents see the help gate and tab rules before truncation. |
+| `help`    | Read detailed BrowserForce guidance by section. Section reads are cached per MCP session; `help` does not connect to Chrome or CDP. |
 | `reset`   | Reconnect to the relay and clear state. Use when the connection drops.                                                                                                                                                         |
+
+`execute` keeps only the visible operating contract in its tool description.
+Call `help(section)` for detailed guidance such as tabs, navigation, snapshots,
+logs, raw CDP, plugins, errors, parallel work, and examples. No separate
+BrowserForce skill is required.
 
 
 ### Diff-Aware Helpers

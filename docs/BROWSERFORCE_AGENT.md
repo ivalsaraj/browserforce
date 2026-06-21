@@ -146,6 +146,10 @@ Optional external config:
 
 ## Troubleshooting
 
+- MCP guidance:
+  - `execute` keeps a small prompt so tab rules remain visible to agents.
+  - Call `help(section)` for detailed BrowserForce guidance; sections are cached per MCP session and do not require Chrome/CDP.
+  - No BrowserForce skill is required for the help gate.
 - `agent_not_running` in side panel:
   - Run `browserforce agent start`.
 - `extension_not_connected` from `/chatd-url`:

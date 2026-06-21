@@ -23,7 +23,7 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, Codex, Curs
 | Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Auto mode + manual attached tabs** |
 | Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)**          |
-| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset`**      |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **3 tools: `execute`, `help`, `reset`** |
 | Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
 | Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
 
@@ -127,7 +127,7 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 | Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Auto mode + manual attached tabs** |
 | Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB)**          |
-| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset`**      |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **3 tools: `execute`, `help`, `reset`** |
 | Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
 | Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
 

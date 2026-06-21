@@ -4,10 +4,60 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
   buildSnapshotText, createSmartDiff, parseSearchPattern,
   annotateStableAttrs, buildLocator, escapeLocatorName,
 } from '../src/snapshot.js';
+
+const MCP_ROOT = join(import.meta.url.replace('file://', ''), '../../');
+
+function createRpcClient(proc) {
+  let nextId = 0;
+  let buffer = '';
+  const pending = new Map();
+
+  proc.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line) continue;
+      try {
+        const message = JSON.parse(line);
+        const callback = pending.get(message.id);
+        if (callback) {
+          pending.delete(message.id);
+          callback(message);
+        }
+      } catch {
+        // Ignore non-RPC startup output.
+      }
+    }
+  });
+
+  return function send(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      const id = ++nextId;
+      const timeout = globalThis.setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Timeout waiting for ${method}`));
+      }, 5000);
+
+      pending.set(id, (message) => {
+        globalThis.clearTimeout(timeout);
+        if (message.error) {
+          reject(new Error(JSON.stringify(message.error)));
+        } else {
+          resolve(message.result);
+        }
+      });
+
+      proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    });
+  };
+}
 
 // ─── CDP URL Discovery ──────────────────────────────────────────────────────
 
@@ -68,7 +118,7 @@ describe('Tool Definitions', () => {
     assert.equal(result, 'function function');
   });
 
-  it('registers exactly 2 tools: execute, reset', () => {
+  it('registers exactly 3 tools: execute, help, reset', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -81,8 +131,8 @@ describe('Tool Definitions', () => {
       toolNames.push(match[1]);
     }
 
-    assert.equal(toolNames.length, 2, `Should have exactly 2 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
-    assert.deepEqual(toolNames.sort(), ['execute', 'reset']);
+    assert.equal(toolNames.length, 3, `Should have exactly 3 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
+    assert.deepEqual(toolNames.sort(), ['execute', 'help', 'reset']);
   });
 
   it('tools have non-empty descriptions', () => {
@@ -94,12 +144,85 @@ describe('Tool Definitions', () => {
     // execute tool uses EXECUTE_PROMPT variable, reset uses inline string
     assert.ok(source.includes('EXECUTE_PROMPT'), 'execute tool should reference EXECUTE_PROMPT');
     assert.ok(source.includes('const EXECUTE_PROMPT'), 'EXECUTE_PROMPT should be defined');
+    const helpBlock = source.split("'help'")[1]?.split('server.tool(')[0] || '';
+    assert.ok(helpBlock.includes('No Chrome connection'), 'help should document that it does not connect to Chrome');
     // Check reset tool still has inline description
     const resetBlock = source.split("'reset'")[1] || '';
     assert.ok(resetBlock.includes('Reconnects'), 'reset should have description');
   });
 
-  it('execute tool description includes key guidance sections', () => {
+  it('help tool is registered without CDP startup side effects', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('readHelpSections'), 'help should cache read sections per MCP session');
+    assert.ok(source.includes('force'), 'help should support forcing repeated section reads');
+    const helpIdx = source.indexOf("'help'");
+    assert.ok(helpIdx !== -1, 'help tool should exist');
+    const helpEnd = source.indexOf('\n);\n\n// ─── Execute Tool Prompt', helpIdx);
+    assert.ok(helpEnd !== -1, 'help tool should be registered before execute prompt');
+    const helpBlock = source.slice(helpIdx, helpEnd);
+    assert.doesNotMatch(helpBlock, /ensureBrowser/);
+    assert.doesNotMatch(helpBlock, /beginBrowserOperation/);
+    assert.doesNotMatch(helpBlock, /chromium\.connectOverCDP/);
+  });
+
+  it('help responds over JSON-RPC without a live relay or CDP connection', async () => {
+    const proc = spawn(process.execPath, ['src/index.js'], {
+      cwd: MCP_ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        BF_CDP_URL: 'ws://127.0.0.1:9/cdp?token=test',
+      },
+    });
+    const send = createRpcClient(proc);
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    try {
+      await send('initialize', {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'help-no-cdp-test', version: '1.0.0' },
+      });
+      proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+
+      const listResult = await send('tools/call', {
+        name: 'help',
+        arguments: {},
+      });
+      assert.match(listResult.content?.[0]?.text || '', /tabs:/);
+
+      const result = await send('tools/call', {
+        name: 'help',
+        arguments: { section: 'tabs' },
+      });
+      const text = result.content?.[0]?.text || '';
+      assert.match(text, /manualAttachedTabs/);
+
+      const cachedResult = await send('tools/call', {
+        name: 'help',
+        arguments: { section: 'tabs' },
+      });
+      assert.match(cachedResult.content?.[0]?.text || '', /already read/);
+
+      const forcedResult = await send('tools/call', {
+        name: 'help',
+        arguments: { section: 'tabs', force: true },
+      });
+      assert.match(forcedResult.content?.[0]?.text || '', /context\.pages\(\)/);
+      assert.doesNotMatch(stderr, /\[bf-mcp\] Connected to relay/);
+    } finally {
+      proc.kill('SIGTERM');
+    }
+  });
+
+  it('execute prompt is small and starts with the help gate plus tab rules', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -107,166 +230,47 @@ describe('Tool Definitions', () => {
 
     // EXECUTE_PROMPT is defined as a const above server.tool('execute', EXECUTE_PROMPT, ...)
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf("server.tool(\n  'execute'");
-    const promptBlock = source.slice(promptStart, promptEnd);
-    // Core scope
-    assert.ok(promptBlock.includes('page'), 'should mention page');
-    assert.ok(promptBlock.includes('context'), 'should mention context');
-    assert.ok(promptBlock.includes('state'), 'should mention state');
-    assert.ok(promptBlock.includes('browserforceRestrictions'), 'should mention browserforceRestrictions for extension policy');
-    // Key behavioral guidance
-    assert.ok(promptBlock.includes('state.page'), 'should mention state.page for page management');
-    assert.ok(promptBlock.includes('snapshot'), 'should mention snapshot-first approach');
-    assert.ok(promptBlock.includes('waitForPageLoad'), 'should mention waitForPageLoad');
-    assert.ok(promptBlock.includes('screenshotWithAccessibilityLabels'), 'should mention screenshotWithAccessibilityLabels helper');
-    assert.ok(promptBlock.includes('refToLocator({ ref })'), 'should mention refToLocator helper usage');
-    assert.ok(promptBlock.includes('getCDPSession({ page })'), 'should mention relay-safe getCDPSession helper usage');
-    assert.ok(promptBlock.includes('getExecConsoleLogs'), 'should mention execute console log retrieval helper');
-    assert.ok(promptBlock.includes('cleanHTML'), 'should mention cleanHTML helper');
-    assert.ok(promptBlock.includes('pageMarkdown'), 'should mention pageMarkdown helper');
-    assert.ok(promptBlock.includes('pluginCatalog()'), 'should mention pluginCatalog built-in helper');
-    assert.ok(promptBlock.includes('pluginHelp(name, section?)'), 'should mention pluginHelp built-in helper');
-    assert.ok(
-      promptBlock.includes('clearly matches a plugin capability'),
-      'should instruct pluginHelp call when request matches plugin capability'
-    );
-    assert.ok(promptBlock.includes('metadata-first'), 'should guide plugin usage as metadata-first');
-    assert.ok(promptBlock.includes('newPage'), 'should mention creating new tabs');
-    // Anti-patterns section
-    assert.ok(promptBlock.includes('ANTI-PATTERN') || promptBlock.includes('Don\'t') || promptBlock.includes('✗'), 'should include anti-patterns');
-  });
-
-  it('execute prompt includes tactical anti-pattern and decision guidance', () => {
-    const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
-      'utf8'
-    );
-
-    const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
-    assert.ok(promptBlock.includes('Selector priority'), 'should include selector ranking guidance');
-    assert.ok(promptBlock.includes('login popups'), 'should include login popup handling');
-    assert.ok(promptBlock.includes('cookie') || promptBlock.includes('consent'), 'should include consent modal handling');
-    assert.ok(promptBlock.includes("Don't use console.log()/console.error()"), 'should forbid console logging in execute snippets');
-    assert.ok(promptBlock.includes('If console.* was already used'), 'should include guidance for reading captured execute logs');
-    assert.ok(promptBlock.includes('stale locator'), 'should include stale locator warning');
-    assert.ok(promptBlock.includes('snapshot({ showDiffSinceLastCall'), 'should include diff usage guidance');
-    assert.ok(promptBlock.includes('options.showDiffSinceLastCall'), 'should document snapshot diff toggle in API reference');
+    assert.ok(promptBlock.length < 2000, `EXECUTE_PROMPT block is ${promptBlock.length} chars`);
+    assert.ok(promptBlock.slice(0, 500).includes('HELP GATE'), 'HELP GATE should be visible early');
+    assert.ok(promptBlock.slice(0, 500).includes('TAB RULES'), 'TAB RULES should be visible early');
   });
 
-  it('execute prompt includes tool-selection and debugging decision trees', () => {
+  it('execute prompt keeps critical tab guidance visible', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
-    assert.ok(promptBlock.includes('snapshot vs cleanHTML vs pageMarkdown'), 'should include extraction decision tree');
-    assert.ok(promptBlock.includes('Combine snapshot + logs'), 'should include debugging workflow');
-    assert.ok(promptBlock.includes('Authenticated fetch'), 'should include authenticated fetch pattern');
-    assert.ok(promptBlock.includes('Downloads'), 'should include download pattern');
+    assert.ok(promptBlock.includes('manualAttachedTabs/activeManualTargets'), 'should prefer manual attached-tab metadata');
+    assert.ok(promptBlock.includes('context.pages()'), 'should keep existing tab discovery visible');
+    assert.ok(promptBlock.includes('inspect/read/check'), 'should preserve inspect task guidance');
+    assert.ok(promptBlock.includes('Use state.page'), 'should keep ongoing state.page guidance');
+    assert.ok(promptBlock.includes("intent:'open'"), 'should scope open intent to explicit navigation requests');
   });
 
-  it('execute prompt includes parallel-first swarm policy and telemetry contract', () => {
+  it('execute prompt moves long guidance behind help sections', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf("server.tool(\n  'execute'");
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
-    assert.ok(
-      promptBlock.includes('BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING'),
-      'should include tab swarm policy section'
-    );
-    assert.ok(
-      promptBlock.includes('Promise.all with a concurrency cap'),
-      'should include parallel-first concurrency guidance'
-    );
-    assert.ok(
-      promptBlock.includes('Multi-step is allowed for read-only bulk extraction'),
-      'should include explicit anti-pattern exception for read-only bulk extraction'
-    );
-    assert.ok(promptBlock.includes('peakConcurrentTasks'), 'should require peakConcurrentTasks telemetry');
-    assert.ok(promptBlock.includes('wallClockMs'), 'should require wallClockMs telemetry');
-    assert.ok(promptBlock.includes('sumTaskDurationsMs'), 'should require sumTaskDurationsMs telemetry');
-    assert.ok(promptBlock.includes('failures'), 'should require failures telemetry');
-    assert.ok(promptBlock.includes('retries'), 'should require retries telemetry');
-  });
-
-  it('execute prompt guards against guessed URLs and unsafe single-page parallelism', () => {
-    const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
-      'utf8'
-    );
-    const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf("server.tool(\n  'execute'");
-    const promptBlock = source.slice(promptStart, promptEnd);
-
-    assert.ok(
-      promptBlock.includes('URL DISCOVERY (NO GUESSING)'),
-      'should include explicit no-guessing URL discovery guidance'
-    );
-    assert.ok(
-      promptBlock.includes('Do NOT guess deep links when the site already exposes navigation links'),
-      'should require deriving URLs from visible on-page links first'
-    );
-    assert.ok(
-      promptBlock.includes('Never run Promise.all actions against the same Page object'),
-      'should forbid parallel interactions against one page object'
-    );
-  });
-
-  it('execute prompt prefers existing attached tabs before creating new ones', () => {
-    const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
-      'utf8'
-    );
-    const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf("server.tool(\n  'execute'");
-    const promptBlock = source.slice(promptStart, promptEnd);
-
-    assert.ok(
-      promptBlock.includes('ALWAYS inspect existing attached/open tabs first'),
-      'should tell the agent to inspect existing tabs before creating or navigating'
-    );
-    assert.ok(
-      promptBlock.includes("When the user says 'check', 'inspect', 'look at', 'review', or 'read'"),
-      'should treat page inspection requests as existing-tab tasks'
-    );
-    assert.ok(
-      promptBlock.includes('NEVER call context.newPage() or page.goto() just to find a page that is already open'),
-      'should forbid opening tabs to locate an already open page'
-    );
-    assert.ok(
-      promptBlock.includes("If the target page isn't present in context.pages(), report that clearly instead of opening it"),
-      'should require reporting missing targets instead of silently opening them'
-    );
-    assert.ok(
-      promptBlock.includes('BrowserForce connects and discovers existing open tabs without creating a blank page'),
-      'should explain existing tabs are discovered without blank-page bootstrap'
-    );
-    assert.ok(
-      promptBlock.includes('For attached-only policies'),
-      'should scope manual attach requirement to attached-only policies'
-    );
-    assert.ok(
-      promptBlock.includes('attached/manual/current tab → use manualAttachedTabs/activeManualTargets first'),
-      'should prefer manual attached-tab metadata for attached-tab queries'
-    );
-    assert.ok(
-      promptBlock.includes('filter/cap results unless the user asks for a full list'),
-      'should prevent huge tab-list responses by default'
-    );
-    assert.ok(
-      !promptBlock.includes('Always create or reuse a dedicated tab'),
-      'should remove the old dedicated-tab-first instruction'
-    );
+    for (const header of [
+      'AVAILABLE SCOPE',
+      'SNAPSHOT VS SCREENSHOT',
+      'BROWSERFORCE TAB SWARMS',
+      'API QUICK REFERENCE',
+    ]) {
+      assert.ok(!promptBlock.includes(header), `${header} should move behind help(section)`);
+    }
   });
 
   it('execute tool has code and optional timeout params', () => {

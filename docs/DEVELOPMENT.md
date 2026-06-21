@@ -27,6 +27,13 @@ process in its own terminal.
 ws://127.0.0.1:19222/extension
 ```
 
+## MCP Help Gate
+
+The MCP `execute` tool prompt is intentionally small: it keeps the help gate and
+tab rules visible for tool search, then points agents to `help(section)` for
+detailed guidance. Help sections are cached per MCP session, require no
+BrowserForce skill, and do not open Chrome or connect to CDP.
+
 ## Run on a Different Relay Port (Local Debug Hack)
 
 Use this when another BrowserForce instance is already running or you want isolated debugging.
