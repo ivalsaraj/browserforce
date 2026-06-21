@@ -60,3 +60,9 @@ test('background reconnect replay preserves attached tab provenance', () => {
   assert.match(backgroundJs, /function notifyRelayAttachedTabs\(\)/);
   assert.match(backgroundJs, /for \(const \[tabId,\s*entry\] of attachedTabs\)/);
 });
+
+test('background reconnects when relay slot handoff finishes', () => {
+  assert.match(backgroundJs, /extension\/status/);
+  assert.match(backgroundJs, /connected/);
+  assert.match(backgroundJs, /connected === false/);
+});

@@ -21,6 +21,11 @@ let ws = null;
 let connectionState = 'disconnected'; // disconnected | connecting | connected
 let maintainLoopActive = false;
 let currentRelayUrl = RELAY_URL_DEFAULT;
+/** When true, the maintain loop polls /extension/status and only reconnects
+ *  once the relay confirms connected === false. This prevents a stale worker
+ *  from reclaiming a slot that's legitimately owned by another extension
+ *  (e.g. service-worker replacement or extension slot handoff). */
+let shouldWaitForExtensionSlot = false;
 
 /** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object, origin: string }>} */
 const attachedTabs = new Map();
@@ -83,6 +88,21 @@ function startMaintainLoop() {
 async function maintainConnection() {
   while (true) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // If the previous worker was replaced or another extension owns the
+      // slot, do not immediately reclaim based only on local target state.
+      // Poll the relay's /extension/status and only reconnect once the
+      // relay confirms no extension is connected. This avoids a race where
+      // two workers fight for the single extension slot.
+      if (shouldWaitForExtensionSlot) {
+        const status = await getRelayExtensionStatus();
+        if (status && status.connected === false) {
+          shouldWaitForExtensionSlot = false;
+        } else {
+          await sleep(RECONNECT_DELAY_MS);
+          continue;
+        }
+      }
+
       if (connectionState !== 'connecting') {
         connectionState = 'connecting';
         updateBadge();
@@ -138,6 +158,11 @@ function connect(relayUrl) {
       clearTimeout(timeout);
       ws = null;
       connectionState = 'disconnected';
+      // The WS was open and got closed (or the upgrade failed). Don't
+      // immediately reclaim — another extension may own the slot, or the
+      // relay may be in the middle of a slot handoff. The maintain loop
+      // will poll /extension/status before reconnecting.
+      shouldWaitForExtensionSlot = true;
       updateBadge();
       console.log('[bf] Disconnected from relay');
       if (!settled) {
@@ -837,6 +862,19 @@ async function getMcpClientCount() {
     return Number.isFinite(data?.clients) ? data.clients : 0;
   } catch {
     return 0;
+  }
+}
+
+/** Poll the relay's /extension/status so the maintain loop can wait until the
+ *  relay confirms no extension is connected before reclaiming the slot. */
+async function getRelayExtensionStatus() {
+  const base = relayWsToHttpBase(currentRelayUrl);
+  try {
+    const response = await fetch(`${base}/extension/status`, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
   }
 }
 
