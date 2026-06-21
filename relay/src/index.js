@@ -12,6 +12,8 @@ const DEFAULT_PORT = 19222;
 const COMMAND_TIMEOUT_MS = 30000;
 const PING_INTERVAL_MS = 5000;
 const DEFAULT_CDP_LOG_BUFFER_LIMIT = 10000;
+const RESTRICTIONS_FETCH_TIMEOUT_MS = 2000;
+const RESTRICTIONS_FAIL_CLOSED = Object.freeze({ mode: 'manual', noNewTabs: true });
 
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
@@ -962,7 +964,7 @@ class RelayServer {
   }
 
   /** Send command to extension, returns promise */
-  _sendToExt(method, params = {}) {
+  _sendToExt(method, params = {}, { timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
     return new Promise((resolve, reject) => {
       if (!this.ext || this.ext.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Extension not connected'));
@@ -972,12 +974,36 @@ class RelayServer {
       const id = ++this.extMsgId;
       const timer = setTimeout(() => {
         this.extPending.delete(id);
-        reject(new Error(`Extension command '${method}' timed out after ${COMMAND_TIMEOUT_MS}ms`));
-      }, COMMAND_TIMEOUT_MS);
+        reject(new Error(`Extension command '${method}' timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
 
       this.extPending.set(id, { resolve, reject, timer });
       this.ext.ws.send(JSON.stringify({ id, method, params }));
     });
+  }
+
+  // ─── Restrictions Guard (fail-closed) ──────────────────────────────────────
+
+  /**
+   * Fetch restrictions for the Target.createTarget guard. Fail-closed: every
+   * inability-to-read path (extension missing, timeout, malformed response,
+   * extension error, transport failure) returns manual+noNewTabs so tab
+   * creation is blocked deterministically. Do not cache — settings can change
+   * from the popup between requests.
+   */
+  async _getRestrictionsSafe() {
+    try {
+      const raw = await this._sendToExt('getRestrictions', {}, { timeoutMs: RESTRICTIONS_FETCH_TIMEOUT_MS });
+      if (!raw || typeof raw !== 'object') {
+        return RESTRICTIONS_FAIL_CLOSED;
+      }
+      return {
+        mode: raw.mode === 'manual' ? 'manual' : 'auto',
+        noNewTabs: !!raw.noNewTabs,
+      };
+    } catch {
+      return RESTRICTIONS_FAIL_CLOSED;
+    }
   }
 
   // ─── CDP Events from Extension ──────────────────────────────────────────
@@ -1339,6 +1365,13 @@ class RelayServer {
   }
 
   async _createTarget(ws, params) {
+    // Fail-closed guard: block tab creation in attached-only/no-new-tabs
+    // sessions, including when restrictions cannot be read from the extension.
+    const restrictions = await this._getRestrictionsSafe();
+    if (restrictions.mode === 'manual' || restrictions.noNewTabs) {
+      throw new Error('New tabs are disabled in BrowserForce attached-tab mode.');
+    }
+
     const sessionId = `s${++this.sessionCounter}`;
     const result = await this._sendToExt('createTab', {
       url: params.url || 'about:blank',
