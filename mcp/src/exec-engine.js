@@ -812,6 +812,8 @@ export function buildExecContext(
     return p.context().newCDPSession(p);
   };
 
+  const getBrowserforceStatus = (opts = {}) => getExtensionStatus(opts);
+
   const screenshotWithAccessibilityLabels = async ({ selector, interactiveOnly = true } = {}) => {
     const { text: snapText, refs, page } = await buildSnapshotData({
       selector,
@@ -943,6 +945,7 @@ export function buildExecContext(
     'getLogs',
     'clearLogs',
     'getCDPSession',
+    'getBrowserforceStatus',
     'screenshotWithAccessibilityLabels',
     'cleanHTML',
     'pageMarkdown',
@@ -981,6 +984,7 @@ export function buildExecContext(
     browserforceRestrictions,
     page: defaultPage, context: ctx, state: userState,
     snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
+    getBrowserforceStatus,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,
     console: execConsole,

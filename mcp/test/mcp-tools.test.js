@@ -247,7 +247,8 @@ describe('Tool Definitions', () => {
     const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
-    assert.ok(promptBlock.includes('manualAttachedTabs/activeManualTargets'), 'should prefer manual attached-tab metadata');
+    assert.ok(promptBlock.includes('getBrowserforceStatus()'), 'should use the relay status helper for attached-tab metadata');
+    assert.ok(promptBlock.includes('status.manualAttachedTabs/status.activeManualTargets'), 'should prefer manual attached-tab metadata from status');
     assert.ok(promptBlock.includes('context.pages()'), 'should keep existing tab discovery visible');
     assert.ok(promptBlock.includes('inspect/read/check'), 'should preserve inspect task guidance');
     assert.ok(promptBlock.includes('Use state.page'), 'should keep ongoing state.page guidance');

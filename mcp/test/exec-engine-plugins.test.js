@@ -1239,6 +1239,41 @@ test('buildExecContext exposes screenshot and content helpers in execute scope',
   assert.equal(typeof ctx.screenshotWithAccessibilityLabels, 'function');
   assert.equal(typeof ctx.cleanHTML, 'function');
   assert.equal(typeof ctx.pageMarkdown, 'function');
+  assert.equal(typeof ctx.getBrowserforceStatus, 'function');
+});
+
+test('getBrowserforceStatus exposes manual attached tabs without using context.pages', async () => {
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 2,
+      activeManualTargets: 1,
+      attachedTabs: [
+        { tabId: 1, title: 'Mantle', url: 'https://app.heymantle.com/reports/mrr', origin: 'manual' },
+        { tabId: 2, title: 'Sheets', url: 'https://docs.google.com/spreadsheets/d/abc', origin: 'relay-discovered' },
+      ],
+      manualAttachedTabs: [
+        { tabId: 1, title: 'Mantle', url: 'https://app.heymantle.com/reports/mrr', origin: 'manual' },
+      ],
+    },
+  });
+  try {
+    const ctx = buildExecContext(null, {
+      pages: () => {
+        throw new Error('context.pages should not be needed for relay status');
+      },
+    }, {}, {}, {});
+
+    const result = await runCode(
+      'const status = await getBrowserforceStatus(); return status.manualAttachedTabs.map((tab) => tab.url);',
+      ctx,
+      1000,
+    );
+
+    assert.deepEqual(result, ['https://app.heymantle.com/reports/mrr']);
+  } finally {
+    restore();
+  }
 });
 
 test('screenshotWithAccessibilityLabels runs snapshot and direct screenshot sequentially', async () => {
