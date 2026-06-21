@@ -60,6 +60,10 @@ manual attach announcements for the same tab as updates to the existing target,
 not as new targets. This keeps attached tabs visible to MCP after Codex or the
 relay process restarts.
 
+If the extension still has a local attached-tab entry but relay state was lost,
+pressing **Attach current tab** again replays the existing attachment to the
+relay instead of returning an "already attached" error.
+
 ## Relay Status & Introspection Endpoints
 
 The relay exposes localhost-only status endpoints that read existing relay state

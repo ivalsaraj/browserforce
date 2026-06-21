@@ -160,6 +160,7 @@ Optional external config:
     curl -s http://127.0.0.1:19222/extension/status | jq '.activeManualTargets, .manualAttachedTabs'
     curl -s http://127.0.0.1:19222/attached-tabs | jq '.tabs'
     ```
+  - If the extension UI already shows the tab as attached but relay status is empty, click **Attach current tab** again to replay the existing attachment to the relay.
   - `activeManualTargets > 0` / `manualAttachedTabs` non-empty means inspect/current-tab flows are ready. `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs.
 - BF_NEW_TABS_DISABLED from execute({ intent: 'open' }):
   - The session is attached-only. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`. Set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process to restore the legacy auto-bootstrap.

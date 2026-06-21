@@ -1060,6 +1060,10 @@ Expected outputs:
 - `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs, which are not user-attached. Use `manualAttachedTabs` / `activeManualTargets` to confirm inspect/current-tab readiness.
 - `clients > 0` — a CDP client is currently active.
 
+If the extension UI shows the tab as attached but `manualAttachedTabs` is empty,
+click **Attach current tab** again. The extension treats that as an idempotent
+replay and re-announces the tab to the relay.
+
 ### MCP Error: `New tabs are disabled in BrowserForce attached-tab mode.`
 
 This is the structured `BF_NEW_TABS_DISABLED` / `BF_NO_ATTACHED_PAGE` response. It means the current session is in an attached-only mode and either no manual tab is attached, or an explicit new-tab request is not allowed.

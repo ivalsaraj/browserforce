@@ -974,7 +974,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
       if (attachedTabs.has(tab.id)) {
-        sendResponse({ error: 'Already attached' });
+        const entry = await attachTab(tab.id, attachedTabs.get(tab.id).sessionId, { origin: 'manual' });
+        notifyRelayManualTabAttached(tab.id, entry);
+        sendResponse({ ok: true, tabId: tab.id, alreadyAttached: true });
         return;
       }
       try {

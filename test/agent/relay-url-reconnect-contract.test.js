@@ -47,6 +47,15 @@ test('background re-announces manually attached tabs after relay reconnect', () 
   assert.match(backgroundJs, /notifyRelayAttachedTabs\(\);/);
 });
 
+test('attachCurrentTab replays already-attached tabs to repair relay state', () => {
+  const attachBranch = backgroundJs.match(/if \(attachedTabs\.has\(tab\.id\)\) \{[\s\S]*?\n      \}/);
+  assert.ok(attachBranch, 'already-attached branch should be present');
+  assert.match(attachBranch[0], /attachTab\(tab\.id,\s*attachedTabs\.get\(tab\.id\)\.sessionId,\s*\{\s*origin:\s*'manual'\s*\}\)/);
+  assert.match(attachBranch[0], /notifyRelayManualTabAttached\(tab\.id,\s*entry\)/);
+  assert.match(attachBranch[0], /alreadyAttached:\s*true/);
+  assert.doesNotMatch(attachBranch[0], /error:\s*'Already attached'/);
+});
+
 test('background tracks attached tab provenance without adding a new relay command', () => {
   assert.match(backgroundJs, /origin:\s*'manual'/);
   assert.match(backgroundJs, /origin:\s*'agent-created'/);
