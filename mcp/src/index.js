@@ -77,6 +77,8 @@ function ensureAllPagesCapture() {
 let browser = null;
 const CONNECT_RETRY_TIMEOUT_MS = 30000;
 const DEFAULT_IDLE_BROWSER_DISCONNECT_MS = 15000;
+const INITIAL_PAGE_DISCOVERY_TIMEOUT_MS = 5000;
+const INITIAL_PAGE_DISCOVERY_POLL_MS = 100;
 const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
   process.env.BF_MCP_IDLE_DISCONNECT_MS,
   DEFAULT_IDLE_BROWSER_DISCONNECT_MS,
@@ -148,6 +150,13 @@ function withClientLabel(cdpUrl) {
   }
 }
 
+async function waitForInitialPageDiscovery(ctx, { timeoutMs = INITIAL_PAGE_DISCOVERY_TIMEOUT_MS } = {}) {
+  const started = Date.now();
+  while (ctx.pages().length === 0 && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => globalThis.setTimeout(resolve, INITIAL_PAGE_DISCOVERY_POLL_MS));
+  }
+}
+
 async function ensureBrowser() {
   clearIdleBrowserDisconnectTimer();
   if (browser?.isConnected()) return;
@@ -184,6 +193,7 @@ async function ensureBrowser() {
       if (ctx && !contextListenerAttached) {
         ctx.on('page', (page) => setupConsoleCapture(page));
         contextListenerAttached = true;
+        await waitForInitialPageDiscovery(ctx);
         for (const page of ctx.pages()) {
           setupConsoleCapture(page);
         }

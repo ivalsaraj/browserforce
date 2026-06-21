@@ -538,6 +538,25 @@ describe('Tool Definitions', () => {
       'should track in-flight browser operations before disconnecting'
     );
   });
+
+  it('MCP server waits for initial CDP page discovery before executing code', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const ensureBrowserIdx = source.indexOf('async function ensureBrowser');
+    assert.ok(ensureBrowserIdx !== -1, 'ensureBrowser should exist');
+    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('function getContext', ensureBrowserIdx));
+    assert.ok(
+      source.includes('waitForInitialPageDiscovery'),
+      'should define initial page discovery wait helper'
+    );
+    assert.ok(
+      ensureBrowserBlock.includes('await waitForInitialPageDiscovery(ctx)'),
+      'ensureBrowser should wait for Playwright pages before execute/reset read context.pages()'
+    );
+  });
 });
 
 // ─── MCP Response Format ─────────────────────────────────────────────────────
