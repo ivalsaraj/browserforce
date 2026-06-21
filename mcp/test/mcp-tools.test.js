@@ -256,6 +256,14 @@ describe('Tool Definitions', () => {
       'should scope manual attach requirement to attached-only policies'
     );
     assert.ok(
+      promptBlock.includes('If the user asks for attached/manual/current BrowserForce tabs, inspect manualAttachedTabs/activeManualTargets first'),
+      'should prefer manual attached-tab metadata for attached-tab queries'
+    );
+    assert.ok(
+      promptBlock.includes('do not dump every tab unless asked'),
+      'should prevent huge tab-list responses by default'
+    );
+    assert.ok(
       !promptBlock.includes('Always create or reuse a dedicated tab'),
       'should remove the old dedicated-tab-first instruction'
     );

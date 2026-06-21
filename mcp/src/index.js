@@ -368,6 +368,12 @@ IMPORTANT: ALWAYS inspect existing attached/open tabs first.
 Only create or reuse a dedicated tab when the user explicitly asks to open/navigate to a URL,
 or when there are no suitable existing pages and session restrictions allow a new tab.
 
+Attached-tab queries:
+  - If the user asks for attached/manual/current BrowserForce tabs, inspect manualAttachedTabs/activeManualTargets first.
+  - Do not enumerate all context.pages() for attached-tab queries unless the user explicitly asks for all open tabs.
+  - If manualAttachedTabs is empty but context.pages() has pages, say open tabs are visible but no manual tab is attached.
+  - For large tab sets, filter first and return compact matches; do not dump every tab unless asked.
+
 When the user says 'check', 'inspect', 'look at', 'review', or 'read':
   1) Start with: const pages = context.pages();
   2) Find the target tab by current URL/title/content — do not navigate to discover it.
