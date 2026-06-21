@@ -39,10 +39,10 @@
     "agent/"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "diff": "^8.0.3",
-    "playwright-core": "^1.52.0",
-    "ws": "^8.19.0",
+    "playwright-core": "^1.60.0",
+    "ws": "^8.21.0",
     "zod": "^3.24.0"
   },
   "scripts": {
