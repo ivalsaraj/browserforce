@@ -147,14 +147,13 @@ export async function getExtensionStatus({ baseUrl = getRelayHttpUrl(), timeoutM
 }
 
 /**
- * Assert that a manually attached page is available for inspect/current-tab flows.
- * Throws BF_NO_ATTACHED_PAGE (a BrowserForceMcpError) when the session is in an
- * attached-only mode but no manual tab is attached. No-op when the intent is
- * "open" and restrictions allow new tabs.
+ * Assert that a manually attached page is available when policy requires one.
+ * Auto-mode inspect flows may connect so relay discovery can expose existing
+ * open tabs; attached-only modes still fail before CDP when no manual tab is
+ * attached.
  */
 export function assertAttachedPageAvailable({ extensionStatus, restrictions, intent = 'inspect' }) {
   const isAttachedOnly =
-    isAttachedPageIntent(intent) ||
     restrictions?.mode === 'manual' ||
     restrictions?.noNewTabs === true ||
     process.env.BF_REQUIRE_ATTACHED_PAGE === '1';

@@ -1131,17 +1131,18 @@ describe('Auto-attach Flow', () => {
     relay.stop();
   });
 
-  it('auto-attach does not expose existing browser tabs', async () => {
-    // Connect mock extension
+  it('auto-attach exposes existing browser tabs as lazy targets', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },
     });
 
+    const extCommands = [];
     ext.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
       if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
       if (msg.id !== undefined) {
+        extCommands.push(msg.method);
         if (msg.method === 'listTabs') {
           ext.send(JSON.stringify({
             id: msg.id,
@@ -1156,12 +1157,10 @@ describe('Auto-attach Flow', () => {
       }
     });
 
-    // Connect CDP client
     const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
     const messages = [];
     cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
 
-    // Send setAutoAttach
     cdp.send(JSON.stringify({
       id: 1,
       method: 'Target.setAutoAttach',
@@ -1174,12 +1173,186 @@ describe('Auto-attach Flow', () => {
     assert.ok(response, 'Should receive response to setAutoAttach');
     assert.deepEqual(response.result, {});
 
-    const attached = messages.filter((m) => m.method === 'Target.attachedToTarget');
-    assert.equal(attached.length, 0, 'Should NOT report any targets (agent creates own tabs)');
+    const created = messages.filter((m) => m.method === 'Target.targetCreated');
+    assert.equal(created.length, 2, 'Should create CDP targets for existing tabs');
+    assert.deepEqual(
+      created.map((m) => m.params.targetInfo.url).sort(),
+      ['https://github.com', 'https://gmail.com'],
+    );
 
-    // Verify no targets in relay state
+    const attached = messages.filter((m) => m.method === 'Target.attachedToTarget');
+    assert.equal(attached.length, 2, 'Should report existing tabs as targets');
+    assert.deepEqual(
+      attached.map((m) => m.params.targetInfo.url).sort(),
+      ['https://github.com', 'https://gmail.com'],
+    );
+    assert.ok(
+      messages.findIndex((m) => m.method === 'Target.targetCreated') <
+        messages.findIndex((m) => m.method === 'Target.attachedToTarget'),
+      'Should announce target creation before attaching sessions',
+    );
+
     const targets = await httpGet(`http://127.0.0.1:${port}/json/list`);
-    assert.equal(targets.body.length, 0);
+    assert.equal(targets.body.length, 2);
+
+    cdp.send(JSON.stringify({ id: 2, method: 'Target.getTargets', params: {} }));
+    const getTargets = await waitForCondition(
+      () => messages.find((m) => m.id === 2),
+      { description: 'Target.getTargets response' },
+    );
+    assert.equal(getTargets.result.targetInfos.length, 2);
+    assert.ok(getTargets.result.targetInfos.every((target) => target.browserContextId === 'bf-default-context'));
+
+    assert.ok(extCommands.includes('listTabs'), 'Should request tab metadata');
+    assert.ok(created.every((m) => m.params.targetInfo.browserContextId === 'bf-default-context'));
+    assert.ok(!extCommands.includes('attachTab'), 'Should not attach debugger during discovery');
+    assert.ok(!extCommands.includes('createTab'), 'Should not create tabs during discovery');
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('auto-attach reuses discovered sessions without duplicating targets', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 3, url: 'https://mantle.example', title: 'Mantle', active: true }] },
+        }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.on('message', () => {});
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(200);
+    const firstSessionId = relay.tabToSession.get(3);
+    assert.ok(firstSessionId, 'Should map discovered tab to relay session');
+
+    cdp.send(JSON.stringify({ id: 2, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(200);
+    assert.equal(relay.tabToSession.get(3), firstSessionId);
+    assert.equal([...relay.targets.values()].filter((target) => target.tabId === 3).length, 1);
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('relay-discovered targets attach lazily after init-only commands', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const extCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id !== undefined) {
+        extCommands.push(msg.method);
+        if (msg.method === 'listTabs') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: { tabs: [{ tabId: 4, url: 'https://lazy.example', title: 'Lazy', active: true }] },
+          }));
+        } else if (msg.method === 'attachTab') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: {
+              tabId: msg.params.tabId,
+              targetId: 'real-target-4',
+              targetInfo: { targetId: 'real-target-4', type: 'page', title: 'Lazy', url: 'https://lazy.example' },
+            },
+          }));
+        } else if (msg.method === 'cdpCommand') {
+          ext.send(JSON.stringify({ id: msg.id, result: { result: { type: 'string', value: 'ok' } } }));
+        } else if (msg.method === 'closeTab') {
+          ext.send(JSON.stringify({ id: msg.id, result: {} }));
+        }
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const messages = [];
+    cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    const attached = await waitForCondition(
+      () => messages.find((m) => m.method === 'Target.attachedToTarget' && m.params?.targetInfo?.url === 'https://lazy.example'),
+      { description: 'lazy discovered target' },
+    );
+    const sessionId = attached.params.sessionId;
+    const advertisedTargetId = attached.params.targetInfo.targetId;
+    assert.equal(advertisedTargetId, 'bf-target-4');
+
+    cdp.send(JSON.stringify({ id: 2, method: 'Runtime.enable', params: {}, sessionId }));
+    await waitForCondition(() => messages.find((m) => m.id === 2), { description: 'Runtime.enable response' });
+    assert.equal(extCommands.filter((method) => method === 'attachTab').length, 0);
+
+    cdp.send(JSON.stringify({ id: 3, method: 'Runtime.evaluate', params: { expression: '"ok"' }, sessionId }));
+    await waitForCondition(() => messages.find((m) => m.id === 3), { description: 'Runtime.evaluate response' });
+    assert.equal(extCommands.filter((method) => method === 'attachTab').length, 1);
+    assert.ok(extCommands.indexOf('attachTab') < extCommands.indexOf('cdpCommand'));
+    assert.equal(relay.targets.get(sessionId).targetId, advertisedTargetId);
+    assert.equal(relay.targets.get(sessionId).chromeTargetId, 'real-target-4');
+
+    cdp.send(JSON.stringify({ id: 4, method: 'Runtime.evaluate', params: { expression: '"again"' }, sessionId }));
+    await waitForCondition(() => messages.find((m) => m.id === 4), { description: 'second Runtime.evaluate response' });
+    assert.equal(extCommands.filter((method) => method === 'attachTab').length, 1);
+
+    cdp.send(JSON.stringify({ id: 5, method: 'Target.closeTarget', params: { targetId: advertisedTargetId } }));
+    const closeResponse = await waitForCondition(() => messages.find((m) => m.id === 5), { description: 'Target.closeTarget response' });
+    assert.equal(closeResponse.result.success, true);
+    assert.ok(extCommands.includes('closeTab'), 'Should close by original advertised targetId after lazy attach');
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('auto-attach prunes stale relay-discovered targets from fresh tab metadata', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    let listCallCount = 0;
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'listTabs') {
+        listCallCount += 1;
+        const tabs = listCallCount === 1
+          ? [
+              { tabId: 5, url: 'https://closed.example', title: 'Closed', active: false },
+              { tabId: 6, url: 'https://kept.example/old', title: 'Old', active: true },
+            ]
+          : [
+              { tabId: 6, url: 'https://kept.example/new', title: 'New', active: true },
+            ];
+        ext.send(JSON.stringify({ id: msg.id, result: { tabs } }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.on('message', () => {});
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(200);
+    const keptSessionId = relay.tabToSession.get(6);
+    assert.ok(relay.tabToSession.get(5));
+    assert.ok(keptSessionId);
+
+    cdp.send(JSON.stringify({ id: 2, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(200);
+    assert.equal(relay.tabToSession.has(5), false);
+    assert.equal(relay.tabToSession.get(6), keptSessionId);
+    assert.equal(relay.targets.get(keptSessionId).targetInfo.url, 'https://kept.example/new');
+    assert.equal(relay.targets.get(keptSessionId).targetInfo.title, 'New');
 
     cdp.close();
     ext.close();

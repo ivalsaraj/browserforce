@@ -1,5 +1,5 @@
 // BrowserForce — MCP Server
-// 2-tool architecture: execute (run Playwright code) + reset (reconnect)
+// 3-tool architecture: execute (run Playwright code) + help (docs) + reset (reconnect)
 // Connects to the relay via Playwright's CDP client.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -23,6 +23,11 @@ import {
   buildPluginSkillRuntime,
 } from './plugin-loader.js';
 import { checkForUpdate } from './update-check.js';
+import {
+  getHelpSection,
+  listHelpSections,
+  HELP_SECTION_NAMES,
+} from './help-docs.js';
 
 // ─── Console Log Capture ─────────────────────────────────────────────────────
 
@@ -77,6 +82,8 @@ function ensureAllPagesCapture() {
 let browser = null;
 const CONNECT_RETRY_TIMEOUT_MS = 30000;
 const DEFAULT_IDLE_BROWSER_DISCONNECT_MS = 15000;
+const INITIAL_PAGE_DISCOVERY_TIMEOUT_MS = 5000;
+const INITIAL_PAGE_DISCOVERY_POLL_MS = 100;
 const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
   process.env.BF_MCP_IDLE_DISCONNECT_MS,
   DEFAULT_IDLE_BROWSER_DISCONNECT_MS,
@@ -148,6 +155,13 @@ function withClientLabel(cdpUrl) {
   }
 }
 
+async function waitForInitialPageDiscovery(ctx, { timeoutMs = INITIAL_PAGE_DISCOVERY_TIMEOUT_MS } = {}) {
+  const started = Date.now();
+  while (ctx.pages().length === 0 && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => globalThis.setTimeout(resolve, INITIAL_PAGE_DISCOVERY_POLL_MS));
+  }
+}
+
 async function ensureBrowser() {
   clearIdleBrowserDisconnectTimer();
   if (browser?.isConnected()) return;
@@ -184,6 +198,7 @@ async function ensureBrowser() {
       if (ctx && !contextListenerAttached) {
         ctx.on('page', (page) => setupConsoleCapture(page));
         contextListenerAttached = true;
+        await waitForInitialPageDiscovery(ctx);
         for (const page of ctx.pages()) {
           setupConsoleCapture(page);
         }
@@ -303,236 +318,68 @@ const server = new McpServer({
   name: 'browserforce',
   version: '1.0.0',
 });
+const readHelpSections = new Set();
+
+function formatHelpSectionList() {
+  const sections = listHelpSections()
+    .map((section) => `- ${section.name}: ${section.summary}`)
+    .join('\n');
+
+  return `BrowserForce help sections:
+${sections}
+
+Call help({ section: 'tabs' }) for a section. Repeated section reads return a receipt unless force:true.`;
+}
+
+server.tool(
+  'help',
+  'Read BrowserForce docs by section. No Chrome connection. First read returns docs; repeats return a receipt unless force:true.',
+  {
+    section: z.enum([...HELP_SECTION_NAMES, 'all']).optional(),
+    force: z.boolean().optional(),
+  },
+  async ({ section, force = false }) => {
+    if (!section || section === 'all') {
+      return { content: [{ type: 'text', text: formatHelpSectionList() }] };
+    }
+
+    if (readHelpSections.has(section) && !force) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Help section "${section}" was already read this MCP session. Use force:true to read it again.`,
+        }],
+      };
+    }
+
+    readHelpSections.add(section);
+    return { content: [{ type: 'text', text: getHelpSection(section) }] };
+  },
+);
 
 // ─── Execute Tool Prompt ───────────────────────────────────────────────────
 
-const EXECUTE_PROMPT = `Run Playwright JavaScript in the user's real Chrome browser.
-This is their actual browser with real cookies, sessions, and tabs — not a sandbox.
+const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome.
 
-═══ AVAILABLE SCOPE ═══
+HELP GATE:
+Read each needed help section once per MCP session.
+Call help(section) before navigation, mutation, multi-step work, raw CDP, plugins, snapshots/log debugging, or recovery.
+Skip help only for simple read-only tab discovery.
 
-Variables:
-  page        Default page (first currently open tab, if any — use only as a fallback)
-  context     Browser context — access all pages via context.pages()
-  state       Persistent object across calls (cleared on reset). Store your working page here.
-  browserforceSettings Session defaults loaded once per MCP session (refresh on reset).
-                      Keys: executionMode, parallelVisibilityMode.
-  browserforceRestrictions Session restrictions from extension/relay.
-                      Keys: mode, lockUrl, noNewTabs, readOnly, instructions.
+TAB RULES:
+- attached/manual/current tab -> use manualAttachedTabs/activeManualTargets first.
+- all open tabs -> context.pages(); filter/cap unless full list asked.
+- inspect/read/check -> reuse existing tabs; do not create/navigate to find them.
 
-Helpers:
-  snapshot({ selector?, search?, showDiffSinceLastCall? })   Accessibility tree as text. 10-100x cheaper than screenshots.
-  refToLocator({ ref })              Resolve a snapshot ref (e.g., e3) to a Playwright locator string.
-  waitForPageLoad({ timeout? })      Smart load detection (filters analytics/ads, polls readyState).
-  getLogs({ count? })                Browser console logs captured for current page.
-  clearLogs()                        Clear captured console logs.
-  getExecConsoleLogs({ count? })     Execute-snippet console logs captured from console.* calls.
-  clearExecConsoleLogs()             Clear execute-snippet console logs.
-  screenshotWithAccessibilityLabels({ selector?, interactiveOnly? })
-                                     Vimium-style labeled screenshot + accessibility snapshot.
-                                     Returns image with color-coded element labels (e1, e2...) and
-                                     matching text snapshot. Use for explicitly annotated/labeled captures.
-                                     For plain screenshots, prefer state.page.screenshot() and snapshot() as separate calls.
-  cleanHTML(selector?, opts?)        Cleaned HTML — strips scripts, styles, decorative elements.
-                                     Keeps semantic attrs: href, src, role, aria-*, data-testid.
-                                     opts: { maxAttrLen?, maxContentLen? }
-  pageMarkdown()                     Article content via Mozilla Readability (Firefox Reader View).
-                                     Strips nav/ads/sidebars. Returns title + metadata + body text.
-                                     Falls back to raw body text for non-article pages.
-  getCDPSession({ page })            Create a relay-safe raw CDP session for a page.
-                                     Use this instead of page.context().newCDPSession(page).
-  pluginCatalog()                    Returns installed plugin metadata (metadata-first discovery).
-  pluginHelp(name, section?)         Returns on-demand SKILL help for one plugin from in-memory cache.
-
-Globals: fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout, TextEncoder, TextDecoder
-
-Plugin workflow (metadata-first):
-  1) Call pluginCatalog() to discover plugin names, helper names, and available sections.
-  2) If the user request clearly matches a plugin capability, call pluginHelp(name, section?) for that plugin before using its helpers.
-  3) Otherwise, call pluginHelp(name, section?) only when you need plugin-specific instructions.
-  4) Avoid calling pluginHelp blindly for every plugin.
-
-═══ FIRST CALL — PAGE SETUP ═══
-
-IMPORTANT: ALWAYS inspect existing attached/open tabs first.
-Only create or reuse a dedicated tab when the user explicitly asks to open/navigate to a URL,
-or when there are no suitable existing pages and session restrictions allow a new tab.
-
-When the user says 'check', 'inspect', 'look at', 'review', or 'read':
-  1) Start with: const pages = context.pages();
-  2) Find the target tab by current URL/title/content — do not navigate to discover it.
-  3) Set state.page = the matching existing page.
-  4) NEVER call context.newPage() or page.goto() just to find a page that is already open.
-  5) If the target page isn't present in context.pages(), report that clearly instead of opening it.
-
-When you need a dedicated work tab for an explicit open/navigate task:
-  state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
-  await state.page.goto('https://example.com');
-  await waitForPageLoad();
-  return await snapshot();
-
-After setup, use state.page for all subsequent operations.
-If state.page was closed:
-  if (!state.page || state.page.isClosed()) {
-    state.page = context.pages().find(p => !p.isClosed()) || null;
-    if (!state.page && browserforceRestrictions.mode !== 'manual' && !browserforceRestrictions.noNewTabs) {
-      state.page = context.pages().find(p => p.url() === 'about:blank') || await context.newPage();
-    }
-  }
-
-═══ URL DISCOVERY (NO GUESSING) ═══
-
-Do NOT guess deep links when the site already exposes navigation links.
-When discovering a section/page:
-  1) Snapshot first and inspect visible refs.
-  2) Prefer clicking discovered links/buttons or reading hrefs from those elements.
-  3) Only construct a URL manually if there is no discoverable navigation path.
-  4) If a guessed URL fails (404/wrong content), back up and derive it from on-page links.
-
-Example href discovery:
-  const hrefs = await state.page.evaluate(() =>
-    Array.from(document.querySelectorAll('a')).map(a => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
-  );
-
-═══ SETTINGS & STRATEGY PRECHECK ═══
-
-Read browserforceSettings + browserforceRestrictions before planning execution.
-- executionMode=sequential: do one task at a time; do not run tab swarms.
-- executionMode=parallel: parallelize only independent read-only tasks.
-- parallelVisibilityMode=foreground-tab: new tabs are visible in the current window; avoid disruptive tab choreography.
-- mode=manual or noNewTabs=true: do not create tabs, only operate on user-attached tabs.
-- lockUrl=true: do not navigate away from current URL (reload is allowed).
-- readOnly=true: no click/type/submit actions; observe with snapshot/screenshot/evaluate only.
-- instructions: treat as mandatory policy text for this session.
-
-Empty tabs/targets handling:
-- For inspect/current/attached-tab tasks (default intent): if there are no manually attached tabs, BrowserForce returns a structured "No attached BrowserForce page available" error instead of creating a tab. Attach a tab with the extension, then retry.
-- For explicit open/navigate tasks (intent: 'open'): user code may create a tab via context.newPage() only when restrictions allow it (mode !== manual and noNewTabs !== true). BrowserForce itself does not create an implicit startup page unless BF_ALLOW_IMPLICIT_STARTUP_PAGE=1 is set for backward compatibility.
-- Do not ask the user to click Attach/Share by default.
-- Ask for manual Attach/Share only when mode=manual or noNewTabs=true, or when the user explicitly asks to use their current tab and it is not available in context.pages().
-
-═══ CORE LOOP — OBSERVE → ACT → OBSERVE ═══
-
-After every action, verify the result before proceeding.
-Each execute call should usually do one meaningful action and return verification.
-Multi-step is allowed for read-only bulk extraction when actions are independent.
-
-Recommended cycle:
-  1) OBSERVE: return await snapshot();
-  2) ACT: one action (click, type, navigate, submit)
-  3) OBSERVE: snapshot() again; verify the expected change happened
-
-If nothing changed, wait for load and observe again before retrying.
-
-═══ INTERACTION RULES ═══
-
-Selector priority:
-  1) Use fresh [ref=...] locators from snapshot output
-  2) Use role/name locators from snapshot
-  3) Use stable test IDs (data-testid)
-  4) Avoid brittle nth()/deep CSS selectors unless no stable option exists
-
-If snapshot shows [ref=e3]:
-  const locator = refToLocator({ ref: 'e3' });
-  if (locator) await state.page.locator(locator).click();
-
-Before interacting, dismiss blockers:
-  await snapshot({ search: /cookie|consent|accept|reject|allow|age|verify|login|sign.in/i });
-
-Handle login popups by preferring controllable tabs over blocked popup windows.
-
-For multiline text, prefer fill() with \\n:
-  await state.page.locator('role=textbox[name="Message"]').fill('Line 1\\nLine 2');
-
-═══ SNAPSHOT DIFF CONTROL ═══
-
-Use snapshot({ showDiffSinceLastCall: true }) to get concise diffs when repeatedly observing the same page.
-Use snapshot({ showDiffSinceLastCall: false }) when you need full output.
-
-═══ SNAPSHOT VS SCREENSHOT ═══
-
-Prefer snapshot() for text/content/verification.
-For plain screenshot requests, use state.page.screenshot() first, then snapshot() if textual verification is needed.
-Use screenshotWithAccessibilityLabels() only when labels/refs on the image are explicitly needed.
-
-snapshot vs cleanHTML vs pageMarkdown:
-  - snapshot(): interactive structure, refs, quick verification
-  - cleanHTML(): structured DOM extraction/parsing
-  - pageMarkdown(): article-like content extraction
-
-Authenticated fetch:
-  Use state.page.evaluate(() => fetch(...)) when authenticated browser session context matters.
-
-Downloads:
-  Prefer browser-driven download flows for large outputs instead of printing huge payloads.
-
-═══ BROWSERFORCE TAB SWARMS // PARALLEL TABS PROCESSING ═══
-
-Read browserforceSettings.executionMode before choosing strategy.
-For independent read-only extraction tasks, use Promise.all with a concurrency cap (usually 3-8, start at 5).
-Never run Promise.all actions against the same Page object.
-Parallel task rule: one tab/page per task, then aggregate results.
-On 429/challenges/timeouts: retry with lower concurrency, then sequential if needed.
-If visibility mode requires showing work (for example, rotating/foreground demos), bringing your own working tab to front is allowed.
-
-Return telemetry for swarm runs:
-  {
-    peakConcurrentTasks,
-    wallClockMs,
-    sumTaskDurationsMs,
-    failures,
-    retries
-  }
-
-═══ DEBUGGING QUICK LOOP ═══
-
-1) snapshot({ search: /button|dialog|error|target/i })
-2) getLogs({ count: 30 })
-3) state.page.evaluate(...) for visibility/disabled/overlay checks
-
-Combine snapshot + logs to debug JS-heavy failures.
-For JS-heavy or authenticated sites, stay in browser automation.
-Do not switch to raw HTTP/curl expecting fully rendered DOM state.
-
-═══ HARD RULES ═══
-
-✗ Don't navigate an already-open page just to locate or identify it
-✗ Don't screenshot to read text; use snapshot
-✗ Don't use console.log()/console.error() in execute code; use return values, snapshot(), or getLogs() instead
-  If console.* was already used, inspect it with getExecConsoleLogs({ count }) instead of re-logging.
-✗ Don't chain actions blindly without verification
-✗ Don't use page.waitForTimeout() when a deterministic wait is available
-✗ Don't use stale refs after DOM/navigation updates (stale locator refs cause false actions)
-✗ Don't call page.context().newCDPSession(page); use getCDPSession({ page })
-✗ Don't call browser.close() or context.close()
-✗ Don't call page.bringToFront() by default; only use it when user asks or when visibility mode needs visible tab progression
-✗ Don't use the default page variable for ongoing work after setup; use state.page
-
-═══ ERROR RECOVERY ═══
-
-If page closed:      first pick another page from context.pages(); create a new tab only if none exist and policy allows it
-If navigation fails: check current URL, then snapshot() to re-ground state
-If element missing:  use snapshot({ search: /.../ }) with tighter patterns
-If connection lost:  call reset, then reinitialize state.page
-If timeout:          increase timeout or break work into smaller execute calls
-If Chrome/extension unavailable: ask user to open Chrome, keep at least one normal web tab open, and ensure BrowserForce extension is connected
-
-═══ API QUICK REFERENCE ═══
-
-snapshot(options?) -> text accessibility tree with interactive refs; options.showDiffSinceLastCall toggles diff/full output
-waitForPageLoad(options?) -> { success, readyState, pendingRequests, waitTimeMs, timedOut }
-getLogs(options?) -> browser console log entries
-clearLogs() -> clears captured logs for current page
-getExecConsoleLogs(options?) -> execute-snippet console logs captured from console.*
-clearExecConsoleLogs() -> clears captured execute-snippet console logs
-state -> persistent across execute calls; cleared on reset`;
+Use state.page for ongoing work. Use intent:'open' only when the user asked to open/navigate.
+For details call help(section).`;
 
 function registerExecuteTool(skillAppendix = '') {
   server.tool(
     'execute',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run — page/context/state/snapshot/refToLocator/getCDPSession/waitForPageLoad/getLogs/getExecConsoleLogs/cleanHTML/pageMarkdown in scope'),
+      code: z.string().describe('JavaScript to run in BrowserForce execute scope. Call help(section) for detailed guidance.'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
       intent: z.enum(['inspect', 'open', 'auto']).optional()
         .describe('Use inspect for current/attached-tab work; use open only when the user explicitly asked to open/navigate. Defaults to inspect.'),

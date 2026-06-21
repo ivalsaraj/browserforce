@@ -1603,12 +1603,25 @@ test('manual attached-page preflight fails before connecting over CDP', async ()
   assert.deepEqual(calls, []);
 });
 
-test('default intent returns BF_NO_ATTACHED_PAGE when no manual tab exists in auto mode', async () => {
+test('default auto inspect proceeds to CDP discovery when no manual tab exists', async () => {
   const calls = [];
   const result = await runExecuteStartupForTest({
     intent: 'inspect',
     restrictions: { mode: 'auto', noNewTabs: false },
     extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
+    ensureBrowser: async () => {
+      calls.push('ensureBrowser');
+    },
+  });
+  assert.equal(result.error, undefined);
+  assert.deepEqual(calls, ['ensureBrowser']);
+});
+
+test('reset preflight fails before connecting over CDP when no manual tab is attached', async () => {
+  const calls = [];
+  const result = await runResetStartupForTest({
+    restrictions: { mode: 'manual', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
     ensureBrowser: async () => {
       calls.push('ensureBrowser');
       throw new Error('ensureBrowser should not be called');
@@ -1618,11 +1631,12 @@ test('default intent returns BF_NO_ATTACHED_PAGE when no manual tab exists in au
   assert.deepEqual(calls, []);
 });
 
-test('reset preflight fails before connecting over CDP when no manual tab is attached', async () => {
+test('no-new-tabs inspect preflight fails before connecting over CDP when no manual tab is attached', async () => {
   const calls = [];
-  const result = await runResetStartupForTest({
-    restrictions: { mode: 'manual', noNewTabs: true },
-    extensionStatus: { connected: true, activeTargets: 1, activeManualTargets: 0, manualAttachedTabs: [] },
+  const result = await runExecuteStartupForTest({
+    intent: 'inspect',
+    restrictions: { mode: 'auto', noNewTabs: true },
+    extensionStatus: { connected: true, activeTargets: 0, activeManualTargets: 0, manualAttachedTabs: [] },
     ensureBrowser: async () => {
       calls.push('ensureBrowser');
       throw new Error('ensureBrowser should not be called');

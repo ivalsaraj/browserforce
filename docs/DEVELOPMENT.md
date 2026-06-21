@@ -27,6 +27,13 @@ process in its own terminal.
 ws://127.0.0.1:19222/extension
 ```
 
+## MCP Help Gate
+
+The MCP `execute` tool prompt is intentionally small: it keeps the help gate and
+tab rules visible for tool search, then points agents to `help(section)` for
+detailed guidance. Help sections are cached per MCP session, require no
+BrowserForce skill, and do not open Chrome or connect to CDP.
+
 ## Run on a Different Relay Port (Local Debug Hack)
 
 Use this when another BrowserForce instance is already running or you want isolated debugging.
@@ -60,6 +67,10 @@ manual attach announcements for the same tab as updates to the existing target,
 not as new targets. This keeps attached tabs visible to MCP after Codex or the
 relay process restarts.
 
+If the extension still has a local attached-tab entry but relay state was lost,
+pressing **Attach current tab** again replays the existing attachment to the
+relay instead of returning an "already attached" error.
+
 ## Relay Status & Introspection Endpoints
 
 The relay exposes localhost-only status endpoints that read existing relay state
@@ -72,7 +83,9 @@ curl -s http://127.0.0.1:19222/attached-tabs | jq
 
 - `GET /extension/status` → `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }`.
 - `GET /attached-tabs` → `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }`.
-- `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). `attachedTabs` also includes `agent-created` and `relay-attached` tabs. Use `activeManualTargets > 0` to confirm an attached page is ready for inspect/current-tab flows.
+- Auto-mode CDP discovery registers eligible open Chrome tabs as `relay-discovered` targets without debugger-attaching them or creating blank tabs.
+- `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). Use them to confirm attached-only/manual mode is ready.
+- `attachedTabs` can also include `relay-discovered`, `agent-created`, and `relay-attached` tabs. These targets are visible to MCP, but only debugger-attach lazily when the agent interacts with one.
 - These differ from `/json/list` (CDP-discovery shape for Playwright) — the status endpoints carry relay-owned provenance.
 
 **Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients.

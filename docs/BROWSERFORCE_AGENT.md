@@ -146,6 +146,10 @@ Optional external config:
 
 ## Troubleshooting
 
+- MCP guidance:
+  - `execute` keeps a small prompt so tab rules remain visible to agents.
+  - Call `help(section)` for detailed BrowserForce guidance; sections are cached per MCP session and do not require Chrome/CDP.
+  - No BrowserForce skill is required for the help gate.
 - `agent_not_running` in side panel:
   - Run `browserforce agent start`.
 - `extension_not_connected` from `/chatd-url`:
@@ -155,12 +159,14 @@ Optional external config:
 - `Context: unavailable` chip:
   - No `run.usage` emitted yet for that session. Send a run and re-open session metadata.
 - "MCP shows zero / no attached page" (BF_NO_ATTACHED_PAGE):
-  - Attach a tab with the BrowserForce extension popup, then retry. Confirm attached-tab readiness directly:
+  - In auto mode, BrowserForce should discover existing open tabs after MCP connects; it should not need a blank page bootstrap.
+  - In manual/no-new-tabs mode, attach a tab with the BrowserForce extension popup, then retry. Confirm attached-tab readiness directly:
     ```bash
     curl -s http://127.0.0.1:19222/extension/status | jq '.activeManualTargets, .manualAttachedTabs'
     curl -s http://127.0.0.1:19222/attached-tabs | jq '.tabs'
     ```
-  - `activeManualTargets > 0` / `manualAttachedTabs` non-empty means inspect/current-tab flows are ready. `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs.
+  - If the extension UI already shows the tab as attached but relay status is empty, click **Attach current tab** again to replay the existing attachment to the relay.
+  - `activeTargets > 0` means MCP has visible targets. `activeManualTargets > 0` / `manualAttachedTabs` non-empty means attached-only/current-tab flows are ready.
 - BF_NEW_TABS_DISABLED from execute({ intent: 'open' }):
   - The session is attached-only. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`. Set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process to restore the legacy auto-bootstrap.
 - BF_RESTRICTIONS_UNAVAILABLE from execute/reset preflight:

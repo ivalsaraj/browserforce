@@ -32,7 +32,7 @@
                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ MCP Server (mcp/src/index.js)                                    │
-│   - execute + reset tools                                        │
+│   - execute + help + reset tools                                 │
 │   - Playwright-core CDP client                                   │
 │   - Connects to relay for real Chrome access                     │
 └──────────────┬──────────────────────────────────────────────────┘
