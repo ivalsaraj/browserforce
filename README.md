@@ -1070,6 +1070,10 @@ Recovery depends on the flow:
 - **Explicit open / navigate flow (`execute({ intent: 'open' })`):** the relay guard will only honor this when `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`.
 - **Crash-safe default:** BrowserForce no longer auto-creates a tab. To restore the legacy auto-bootstrap, set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process.
 
+### MCP Error: `BF_RESTRICTIONS_UNAVAILABLE`
+
+The MCP preflight could not read the active restrictions from the extension/relay, so CDP startup was blocked to avoid running with an unknown policy. Ensure the relay is running and the BrowserForce extension is connected, then retry.
+
 Quick checks:
 
 ```bash

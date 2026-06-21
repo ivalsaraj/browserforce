@@ -17,6 +17,7 @@ import {
 import {
   runExecuteStartupForTest,
   runResetStartupForTest,
+  preflightAttachedPageBeforeCdp,
   formatBrowserForceMcpError,
 } from '../src/startup.js';
 
@@ -1680,4 +1681,37 @@ test('formatBrowserForceMcpError returns structured text containing the error co
   assert.equal(result.content[0].type, 'text');
   assert.match(result.content[0].text, /"code": "BF_NO_ATTACHED_PAGE"/);
   assert.match(result.content[0].text, /No attached BrowserForce page available/);
+});
+
+test('preflightAttachedPageBeforeCdp throws BF_RESTRICTIONS_UNAVAILABLE when restrictions fetch throws', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalPort = process.env.RELAY_PORT;
+  const fetchCalls = [];
+  try {
+    process.env.RELAY_PORT = '1';
+    globalThis.fetch = async (url) => {
+      fetchCalls.push(String(url));
+      if (String(url).endsWith('/restrictions')) {
+        throw new Error('simulated restrictions fetch failure');
+      }
+      return { ok: true, json: async () => ({ connected: true, activeManualTargets: 0, activeTargets: 0, attachedTabs: [], manualAttachedTabs: [] }) };
+    };
+    await assert.rejects(
+      () => preflightAttachedPageBeforeCdp({
+        intent: 'inspect',
+        fetchBrowserforceRestrictions: async () => {
+          throw new Error('restrictions unavailable');
+        },
+      }),
+      (err) => {
+        assert.equal(err.code, 'BF_RESTRICTIONS_UNAVAILABLE');
+        assert.match(err.message, /restrictions are unavailable/i);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalPort === undefined) delete process.env.RELAY_PORT;
+    else process.env.RELAY_PORT = originalPort;
+  }
 });

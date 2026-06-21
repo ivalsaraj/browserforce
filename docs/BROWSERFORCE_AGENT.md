@@ -163,6 +163,8 @@ Optional external config:
   - `activeManualTargets > 0` / `manualAttachedTabs` non-empty means inspect/current-tab flows are ready. `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs.
 - BF_NEW_TABS_DISABLED from execute({ intent: 'open' }):
   - The session is attached-only. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`. Set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process to restore the legacy auto-bootstrap.
+- BF_RESTRICTIONS_UNAVAILABLE from execute/reset preflight:
+  - The MCP could not read restrictions from the extension/relay. Ensure the relay is running, the BrowserForce extension is connected, and retry. CDP startup is intentionally blocked when the active policy is unknown.
 
 ## Screenshots (Add Later)
 

@@ -61,6 +61,13 @@ function runPreflightAssertions({ intent, restrictions, extensionStatus }) {
  * status from the relay, then runs the assertion gate. Returns the fresh
  * restrictions so the handler reuses them for the rest of the turn.
  *
+ * Fail-closed: if the restrictions fetch itself throws (extension missing,
+ * timeout, malformed, network error), the safety gate throws
+ * BF_RESTRICTIONS_UNAVAILABLE so CDP startup is never reached with an unknown
+ * policy. The tolerant `getBrowserforceRestrictionsForSession` in index.js
+ * still returns a default for the exec-context UI value — the preflight is
+ * the only startup safety gate, and it must not fall back silently here.
+ *
  * `fetchBrowserforceRestrictions` is injected by the caller (index.js) because
  * the restrictions cache lives there — this keeps startup.js free of a circular
  * import with index.js.
@@ -71,7 +78,18 @@ export async function preflightAttachedPageBeforeCdp({
 } = {}) {
   await ensureRelay();
   const baseUrl = getRelayHttpUrl();
-  const restrictions = await fetchBrowserforceRestrictions({ forceRefresh: true });
+  let restrictions;
+  try {
+    restrictions = await fetchBrowserforceRestrictions({ forceRefresh: true });
+  } catch (err) {
+    throw new BrowserForceMcpError(
+      'BrowserForce restrictions are unavailable. Retry once the extension and relay are reachable.',
+      {
+        code: 'BF_RESTRICTIONS_UNAVAILABLE',
+        details: { intent, reason: err?.message || String(err) },
+      },
+    );
+  }
   const extensionStatus = await getExtensionStatus({ baseUrl });
   return runPreflightAssertions({ intent, restrictions, extensionStatus });
 }
