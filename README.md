@@ -12,7 +12,7 @@ Give AI agents controlled access to the browser you already use.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
-When you ask an agent to inspect an attached page, BrowserForce is intended to reuse that existing tab via `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no page exists yet.
+When you ask an agent to inspect an existing page, BrowserForce exposes open Chrome tabs through `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no suitable page exists and policy allows new tabs.
 
 ## Why BrowserForce?
 
@@ -21,7 +21,7 @@ When you ask an agent to inspect an attached page, BrowserForce is intended to r
 | -------------- | -------------------- | ----------------------- | ----------------------- | -------------------- | ------------------------------------ |
 | Browser        | Spawns new Chrome    | Separate profile        | Your Chrome             | Your Chrome          | **Your Chrome**                      |
 | Login state    | Fresh                | Fresh (isolated)        | Yours                   | Yours                | **Yours**                            |
-| Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Auto mode + manual attached tabs** |
+| Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Open tabs + manual attached tabs** |
 | Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB), also support screenshots**          |
 | Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **2 tools: `execute`, `reset` + extend via plugins**      |
@@ -1055,9 +1055,9 @@ curl -s http://127.0.0.1:19222/client-slot | jq
 Expected outputs:
 
 - `connected: false` — extension not connected to relay.
-- `connected: true, activeTargets: 0` — extension connected but no tab attached.
-- `activeManualTargets > 0` or `manualAttachedTabs.length > 0` — attached-tab mode is ready; MCP can inspect the current page.
-- `activeTargets > 0` alone is not enough — it can include `agent-created` or `relay-attached` tabs, which are not user-attached. Use `manualAttachedTabs` / `activeManualTargets` to confirm inspect/current-tab readiness.
+- `connected: true, activeTargets: 0` — extension connected, but no tabs have been discovered or attached yet. A CDP discovery connection should populate eligible open tabs without creating a blank page.
+- `activeTargets > 0` — BrowserForce has targets visible to MCP. These can be `relay-discovered`, `manual`, `agent-created`, or `relay-attached`.
+- `activeManualTargets > 0` or `manualAttachedTabs.length > 0` — attached-only/manual mode is ready; MCP can inspect the explicitly attached current tab.
 - `clients > 0` — a CDP client is currently active.
 
 If the extension UI shows the tab as attached but `manualAttachedTabs` is empty,
@@ -1070,7 +1070,7 @@ This is the structured `BF_NEW_TABS_DISABLED` / `BF_NO_ATTACHED_PAGE` response. 
 
 Recovery depends on the flow:
 
-- **Attached / inspect / current-tab flow:** attach a tab with the BrowserForce extension popup first, then retry. Confirm with `curl -s http://127.0.0.1:19222/extension/status | jq` that `manualAttachedTabs` is non-empty (or `activeManualTargets > 0`).
+- **Manual / no-new-tabs / current-tab flow:** attach a tab with the BrowserForce extension popup first, then retry. Confirm with `curl -s http://127.0.0.1:19222/extension/status | jq` that `manualAttachedTabs` is non-empty (or `activeManualTargets > 0`).
 - **Explicit open / navigate flow (`execute({ intent: 'open' })`):** the relay guard will only honor this when `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`.
 - **Crash-safe default:** BrowserForce no longer auto-creates a tab. To restore the legacy auto-bootstrap, set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process.
 

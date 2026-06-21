@@ -248,6 +248,14 @@ describe('Tool Definitions', () => {
       'should require reporting missing targets instead of silently opening them'
     );
     assert.ok(
+      promptBlock.includes('BrowserForce connects and discovers existing open tabs without creating a blank page'),
+      'should explain existing tabs are discovered without blank-page bootstrap'
+    );
+    assert.ok(
+      promptBlock.includes('For attached-only policies'),
+      'should scope manual attach requirement to attached-only policies'
+    );
+    assert.ok(
       !promptBlock.includes('Always create or reuse a dedicated tab'),
       'should remove the old dedicated-tab-first instruction'
     );

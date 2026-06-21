@@ -1,10 +1,9 @@
 // BrowserForce — Crash-safe MCP startup preflight
 //
-// Centralizes the attached-page preflight that MUST run before any
-// ensureBrowser() / chromium.connectOverCDP() call. Both the live execute/reset
-// handlers (via preflightAttachedPageBeforeCdp) and the behavior tests (via
-// runExecuteStartupForTest / runResetStartupForTest) share the same assertion
-// path so the test proves the real gating logic, not a stub.
+// Centralizes the policy preflight that MUST run before any ensureBrowser() /
+// chromium.connectOverCDP() call. Auto-mode inspect is allowed to connect so the
+// relay can discover existing tabs; attached-only policies still fail before
+// CDP when no manual tab is attached.
 
 import {
   ensureRelay,
@@ -98,7 +97,7 @@ export async function preflightAttachedPageBeforeCdp({
 
 /**
  * Execute startup path with injected restrictions/status/ensureBrowser so tests
- * can prove ensureBrowser is NOT called when preflight fails. Returns
+ * can prove ensureBrowser is called only when policy allows CDP startup. Returns
  * `{ restrictions }` on success or `{ error: { code, message, details } }` when
  * the preflight throws a BrowserForceMcpError.
  */
@@ -121,8 +120,8 @@ export async function runExecuteStartupForTest({
 }
 
 /**
- * Reset startup path — always inspects (reset reconnects to the attached page,
- * never opens a new tab). Same injection contract as runExecuteStartupForTest.
+ * Reset startup path uses inspect policy and never opens a new tab. Same
+ * injection contract as runExecuteStartupForTest.
  */
 export async function runResetStartupForTest({
   restrictions,

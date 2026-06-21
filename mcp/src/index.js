@@ -406,7 +406,8 @@ Read browserforceSettings + browserforceRestrictions before planning execution.
 - instructions: treat as mandatory policy text for this session.
 
 Empty tabs/targets handling:
-- For inspect/current/attached-tab tasks (default intent): if there are no manually attached tabs, BrowserForce returns a structured "No attached BrowserForce page available" error instead of creating a tab. Attach a tab with the extension, then retry.
+- For inspect/check/read tasks (default intent): BrowserForce connects and discovers existing open tabs without creating a blank page. Start from context.pages(); if the intended tab is missing, report that clearly.
+- For attached-only policies (mode=manual, noNewTabs=true, or BF_REQUIRE_ATTACHED_PAGE=1): BrowserForce returns a structured "No attached BrowserForce page available" error when no manual tab is attached. Attach a tab with the extension, then retry.
 - For explicit open/navigate tasks (intent: 'open'): user code may create a tab via context.newPage() only when restrictions allow it (mode !== manual and noNewTabs !== true). BrowserForce itself does not create an implicit startup page unless BF_ALLOW_IMPLICIT_STARTUP_PAGE=1 is set for backward compatibility.
 - Do not ask the user to click Attach/Share by default.
 - Ask for manual Attach/Share only when mode=manual or noNewTabs=true, or when the user explicitly asks to use their current tab and it is not available in context.pages().

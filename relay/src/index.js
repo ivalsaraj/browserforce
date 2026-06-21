@@ -1188,25 +1188,7 @@ class RelayServer {
       case 'Target.setDiscoverTargets':
         // Emit targetCreated for all known targets
         for (const [, target] of this.targets) {
-          const event = {
-            method: 'Target.targetCreated',
-            params: {
-              targetInfo: {
-                targetId: target.targetId,
-                type: 'page',
-                title: target.targetInfo?.title || '',
-                url: target.targetInfo?.url || '',
-                attached: true,
-                browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-              },
-            },
-          };
-          this._logCdp({
-            direction: 'to-playwright',
-            clientId,
-            message: event,
-          });
-          ws.send(JSON.stringify(event));
+          this._sendTargetCreatedEvent(ws, target, clientId);
         }
         return {};
 
@@ -1300,18 +1282,64 @@ class RelayServer {
     if (!this.ext) return;
 
     const { tabs } = await this._sendToExt('listTabs');
-    log(`[relay] Browser has ${tabs.length} tab(s) — agent creates own tabs via context.newPage()`);
+    const visibleTabs = Array.isArray(tabs) ? tabs : [];
+    log(`[relay] Browser has ${visibleTabs.length} tab(s) — exposing as lazy targets`);
 
-    // Re-emit attachedToTarget for already-tracked targets (reconnection case)
+    const currentTabIds = new Set(
+      visibleTabs
+        .map((tab) => Number(tab?.tabId))
+        .filter((tabId) => Number.isInteger(tabId)),
+    );
+
+    for (const [sessionId, target] of [...this.targets]) {
+      if (
+        target.origin === 'relay-discovered'
+        && !target.debuggerAttached
+        && !currentTabIds.has(target.tabId)
+      ) {
+        this.targets.delete(sessionId);
+        this.tabToSession.delete(target.tabId);
+        this._broadcastCdp({
+          method: 'Target.detachedFromTarget',
+          params: { sessionId, targetId: target.targetId },
+        });
+      }
+    }
+
+    for (const tab of visibleTabs) {
+      const tabId = Number(tab?.tabId);
+      if (!Number.isInteger(tabId)) continue;
+      const existingSessionId = this.tabToSession.get(tabId);
+      const sessionId = existingSessionId || `bf-session-${++this.sessionCounter}`;
+      const targetId = tab.targetId || `bf-target-${tabId}`;
+      const existing = this.targets.get(sessionId);
+      const isNewTarget = !existing;
+      const targetInfo = {
+        ...(existing?.targetInfo || {}),
+        targetId: existing?.targetId || targetId,
+        type: 'page',
+        title: tab.title || '',
+        url: tab.url || '',
+        browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
+      };
+
+      this.targets.set(sessionId, {
+        tabId,
+        targetId: existing?.targetId || targetId,
+        targetInfo,
+        debuggerAttached: !!existing?.debuggerAttached,
+        attachPromise: existing?.attachPromise || null,
+        origin: existing?.origin || 'relay-discovered',
+      });
+      this.tabToSession.set(tabId, sessionId);
+      if (isNewTarget) {
+        this._sendTargetCreatedEvent(ws, this.targets.get(sessionId));
+      }
+    }
+
     for (const [sessionId, target] of this.targets) {
       this._sendAttachedEvent(ws, sessionId, target);
     }
-
-    // Do NOT auto-attach existing browser tabs. Lazy attachment creates broken
-    // Playwright Page objects because INIT_ONLY_METHODS fakes Runtime.enable,
-    // so Playwright never gets executionContextCreated events → page.evaluate()
-    // deadlocks. Instead, the agent creates tabs via context.newPage() which
-    // eagerly attaches the debugger via _createTarget.
   }
 
   /** Attach debugger to a tab on demand (lazy). Race-safe via attachPromise. */
@@ -1332,13 +1360,42 @@ class RelayServer {
         // Preserve manual provenance; any other origin is a relay-driven lazy attach.
         origin: target.origin === 'manual' ? 'manual' : 'relay-attached',
       });
-      if (result.targetId) target.targetId = result.targetId;
-      if (result.targetInfo) target.targetInfo = result.targetInfo;
+      if (result.targetId) target.chromeTargetId = result.targetId;
+      if (result.targetInfo) {
+        target.targetInfo = {
+          ...result.targetInfo,
+          targetId: target.targetId,
+          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
+        };
+      }
       target.debuggerAttached = true;
+      if (target.origin !== 'manual') target.origin = 'relay-attached';
       target.attachPromise = null;
     })();
 
     await target.attachPromise;
+  }
+
+  _sendTargetCreatedEvent(ws, target, clientId) {
+    const event = {
+      method: 'Target.targetCreated',
+      params: {
+        targetInfo: {
+          targetId: target.targetId,
+          type: 'page',
+          title: target.targetInfo?.title || '',
+          url: target.targetInfo?.url || '',
+          attached: true,
+          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
+        },
+      },
+    };
+    this._logCdp({
+      direction: 'to-playwright',
+      clientId,
+      message: event,
+    });
+    ws.send(JSON.stringify(event));
   }
 
   _sendAttachedEvent(ws, sessionId, target) {

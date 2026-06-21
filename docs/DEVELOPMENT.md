@@ -76,7 +76,9 @@ curl -s http://127.0.0.1:19222/attached-tabs | jq
 
 - `GET /extension/status` → `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }`.
 - `GET /attached-tabs` → `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }`.
-- `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). `attachedTabs` also includes `agent-created` and `relay-attached` tabs. Use `activeManualTargets > 0` to confirm an attached page is ready for inspect/current-tab flows.
+- Auto-mode CDP discovery registers eligible open Chrome tabs as `relay-discovered` targets without debugger-attaching them or creating blank tabs.
+- `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). Use them to confirm attached-only/manual mode is ready.
+- `attachedTabs` can also include `relay-discovered`, `agent-created`, and `relay-attached` tabs. These targets are visible to MCP, but only debugger-attach lazily when the agent interacts with one.
 - These differ from `/json/list` (CDP-discovery shape for Playwright) — the status endpoints carry relay-owned provenance.
 
 **Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients.
