@@ -22,6 +22,7 @@ describe('MCP help docs', () => {
     const tabs = getHelpSection('tabs');
 
     assert.match(tabs, /getBrowserforceStatus/);
+    assert.match(tabs, /getBrowserforcePageForTab/);
     assert.match(tabs, /manualAttachedTabs/);
     assert.match(tabs, /activeManualTargets/);
     assert.match(tabs, /context\.pages\(\)/);
