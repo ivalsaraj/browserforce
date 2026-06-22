@@ -4,12 +4,14 @@ const HELP_SECTIONS = Object.freeze({
     summary: 'Choose existing, manual, and new tabs without creating blanks by accident.',
     text: `# Tabs
 
-- For attached/manual/current-tab work, inspect relay status terms first: manualAttachedTabs and activeManualTargets.
+- For attached/manual/current-tab listing, call getBrowserforceStatus() first; use status.manualAttachedTabs and status.activeManualTargets.
+- Fast path: const status = await getBrowserforceStatus(); return status.manualAttachedTabs;
+- To inspect the attached tab, use: state.page = await getBrowserforcePageForTab();
 - For all open tabs, use context.pages(); filter and cap results unless the user explicitly asks for the full list.
 - For inspect/read/check/review tasks, reuse existing pages. Do not call context.newPage() or page.goto() just to find a tab that may already be open.
 - Set state.page to the chosen existing page and keep using state.page for follow-up work.
 - Use intent:'open' only when the user asked to open or navigate. If the requested tab is absent, report that clearly instead of silently opening a replacement.
-- In manual/no-new-tabs mode, ask the user to attach/share a tab only when context.pages() and manualAttachedTabs do not expose the requested target.`,
+- In manual/no-new-tabs mode, ask the user to attach/share a tab only when status.manualAttachedTabs is empty and no matching existing page is available.`,
   },
   'page-setup': {
     title: 'Page Setup',
@@ -105,6 +107,18 @@ const HELP_SECTIONS = Object.freeze({
 Inspect open tabs:
 \`\`\`js
 return context.pages().slice(0, 10).map((p, index) => ({ index, url: p.url() }));
+\`\`\`
+
+Inspect manually attached tabs:
+\`\`\`js
+const status = await getBrowserforceStatus();
+return status.manualAttachedTabs;
+\`\`\`
+
+Use the manually attached page:
+\`\`\`js
+state.page = await getBrowserforcePageForTab();
+return { url: state.page.url() };
 \`\`\`
 
 Use an existing page:

@@ -367,7 +367,7 @@ Call help(section) before navigation, mutation, multi-step work, raw CDP, plugin
 Skip help only for simple read-only tab discovery.
 
 TAB RULES:
-- attached/manual/current tab -> use manualAttachedTabs/activeManualTargets first.
+- attached/manual/current tab -> list with getBrowserforceStatus(); inspect with state.page = await getBrowserforcePageForTab().
 - all open tabs -> context.pages(); filter/cap unless full list asked.
 - inspect/read/check -> reuse existing tabs; do not create/navigate to find them.
 
@@ -379,7 +379,7 @@ function registerExecuteTool(skillAppendix = '') {
     'execute',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run in BrowserForce execute scope. Call help(section) for detailed guidance.'),
+      code: z.string().describe('JavaScript to run in BrowserForce execute scope. Use getBrowserforceStatus() for tab metadata; getBrowserforcePageForTab() to inspect an attached tab.'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
       intent: z.enum(['inspect', 'open', 'auto']).optional()
         .describe('Use inspect for current/attached-tab work; use open only when the user explicitly asked to open/navigate. Defaults to inspect.'),

@@ -21,6 +21,8 @@ const LABEL_SCREENSHOT_MAX_DIMENSION = 1568;
 const LABEL_BOX_CONCURRENCY = 16;
 const MAX_LABEL_OVERLAY_REFS = 300;
 const EXEC_CONSOLE_MAX_ENTRIES = 200;
+const ATTACHED_PAGE_LOOKUP_TIMEOUT_MS = 5000;
+const ATTACHED_PAGE_LOOKUP_POLL_MS = 50;
 export const BF_DIR = join(homedir(), '.browserforce');
 export const CDP_URL_FILE = join(BF_DIR, 'cdp-url');
 const RELAY_SCRIPT = fileURLToPath(new URL('../../relay/src/index.js', import.meta.url));
@@ -812,6 +814,45 @@ export function buildExecContext(
     return p.context().newCDPSession(p);
   };
 
+  const getBrowserforceStatus = (opts = {}) => getExtensionStatus(opts);
+
+  const getBrowserforcePageForTab = async ({
+    tab,
+    tabId,
+    targetId,
+    url,
+    manualOnly = true,
+    timeoutMs = ATTACHED_PAGE_LOOKUP_TIMEOUT_MS,
+  } = {}) => {
+    const status = await getBrowserforceStatus();
+    const tabs = manualOnly ? status?.manualAttachedTabs : status?.attachedTabs;
+    const availableTabs = Array.isArray(tabs) ? tabs : [];
+    const requestedTab = tab || availableTabs.find((candidate) => (
+      (tabId !== undefined && candidate.tabId === tabId) ||
+      (targetId !== undefined && candidate.targetId === targetId) ||
+      (url !== undefined && candidate.url === url)
+    )) || availableTabs[0];
+
+    if (!requestedTab?.url) {
+      throw new Error(
+        manualOnly
+          ? 'No manually attached BrowserForce tab is available.'
+          : 'No BrowserForce tab metadata is available.'
+      );
+    }
+
+    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+    do {
+      const page = ctx.pages().find((candidate) => candidate.url() === requestedTab.url);
+      if (page) return page;
+      await new Promise((resolve) => globalThis.setTimeout(resolve, ATTACHED_PAGE_LOOKUP_POLL_MS));
+    } while (Date.now() < deadline);
+
+    throw new Error(
+      `BrowserForce tab metadata is visible, but no Playwright page matched attached tab URL: ${requestedTab.url}`
+    );
+  };
+
   const screenshotWithAccessibilityLabels = async ({ selector, interactiveOnly = true } = {}) => {
     const { text: snapText, refs, page } = await buildSnapshotData({
       selector,
@@ -943,6 +984,8 @@ export function buildExecContext(
     'getLogs',
     'clearLogs',
     'getCDPSession',
+    'getBrowserforceStatus',
+    'getBrowserforcePageForTab',
     'screenshotWithAccessibilityLabels',
     'cleanHTML',
     'pageMarkdown',
@@ -981,6 +1024,7 @@ export function buildExecContext(
     browserforceRestrictions,
     page: defaultPage, context: ctx, state: userState,
     snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
+    getBrowserforceStatus, getBrowserforcePageForTab,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,
     console: execConsole,

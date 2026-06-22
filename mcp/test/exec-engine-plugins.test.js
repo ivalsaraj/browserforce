@@ -1239,6 +1239,105 @@ test('buildExecContext exposes screenshot and content helpers in execute scope',
   assert.equal(typeof ctx.screenshotWithAccessibilityLabels, 'function');
   assert.equal(typeof ctx.cleanHTML, 'function');
   assert.equal(typeof ctx.pageMarkdown, 'function');
+  assert.equal(typeof ctx.getBrowserforceStatus, 'function');
+  assert.equal(typeof ctx.getBrowserforcePageForTab, 'function');
+});
+
+test('getBrowserforceStatus exposes manual attached tabs without using context.pages', async () => {
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 2,
+      activeManualTargets: 1,
+      attachedTabs: [
+        { tabId: 1, title: 'Mantle', url: 'https://app.heymantle.com/reports/mrr', origin: 'manual' },
+        { tabId: 2, title: 'Sheets', url: 'https://docs.google.com/spreadsheets/d/abc', origin: 'relay-discovered' },
+      ],
+      manualAttachedTabs: [
+        { tabId: 1, title: 'Mantle', url: 'https://app.heymantle.com/reports/mrr', origin: 'manual' },
+      ],
+    },
+  });
+  try {
+    const ctx = buildExecContext(null, {
+      pages: () => {
+        throw new Error('context.pages should not be needed for relay status');
+      },
+    }, {}, {}, {});
+
+    const result = await runCode(
+      'const status = await getBrowserforceStatus(); return status.manualAttachedTabs.map((tab) => tab.url);',
+      ctx,
+      1000,
+    );
+
+    assert.deepEqual(result, ['https://app.heymantle.com/reports/mrr']);
+  } finally {
+    restore();
+  }
+});
+
+test('getBrowserforcePageForTab waits for the manual tab to appear in context.pages', async () => {
+  const manualUrl = 'https://app.heymantle.com/reports/mrr?appId=abc';
+  const sheetsPage = { isClosed: () => false, url: () => 'https://docs.google.com/spreadsheets/d/abc' };
+  const mantlePage = { isClosed: () => false, url: () => manualUrl };
+  let pageReads = 0;
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 2,
+      activeManualTargets: 1,
+      attachedTabs: [
+        { tabId: 1, title: 'Mantle', url: manualUrl, origin: 'manual' },
+        { tabId: 2, title: 'Sheets', url: sheetsPage.url(), origin: 'relay-discovered' },
+      ],
+      manualAttachedTabs: [
+        { tabId: 1, title: 'Mantle', url: manualUrl, origin: 'manual' },
+      ],
+    },
+  });
+  try {
+    const ctx = buildExecContext(null, {
+      pages: () => {
+        pageReads += 1;
+        return pageReads < 3 ? [sheetsPage] : [sheetsPage, mantlePage];
+      },
+    }, {}, {}, {});
+
+    const result = await runCode(
+      'state.page = await getBrowserforcePageForTab({ timeoutMs: 1000 }); return state.page.url();',
+      ctx,
+      2000,
+    );
+
+    assert.equal(result, manualUrl);
+    assert.ok(pageReads >= 3);
+  } finally {
+    restore();
+  }
+});
+
+test('getBrowserforcePageForTab throws clearly instead of returning undefined', async () => {
+  const manualUrl = 'https://app.heymantle.com/reports/mrr?appId=abc';
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 1,
+      activeManualTargets: 1,
+      attachedTabs: [{ tabId: 1, title: 'Mantle', url: manualUrl, origin: 'manual' }],
+      manualAttachedTabs: [{ tabId: 1, title: 'Mantle', url: manualUrl, origin: 'manual' }],
+    },
+  });
+  try {
+    const ctx = buildExecContext(null, { pages: () => [] }, {}, {}, {});
+
+    await assert.rejects(
+      () => runCode('return await getBrowserforcePageForTab({ timeoutMs: 1 })', ctx, 1000),
+      /no Playwright page matched attached tab URL/,
+    );
+  } finally {
+    restore();
+  }
 });
 
 test('screenshotWithAccessibilityLabels runs snapshot and direct screenshot sequentially', async () => {
