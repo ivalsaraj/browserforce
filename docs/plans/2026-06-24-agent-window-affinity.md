@@ -620,3 +620,44 @@ git commit -m "test: cover BrowserForce window affinity"
 - Relay and extension tests cover `windowId` metadata and repeated `Target.createTarget`.
 - `pnpm test:relay` and `pnpm test:mcp` pass.
 - Docs mention that agent tab ownership is based on pinned `windowId`, not current user focus.
+
+## Codex Plan Review Amendments (Round 1)
+
+These refinements were confirmed by the Codex plan review and are binding for implementation. They refine — not replace — the tasks above.
+
+### A1 — Single `windowId` validity predicate (refines Task 1/2/3)
+
+- All NEW `windowId` logic (relay seeding, relay status surfacing, extension create-window resolution) uses one predicate: `Number.isInteger(windowId)`.
+- `listTabs()` may map raw `t.windowId`; the relay still validates with `Number.isInteger` before seeding/surfacing, so no invalid value escapes.
+- Do not churn the pre-existing `getCurrentWindowId()` / `createOptions.windowId` `typeof === 'number'` checks; the new create path resolves windowId through the extracted helper (A4), which returns an integer or `undefined`.
+
+### A2 — Persist manual-tab `windowId` in the relay (refines Task 2 Step 11 + Task 3)
+
+- `notifyRelayManualTabAttached()` includes top-level `windowId` (integer only).
+- The relay `manualTabAttached` handler destructures `windowId` and stores it on the target (`target.windowId`) when `Number.isInteger`.
+- The Task 3 status test sends `windowId: 902` in the `manualTabAttached` payload and asserts `manualAttachedTabs[0].windowId === 902`.
+
+### A3 — Split affinity re-pin (establish + refresh); no serialization queue (refines Task 2 Step 9)
+
+- `_createTarget` reads `pinnedWindowId = agentWindowByClientId.get(clientId)` and sends it to `createTab` only when `Number.isInteger`. Track whether a pinned id was sent (`sentPinned`).
+- After `createTab` returns, compute `resultWindowId` from `result.windowId ?? result.targetInfo?.windowId`. When it is an integer, update affinity if EITHER:
+  - `sentPinned` is true — overwrite affinity from `resultWindowId`. This is the closed-window refresh: if the pinned window was closed, the extension fell back to the current window and returned its real `windowId`, so the relay must re-pin to it (if the window was still open, `resultWindowId === pinnedWindowId`, so this is a no-op). REQUIRED to satisfy the closed-window fallback Definition of Done.
+  - the client has no affinity yet (`!agentWindowByClientId.has(clientId)`) — establish first-wins.
+- Affinity cannot flip on concurrent first creates: only the first unpinned result establishes affinity (the `!has` guard), and later unpinned results are not `sentPinned`, so they do not overwrite it. (If the user changes focus between two extension-handled creates the tabs may land in different windows, but the pin still resolves deterministically to the first established window.) Do NOT add a per-client serialization queue (Playwright awaits `newPage()` sequentially; a queue is over-engineering). Document the residual true-concurrency limitation as an AGENTS gotcha + a code comment.
+- Tests: keep the repeated-create test (sequential, asserts the second `createTab` carries `windowId: 500`), AND add a closed-window fallback test where the first create sends stale `windowId: 500`, the extension returns `windowId: 700`, and the next create sends `windowId: 700`.
+
+### A4 — Extract a pure, testable create-window resolver (refines Task 2 Step 10)
+
+- Create `extension/window-affinity.js` exporting a pure, SYNCHRONOUS `resolveCreateWindowId({ requestedWindowId, isRequestedWindowValid, currentWindowId })` that: returns the requested window when it is an integer AND `isRequestedWindowValid === true`; otherwise returns `currentWindowId`. Centralizes the `Number.isInteger` predicate (A1). Keeping it synchronous (validity passed in as a boolean) makes it unit-testable without Chrome APIs.
+- `background.js` performs the async IO: it awaits `chrome.windows.get(requestedWindowId)` (catch → `isRequestedWindowValid = false`) and `getCurrentWindowId()`, then calls the synchronous `resolveCreateWindowId(...)` with those values.
+- Add `test/agent/window-affinity.test.js` covering: requested valid → requested; requested closed/invalid → fallback; non-integer/undefined requested → fallback. Register the new test in package.json `test` and `test:agent` scripts.
+
+### A5 — Single relay `targetInfo` shaper helper (refines Task 1 Step 4)
+
+- Add one relay helper (e.g. `buildTargetInfo(target)`) that shapes the canonical OUTBOUND CDP `targetInfo` payload (`targetId, type:'page', title, url, attached:true, browserContextId`, plus `windowId` when `Number.isInteger`). Use it in `_autoAttachAllTabs`, `_sendTargetCreatedEvent`, `_sendAttachedEvent`, `Target.getTargets`, `Target.getTargetInfo`, and `_createTarget` so `windowId` injection is consistent and no shaper is missed. Preserve the exact existing field shape when `windowId` is absent.
+- Scope: the helper shapes OUTBOUND payloads only. Stored relay target metadata (`target.targetInfo`, `target.windowId`) stays source-shaped (as received from the extension), so "preserve exact field shape" is trivial and storage semantics are unchanged.
+
+### A6 — Skipped (documented)
+
+- `Target.targetInfoChanged` (`_handleTabUpdated`) is intentionally NOT given `windowId`: it is outside the required surface (`listTabs`, `/extension/status`, `/attached-tabs`) and would require extra extension plumbing the extension does not currently send.
+- Knowledge entries append to the existing `knowledge/timeline1.md` and `knowledge/knowledge1.md` (per `knowledge/INDEX.md`); do NOT create `docs/knowledge/timeline/2026-06.md`.
