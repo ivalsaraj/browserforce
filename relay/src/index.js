@@ -202,6 +202,30 @@ function normalizeAgentPreferences(raw) {
   return { executionMode, parallelVisibilityMode };
 }
 
+// Single validity predicate for window ids (agent window affinity). A real
+// Chrome tab always carries an integer windowId; anything else (undefined,
+// float, string) is treated as "unknown" and never pinned or surfaced.
+function integerWindowId(value) {
+  return Number.isInteger(value) ? value : undefined;
+}
+
+// Single shaper for OUTBOUND CDP targetInfo payloads so optional `windowId` is
+// injected consistently and no shaper can silently drop it. Stored relay target
+// metadata stays source-shaped; this only shapes what we send to Playwright.
+function buildTargetInfo(target) {
+  const info = {
+    targetId: target.targetId,
+    type: 'page',
+    title: target.targetInfo?.title || '',
+    url: target.targetInfo?.url || '',
+    attached: true,
+    browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
+  };
+  const windowId = integerWindowId(target.windowId ?? target.targetInfo?.windowId);
+  if (windowId !== undefined) info.windowId = windowId;
+  return info;
+}
+
 class RelayServer {
   constructor(port = DEFAULT_PORT, pluginsDir = BF_PLUGINS_DIR) {
     this.port = port;
@@ -1209,30 +1233,14 @@ class RelayServer {
 
       case 'Target.getTargets':
         return {
-          targetInfos: [...this.targets.values()].map((t) => ({
-            targetId: t.targetId,
-            type: 'page',
-            title: t.targetInfo?.title || '',
-            url: t.targetInfo?.url || '',
-            attached: true,
-            browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-          })),
+          targetInfos: [...this.targets.values()].map((t) => buildTargetInfo(t)),
         };
 
       case 'Target.getTargetInfo': {
         if (params?.targetId) {
           for (const target of this.targets.values()) {
             if (target.targetId === params.targetId) {
-              return {
-                targetInfo: {
-                  targetId: target.targetId,
-                  type: 'page',
-                  title: target.targetInfo?.title || '',
-                  url: target.targetInfo?.url || '',
-                  attached: true,
-                  browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-                },
-              };
+              return { targetInfo: buildTargetInfo(target) };
             }
           }
         }
@@ -1327,6 +1335,7 @@ class RelayServer {
         tabId,
         targetId: existing?.targetId || targetId,
         targetInfo,
+        windowId: integerWindowId(tab.windowId) ?? existing?.windowId,
         debuggerAttached: !!existing?.debuggerAttached,
         attachPromise: existing?.attachPromise || null,
         origin: existing?.origin || 'relay-discovered',
@@ -1380,14 +1389,7 @@ class RelayServer {
     const event = {
       method: 'Target.targetCreated',
       params: {
-        targetInfo: {
-          targetId: target.targetId,
-          type: 'page',
-          title: target.targetInfo?.title || '',
-          url: target.targetInfo?.url || '',
-          attached: true,
-          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-        },
+        targetInfo: buildTargetInfo(target),
       },
     };
     this._logCdp({
@@ -1403,14 +1405,7 @@ class RelayServer {
       method: 'Target.attachedToTarget',
       params: {
         sessionId,
-        targetInfo: {
-          targetId: target.targetId,
-          type: 'page',
-          title: target.targetInfo?.title || '',
-          url: target.targetInfo?.url || '',
-          attached: true,
-          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-        },
+        targetInfo: buildTargetInfo(target),
         waitingForDebugger: false,
       },
     };

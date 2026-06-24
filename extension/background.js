@@ -317,6 +317,7 @@ async function listTabs() {
       })
       .map((t) => ({
         tabId: t.id,
+        windowId: t.windowId,
         url: t.url,
         title: t.title,
         active: t.active,

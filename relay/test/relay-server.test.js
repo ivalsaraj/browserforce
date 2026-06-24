@@ -1435,6 +1435,49 @@ describe('Auto-attach Flow', () => {
     ext.close();
     await sleep(100);
   });
+
+  it('Target.setAutoAttach preserves discovered tab windowId metadata', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabs: [{
+              tabId: 71,
+              windowId: 901,
+              url: 'https://window.example',
+              title: 'Window',
+              active: true,
+            }],
+          },
+        }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const messages = [];
+    cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+    cdp.send(JSON.stringify({
+      id: 1,
+      method: 'Target.setAutoAttach',
+      params: { autoAttach: true, flatten: true },
+    }));
+    await sleep(300);
+
+    const attached = messages.find((m) => m.method === 'Target.attachedToTarget');
+    assert.equal(attached.params.targetInfo.windowId, 901);
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
 });
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
