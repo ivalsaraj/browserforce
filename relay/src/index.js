@@ -250,6 +250,7 @@ class RelayServer {
     this.targets = new Map();      // sessionId -> { tabId, targetId, targetInfo }
     this.tabToSession = new Map(); // tabId -> sessionId
     this.childSessions = new Map(); // childSessionId -> { tabId, parentSessionId }
+    this.agentWindowByClientId = new Map(); // clientId -> windowId (agent window affinity)
     this.sessionCounter = 0;
 
     // State
@@ -956,16 +957,19 @@ class RelayServer {
     }
 
     if (msg.method === 'manualTabAttached') {
-      const { tabId, sessionId, targetId, targetInfo, origin } = msg.params;
+      const { tabId, sessionId, targetId, targetInfo, origin, windowId } = msg.params;
       const allowedOrigins = new Set(['manual', 'agent-created', 'relay-attached']);
       const storedOrigin = allowedOrigins.has(origin) ? origin : 'unknown';
       const existingSessionId = this.tabToSession.get(tabId);
       const relaySessionId = existingSessionId || `bf-session-${++this.sessionCounter}`;
       const existing = this.targets.get(relaySessionId);
+      const resolvedWindowId = integerWindowId(windowId ?? targetInfo?.windowId)
+        ?? existing?.windowId;
       this.targets.set(relaySessionId, {
         tabId,
         targetId: targetId || `bf-target-${tabId}`,
         targetInfo: targetInfo || { url: '', title: '' },
+        windowId: resolvedWindowId,
         debuggerAttached: true,
         // Preserve provenance when updating an existing tab; only overwrite when
         // the incoming origin is an allowlisted value. The legacy message name
@@ -1146,7 +1150,10 @@ class RelayServer {
     ws.on('close', () => {
       const meta = this.clientMeta.get(ws);
       log(`[relay] CDP client disconnected (${meta?.id || 'unknown'})`);
-      if (meta?.id) this.clientById.delete(meta.id);
+      if (meta?.id) {
+        this.clientById.delete(meta.id);
+        this.agentWindowByClientId.delete(meta.id);
+      }
       this.clients.delete(ws);
       if (this.activeClient?.ws === ws) {
         this.activeClient = null;
@@ -1267,7 +1274,7 @@ class RelayServer {
       }
 
       case 'Target.createTarget':
-        return this._createTarget(ws, params);
+        return this._createTarget(ws, params, clientId);
 
       case 'Target.closeTarget':
         return this._closeTarget(params);
@@ -1416,7 +1423,18 @@ class RelayServer {
     ws.send(JSON.stringify(event));
   }
 
-  async _createTarget(ws, params) {
+  // Pin the agent to a window on its first real tab use so later created tabs
+  // stay in that window. Uses one predicate (Number.isInteger) and only the
+  // first suitable window wins per CDP client.
+  _seedAgentWindowAffinity(clientId, target) {
+    if (!clientId || this.agentWindowByClientId.has(clientId)) return;
+    const windowId = target?.windowId ?? target?.targetInfo?.windowId;
+    if (Number.isInteger(windowId)) {
+      this.agentWindowByClientId.set(clientId, windowId);
+    }
+  }
+
+  async _createTarget(ws, params, clientId) {
     // Fail-closed guard: block tab creation in attached-only/no-new-tabs
     // sessions, including when restrictions cannot be read from the extension.
     const restrictions = await this._getRestrictionsSafe();
@@ -1425,34 +1443,62 @@ class RelayServer {
     }
 
     const sessionId = `s${++this.sessionCounter}`;
-    const result = await this._sendToExt('createTab', {
+    const createParams = {
       url: params.url || 'about:blank',
       sessionId,
-    });
+    };
+    // Pin the new tab to the agent's established window when we have one.
+    const pinnedWindowId = this.agentWindowByClientId.get(clientId);
+    const sentPinned = Number.isInteger(pinnedWindowId);
+    if (sentPinned) createParams.windowId = pinnedWindowId;
 
-    this.targets.set(sessionId, {
+    const result = await this._sendToExt('createTab', createParams);
+
+    // Re-pin affinity from the window the extension actually used:
+    // - sentPinned → overwrite. Closed-window refresh: if the pinned window was
+    //   gone, the extension fell back to the current window and returned its
+    //   real windowId, so re-pin there (no-op when the window was still open).
+    // - otherwise → establish first-wins only when no affinity exists yet.
+    //   NOTE: with true-concurrent first creates (the user changing focus
+    //   between two extension-handled creates) the tabs may land in different
+    //   windows, but affinity still resolves deterministically to the first
+    //   established window. Playwright awaits newPage() sequentially, so a
+    //   per-client serialization queue would be over-engineering.
+    const resultWindowId = integerWindowId(
+      result.windowId ?? result.targetInfo?.windowId
+    );
+    if (clientId && resultWindowId !== undefined) {
+      if (sentPinned || !this.agentWindowByClientId.has(clientId)) {
+        this.agentWindowByClientId.set(clientId, resultWindowId);
+      }
+    }
+
+    const target = {
       tabId: result.tabId,
       targetId: result.targetId,
       targetInfo: result.targetInfo,
+      windowId: resultWindowId,
       debuggerAttached: true, // createTab attaches debugger immediately
       attachPromise: null,
       origin: 'agent-created',
-    });
+    };
+    this.targets.set(sessionId, target);
     this.tabToSession.set(result.tabId, sessionId);
 
-    // Broadcast attachedToTarget to ALL clients
+    // Broadcast attachedToTarget to ALL clients. Shape the outbound targetInfo
+    // through buildTargetInfo, preserving the url fallback for empty titles/urls.
     this._broadcastCdp({
       method: 'Target.attachedToTarget',
       params: {
         sessionId,
-        targetInfo: {
+        targetInfo: buildTargetInfo({
           targetId: result.targetId,
-          type: 'page',
-          title: result.targetInfo?.title || '',
-          url: result.targetInfo?.url || params.url || 'about:blank',
-          attached: true,
-          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-        },
+          windowId: resultWindowId,
+          targetInfo: {
+            ...result.targetInfo,
+            url: result.targetInfo?.url || params.url || 'about:blank',
+          },
+        }),
         waitingForDebugger: false,
       },
     });
@@ -1506,8 +1552,14 @@ class RelayServer {
         if (INIT_ONLY_METHODS.has(method)) {
           return syntheticInitResponse(method, target);
         }
+        // First real (non-init) command on this tab pins the agent's window
+        // affinity, so later created tabs land in the same window even after
+        // the user changes Chrome focus.
+        this._seedAgentWindowAffinity(clientId, target);
         target._triggerMethod = method;
         await this._ensureDebuggerAttached(target, sessionId);
+      } else if (!INIT_ONLY_METHODS.has(method)) {
+        this._seedAgentWindowAffinity(clientId, target);
       }
       this._logCdp({
         direction: 'to-extension',

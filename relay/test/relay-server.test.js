@@ -1478,6 +1478,203 @@ describe('Auto-attach Flow', () => {
     ext.close();
     await sleep(100);
   });
+
+  it('Target.createTarget uses the windowId from the first real tab command', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const createCommands = [];
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabs: [
+              { tabId: 301, windowId: 111, url: 'https://user.example', title: 'User', active: true },
+              { tabId: 302, windowId: 222, url: 'https://agent.example', title: 'Agent', active: true },
+            ],
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: msg.params.tabId,
+            windowId: msg.params.tabId === 302 ? 222 : 111,
+            targetId: `real-target-${msg.params.tabId}`,
+            targetInfo: {
+              targetId: `real-target-${msg.params.tabId}`,
+              type: 'page',
+              title: '',
+              url: msg.params.tabId === 302 ? 'https://agent.example' : 'https://user.example',
+              windowId: msg.params.tabId === 302 ? 222 : 111,
+            },
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        ext.send(JSON.stringify({ id: msg.id, result: { result: { type: 'string', value: 'ok' } } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: 303,
+            windowId: 222,
+            targetId: 'real-target-303',
+            targetInfo: { targetId: 'real-target-303', type: 'page', title: '', url: msg.params.url || 'about:blank', windowId: 222 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const messages = [];
+    cdp.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(300);
+
+    const agentAttached = messages.find((m) => (
+      m.method === 'Target.attachedToTarget' && m.params.targetInfo.url === 'https://agent.example'
+    ));
+    assert.ok(agentAttached, 'agent tab should be exposed as a target');
+
+    cdp.send(JSON.stringify({
+      id: 2,
+      sessionId: agentAttached.params.sessionId,
+      method: 'Runtime.evaluate',
+      params: { expression: 'location.href' },
+    }));
+    await sleep(200);
+
+    cdp.send(JSON.stringify({ id: 3, method: 'Target.createTarget', params: { url: 'https://new-agent.example' } }));
+    await sleep(200);
+
+    assert.equal(createCommands.length, 1);
+    assert.equal(createCommands[0].windowId, 222);
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('Target.createTarget reuses the first agent-created windowId for later tabs', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const createCommands = [];
+    let nextTabId = 200;
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        const tabId = nextTabId++;
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId,
+            windowId: 500,
+            targetId: `real-target-${tabId}`,
+            targetInfo: { targetId: `real-target-${tabId}`, type: 'page', title: '', url: msg.params.url || 'about:blank', windowId: 500 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://first.example' } }));
+    await sleep(200);
+    cdp.send(JSON.stringify({ id: 2, method: 'Target.createTarget', params: { url: 'https://second.example' } }));
+    await sleep(200);
+
+    assert.equal(createCommands.length, 2);
+    assert.equal(createCommands[0].windowId, undefined);
+    assert.equal(createCommands[1].windowId, 500);
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('Target.createTarget re-pins to the fallback window when the pinned window was closed', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const createCommands = [];
+    let nextTabId = 400;
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        const tabId = nextTabId++;
+        // Simulate the extension's closed-window fallback: a request for the
+        // now-closed window 500 lands in the current window 700 instead.
+        let windowId;
+        if (msg.params.windowId === undefined) windowId = 500;
+        else if (msg.params.windowId === 500) windowId = 700;
+        else windowId = msg.params.windowId;
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId,
+            windowId,
+            targetId: `real-target-${tabId}`,
+            targetInfo: { targetId: `real-target-${tabId}`, type: 'page', title: '', url: msg.params.url || 'about:blank', windowId },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://one.example' } }));
+    await sleep(200);
+    cdp.send(JSON.stringify({ id: 2, method: 'Target.createTarget', params: { url: 'https://two.example' } }));
+    await sleep(200);
+    cdp.send(JSON.stringify({ id: 3, method: 'Target.createTarget', params: { url: 'https://three.example' } }));
+    await sleep(200);
+
+    assert.equal(createCommands.length, 3);
+    assert.equal(createCommands[0].windowId, undefined);
+    assert.equal(createCommands[1].windowId, 500);
+    assert.equal(createCommands[2].windowId, 700);
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
 });
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
