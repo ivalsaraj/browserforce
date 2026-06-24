@@ -2671,6 +2671,7 @@ describe('Extension Status Endpoints', () => {
         sessionId: 'manual-44-1',
         targetId: 'bf-target-44',
         origin: 'manual',
+        windowId: 902,
         targetInfo: { url: 'https://example.com', title: 'Example' },
       },
     }));
@@ -2685,6 +2686,7 @@ describe('Extension Status Endpoints', () => {
     assert.equal(status.body.manualAttachedTabs[0].title, 'Example');
     assert.equal(status.body.manualAttachedTabs[0].targetId, 'bf-target-44');
     assert.equal(status.body.manualAttachedTabs[0].origin, 'manual');
+    assert.equal(status.body.manualAttachedTabs[0].windowId, 902);
 
     ext.close();
     await sleep(100);

@@ -71,6 +71,19 @@ If the extension still has a local attached-tab entry but relay state was lost,
 pressing **Attach current tab** again replays the existing attachment to the
 relay instead of returning an "already attached" error.
 
+## Agent Window Affinity
+
+Agent-created tabs are pinned to the Chrome **window** where the agent first did
+real work, not the user's currently focused window. The relay remembers the
+first window per CDP client (seeded from the first non-init command), and sends
+that `windowId` to the extension's `createTab`. If the user switches to another
+Chrome window before the agent opens its next tab, the new tab still appears in
+the original window. BrowserForce only falls back to the current focused window
+when the pinned window has been closed, and then re-pins to that fallback window.
+
+Tab `windowId` is surfaced in `listTabs`, `/extension/status`, and
+`/attached-tabs` whenever it is known.
+
 ## Relay Status & Introspection Endpoints
 
 The relay exposes localhost-only status endpoints that read existing relay state
@@ -82,7 +95,7 @@ curl -s http://127.0.0.1:19222/attached-tabs | jq
 ```
 
 - `GET /extension/status` → `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }`.
-- `GET /attached-tabs` → `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }`.
+- `GET /attached-tabs` → `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin, windowId? }] }`. `windowId` is present only when the relay knows the tab's Chrome window.
 - Auto-mode CDP discovery registers eligible open Chrome tabs as `relay-discovered` targets without debugger-attaching them or creating blank tabs.
 - `manualAttachedTabs` / `activeManualTargets` identify user-attached tabs (`origin: 'manual'`). Use them to confirm attached-only/manual mode is ready.
 - `attachedTabs` can also include `relay-discovered`, `agent-created`, and `relay-attached` tabs. These targets are visible to MCP, but only debugger-attach lazily when the agent interacts with one.

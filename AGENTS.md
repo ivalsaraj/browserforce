@@ -69,7 +69,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 | `listTabs` | — | List all eligible browser tabs |
 | `attachTab` | `{ tabId, sessionId }` | Attach debugger to tab |
 | `detachTab` | `{ tabId }` | Detach debugger |
-| `createTab` | `{ url, sessionId }` | Create and attach new tab |
+| `createTab` | `{ url, sessionId, windowId? }` | Create and attach new tab (optional `windowId` pins the agent's window) |
 | `closeTab` | `{ tabId }` | Close tab |
 | `cdpCommand` | `{ tabId, method, params, childSessionId? }` | Forward CDP command |
 | `ping` | — | Keepalive (every 5s) |
@@ -147,6 +147,12 @@ Cross-origin iframes create child CDP sessions. The extension tracks `childSessi
 ### Debugger Detach Cascade
 
 When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the debugger from **ALL** tabs (reason: `canceled_by_user`). The extension must clear all attached tab state, not just one tab.
+
+### Agent Window Affinity
+
+Agent-created tabs are pinned to the Chrome **window** the agent first worked in, not the user's current focus. The relay seeds `agentWindowByClientId` (keyed by CDP client id) from the `windowId` of the first real (non-init) command in `_forwardToTab()`, then passes that `windowId` to `createTab`. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the current focused window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowId()`.
+
+**Do not** treat the current Chrome focus as stable agent ownership — use the stored `windowId`. Residual limitation: with truly concurrent first creates (the user changing focus between two extension-handled creates) tabs can land in different windows; affinity still resolves deterministically to the first established window. Playwright awaits `newPage()` sequentially, so no per-client serialization queue is added.
 
 ### Test Isolation: writeCdpUrl Flag
 

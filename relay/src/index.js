@@ -704,15 +704,22 @@ class RelayServer {
   // ─── Attached Tab Status ────────────────────────────────────────────────
 
   _getAttachedTabInfos() {
-    return [...this.targets.values()].map((target) => ({
-      tabId: target.tabId,
-      sessionId: this.tabToSession.get(target.tabId) || null,
-      targetId: target.targetId,
-      title: target.targetInfo?.title || '',
-      url: target.targetInfo?.url || '',
-      debuggerAttached: !!target.debuggerAttached,
-      origin: target.origin || 'unknown',
-    }));
+    return [...this.targets.values()].map((target) => {
+      const info = {
+        tabId: target.tabId,
+        sessionId: this.tabToSession.get(target.tabId) || null,
+        targetId: target.targetId,
+        title: target.targetInfo?.title || '',
+        url: target.targetInfo?.url || '',
+        debuggerAttached: !!target.debuggerAttached,
+        origin: target.origin || 'unknown',
+      };
+      // Surface windowId only when known, preserving the response shape for
+      // older extension messages that never sent window metadata.
+      const windowId = integerWindowId(target.windowId ?? target.targetInfo?.windowId);
+      if (windowId !== undefined) info.windowId = windowId;
+      return info;
+    });
   }
 
   _getExtensionStatusBody() {
