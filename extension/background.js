@@ -1,4 +1,5 @@
 import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
+import { resolveCreateWindowId } from './window-affinity.js';
 
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
@@ -27,7 +28,7 @@ let currentRelayUrl = RELAY_URL_DEFAULT;
  *  (e.g. service-worker replacement or extension slot handoff). */
 let shouldWaitForExtensionSlot = false;
 
-/** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object, origin: string }>} */
+/** @type {Map<number, { sessionId: string, targetId: string, targetInfo: object, tabId: number, windowId?: number, origin: string }>} */
 const attachedTabs = new Map();
 
 /** Allowlisted tab attachment provenance. Unrecognized origins fall back to 'unknown'. */
@@ -301,6 +302,25 @@ async function getCurrentWindowId() {
   return undefined;
 }
 
+// Resolve the window a new agent tab should open in. Honors the relay-pinned
+// `params.windowId` when that window still exists, otherwise falls back to the
+// current focused window (which becomes the new pinned window upstream).
+async function resolveCreateTabWindowId(params) {
+  const requestedWindowId = params?.windowId;
+  let isRequestedWindowValid = false;
+  if (Number.isInteger(requestedWindowId)) {
+    try {
+      const win = await chrome.windows.get(requestedWindowId);
+      isRequestedWindowValid = !!win && typeof win.id === 'number';
+    } catch {
+      // The pinned window may have been closed; fall back to the current window.
+      isRequestedWindowValid = false;
+    }
+  }
+  const currentWindowId = await getCurrentWindowId();
+  return resolveCreateWindowId({ requestedWindowId, isRequestedWindowValid, currentWindowId });
+}
+
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
   return {
@@ -317,6 +337,7 @@ async function listTabs() {
       })
       .map((t) => ({
         tabId: t.id,
+        windowId: t.windowId,
         url: t.url,
         title: t.title,
         active: t.active,
@@ -362,7 +383,20 @@ async function attachTab(tabId, sessionId, options = {}) {
     targetInfo = { targetId, type: 'page', title: tab.title, url: tab.url };
   }
 
-  const entry = { sessionId, targetId, targetInfo, tabId, origin };
+  // Surface the tab's windowId so the relay can pin agent window affinity
+  // without relying on Chrome's CDP Target.getTargetInfo (which omits it).
+  let windowId;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (Number.isInteger(tab?.windowId)) windowId = tab.windowId;
+  } catch {
+    // Tab may have closed between attach and metadata read; windowId stays undefined.
+  }
+  if (windowId !== undefined) {
+    targetInfo = { ...targetInfo, windowId };
+  }
+
+  const entry = { sessionId, targetId, targetInfo, tabId, windowId, origin };
   attachedTabs.set(tabId, entry);
   updateBadge();
   tabLastActivity.set(tabId, Date.now());
@@ -403,7 +437,7 @@ async function createTab(params) {
   }
 
   const agentSettings = await getAgentExecutionSettings();
-  const windowId = await getCurrentWindowId();
+  const windowId = await resolveCreateTabWindowId(params);
   const createOptions = {
     url: params.url || 'about:blank',
     // Keep agent-created tabs visible; do not spawn separate windows.
@@ -805,16 +839,15 @@ function send(msg) {
 }
 
 function notifyRelayManualTabAttached(tabId, entry) {
-  send({
-    method: 'manualTabAttached',
-    params: {
-      tabId,
-      sessionId: entry.sessionId,
-      targetId: entry.targetId,
-      targetInfo: entry.targetInfo,
-      origin: entry.origin || 'unknown',
-    },
-  });
+  const params = {
+    tabId,
+    sessionId: entry.sessionId,
+    targetId: entry.targetId,
+    targetInfo: entry.targetInfo,
+    origin: entry.origin || 'unknown',
+  };
+  if (Number.isInteger(entry.windowId)) params.windowId = entry.windowId;
+  send({ method: 'manualTabAttached', params });
 }
 
 function notifyRelayAttachedTabs() {
