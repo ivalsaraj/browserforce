@@ -462,6 +462,18 @@ test('runCode timeout fences async continuations after a stored-handle call', as
   assert.equal(ctx.state.leakedAfterStoredHandle, undefined);
 });
 
+test('runCode timeout interrupts synchronous runaway code', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+
+  await assert.rejects(
+    () => runCode('while (true) {}', ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  const nextResult = await runCode('return "after-sync-timeout";', ctx, 1000);
+  assert.equal(nextResult, 'after-sync-timeout');
+});
+
 test('official plugin canonical helper names remain available alongside aliases', async () => {
   const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
   const { default: highlightPlugin } = await import('../../plugins/official/highlight/index.js');

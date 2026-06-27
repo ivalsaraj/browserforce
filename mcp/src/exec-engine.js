@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import vm from 'node:vm';
 import {
   createSmartDiff, parseSearchPattern,
 } from './snapshot.js';
@@ -861,14 +862,35 @@ export function buildExecContext(
   };
 }
 
+function wrapExecuteCode(code) {
+  return `(async function() {\n${code}\n})()`;
+}
+
+// vm.runInContext's synchronous timeout throws ERR_SCRIPT_EXECUTION_TIMEOUT;
+// map it back to BrowserForce's CodeExecutionTimeoutError so the MCP boundary
+// keeps the terse, no-reset-hint timeout response.
+function normalizeRunError(err, timeoutMs) {
+  if (err?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' || /Script execution timed out/.test(String(err?.message || ''))) {
+    return new CodeExecutionTimeoutError(timeoutMs);
+  }
+  return err;
+}
+
 export async function runCode(code, execCtx, timeoutMs) {
-  const keys = Object.keys(execCtx);
-  const vals = Object.values(execCtx);
-  const fn = new Function(...keys, `return (async function() {\n${code}\n})()`);
+  const vmContext = vm.createContext(execCtx);
+  let userPromise;
+  try {
+    userPromise = vm.runInContext(wrapExecuteCode(code), vmContext, {
+      timeout: timeoutMs,
+      displayErrors: true,
+    });
+  } catch (err) {
+    throw normalizeRunError(err, timeoutMs);
+  }
   let result;
   const nativeSetTimeout = globalThis.setTimeout;
   await Promise.race([
-    (async () => { result = await fn(...vals); })(),
+    (async () => { result = await userPromise; })(),
     new Promise((_, reject) =>
       nativeSetTimeout(() => reject(new CodeExecutionTimeoutError(timeoutMs)), timeoutMs)),
   ]);
