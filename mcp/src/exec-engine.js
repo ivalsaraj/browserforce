@@ -558,7 +558,9 @@ export function buildExecContext(
       pageSnapshots = migrated;
       lastSnapshots.set(page, pageSnapshots);
     }
-    const snapshotKey = selector || (locator ? '__locator__' : '__full_page__');
+    // Key each scope into its own bucket so a scoped snapshot never overwrites the full-page
+    // baseline that the next full-page diff compares against (only full-page calls diff).
+    const snapshotKey = selector || (frame ? '__frame__' : locator ? '__locator__' : '__full_page__');
     const previousSnapshot = pageSnapshots.get(snapshotKey);
     pageSnapshots.set(snapshotKey, fullSnapshot);
 

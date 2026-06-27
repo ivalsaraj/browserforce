@@ -629,6 +629,17 @@ function isEmptyAx(axNodes) {
   return meaningful.length === 0;
 }
 
+// Playwright throws this EXACT message (playwright-core crBrowser.js `newCDPSession`) when a
+// Frame has no own CDP target — i.e. it is an in-process same-origin frame. ANY other
+// newCDPSession failure (e.g. the relay could not resolve an OOPIF's Target.attachToTarget,
+// or the frame detached) is an UNEXPECTED acquisition error and must NOT be silently treated
+// as same-origin: doing so would mis-scope an explicit subframe to the whole page, or stitch
+// the wrong content on the full-page walk. Match the stable, unique substring.
+export function isSameOriginFrameSessionError(err) {
+  const msg = (err && (err.message ?? String(err))) || '';
+  return /separate CDP session/i.test(msg);
+}
+
 /**
  * Get an accessibility snapshot.
  *
@@ -670,7 +681,13 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
     try {
       scopeCdp = await page.context().newCDPSession(resolvedFrame); // OOPIF: own target
       ownsScopeCdp = true;
-    } catch {
+    } catch (err) {
+      if (!isSameOriginFrameSessionError(err)) {
+        // Real OOPIF acquisition failure (relay couldn't resolve the frame's target, frame
+        // detached, …). Falling back to the page session would silently return the WHOLE page
+        // for an explicitly-requested subframe — fail loudly instead of mis-scoping.
+        throw new Error(`Failed to acquire a CDP session for the requested subframe (the relay may not have resolved its OOPIF target): ${err?.message ?? err}`);
+      }
       scopeCdp = cdp;                 // same-origin in-process frame → page session + scope
       sameOriginFrame = resolvedFrame;
     }
@@ -723,22 +740,28 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
       scopeApplied = true;
     }
 
-    const fetchData = async () => {
-      // Back-to-back, no awaits between, to minimise backendNodeId staleness. Both come
-      // from scopeCdp so DOM and AX backendNodeIds agree.
-      const domP = scopeCdp.send('DOM.getFlattenedDocument', { depth: -1, pierce: true });
-      const axP = scopeCdp.send('Accessibility.getFullAXTree');
+    // DOM + AX are fetched back-to-back from the SAME session (no awaits between) to minimise
+    // backendNodeId staleness; mixing sessions would mis-resolve refs (ids are per-process).
+    const fetchDomAndAx = async (session) => {
+      const domP = session.send('DOM.getFlattenedDocument', { depth: -1, pierce: true });
+      const axP = session.send('Accessibility.getFullAXTree');
       const [{ nodes: domNodes }, { nodes: axNodes }] = await Promise.all([domP, axP]);
       return { domNodes, axNodes };
     };
-
-    let { domNodes, axNodes } = await fetchData();
-    if (isEmptyAx(axNodes)) {
-      await new Promise((r) => setTimeout(r, EMPTY_AX_RETRY_DELAY_MS));
-      ({ domNodes, axNodes } = await fetchData());
-      if (isEmptyAx(axNodes)) {
-        throw new Error('Accessibility tree is empty after retry — the page may still be loading or has no accessible content. Wait for load and retry; do not fall back to a weaker engine.');
+    // One bounded retry for an empty AX tree (the page/frame may still be computing it). Shared
+    // by the main session and every child-frame session so subframes get the same contract.
+    const fetchDomAndAxWithRetry = async (session) => {
+      let res = await fetchDomAndAx(session);
+      if (isEmptyAx(res.axNodes)) {
+        await new Promise((r) => setTimeout(r, EMPTY_AX_RETRY_DELAY_MS));
+        res = await fetchDomAndAx(session);
       }
+      return res;
+    };
+
+    let { domNodes, axNodes } = await fetchDomAndAxWithRetry(scopeCdp);
+    if (isEmptyAx(axNodes)) {
+      throw new Error('Accessibility tree is empty after retry — the page may still be loading or has no accessible content. Wait for load and retry; do not fall back to a weaker engine.');
     }
 
     // ── Explicit scope (Phase 1): one region, no recursive walk, empty frameChain. ──
@@ -784,16 +807,21 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
         childSessions.push(frameCdp);
         await frameCdp.send('Accessibility.enable');
         await frameCdp.send('DOM.enable');
-        const [{ nodes: cDom }, { nodes: cAx }] = await Promise.all([
-          frameCdp.send('DOM.getFlattenedDocument', { depth: -1, pierce: true }),
-          frameCdp.send('Accessibility.getFullAXTree'),
-        ]);
+        // Same empty-AX retry contract as the main session (a child tree can lag); on the
+        // full-page walk an empty/never-ready child is best-effort skipped, not thrown.
+        const { domNodes: cDom, axNodes: cAx } = await fetchDomAndAxWithRetry(frameCdp);
+        if (isEmptyAx(cAx)) continue;
         ({ nodes: childNodes } = buildScopedNodes({
           axNodes: cAx, domNodes: cDom, interactiveOnly, refFilter,
           frameChain: meta.frameChain, refCtx,
           frameBoundaryBackendIds: collectFrameBoundaryBackendIds(cDom),
         }));
-      } catch {
+      } catch (err) {
+        // ONLY the genuine same-origin "no separate CDP session" error means we should
+        // re-assemble from the parent session. Any other failure (real OOPIF acquisition
+        // error, frame detach, AX enable failure) is best-effort skipped so one bad frame
+        // never poisons the whole-page snapshot (documented one-level-OOPIF limitation).
+        if (!isSameOriginFrameSessionError(err)) continue;
         // same-origin: re-assemble from the parent session's already-fetched axNodes/domNodes,
         // scoped to the frame's content root, SAME boundary cutoff (nested iframes stay leaves).
         const rootBackendId = rootByToken.get(meta.rootToken)?.backendNodeId;

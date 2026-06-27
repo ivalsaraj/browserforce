@@ -5,7 +5,7 @@ import {
   collectFrameBoundaryBackendIds, deriveIframeSelector, stitchFrameTree,
   mapTokenToBackendId, orderFramesParentFirst, buildFrameChain,
   createRefContext, buildScopedNodes, buildSnapshotLines, buildShortRefMap,
-  finalizeSnapshotOutput, reconcileRefLocators,
+  finalizeSnapshotOutput, reconcileRefLocators, isSameOriginFrameSessionError,
 } from '../src/aria-snapshot-engine.js';
 
 // ── fixture builders ─────────────────────────────────────────────────────────
@@ -87,6 +87,32 @@ test('getAriaSnapshot throws without a CDP session', async () => {
 test('getAriaSnapshot throws on empty AX tree after one retry', async () => {
   const fakeCdp = { send: async (method) => (method.startsWith('DOM.getFlattenedDocument') || method.startsWith('Accessibility.getFullAXTree') ? { nodes: [] } : {}) };
   await assert.rejects(() => getAriaSnapshot({ page: {}, cdp: fakeCdp }), /empty after retry/);
+});
+
+test('isSameOriginFrameSessionError matches ONLY the same-origin "no separate CDP session" error', () => {
+  // Exact message thrown by playwright-core crBrowser.js newCDPSession for an in-process frame.
+  assert.equal(isSameOriginFrameSessionError(new Error("This frame does not have a separate CDP session, it is a part of the parent frame's session")), true);
+  assert.equal(isSameOriginFrameSessionError('separate CDP session'), true);
+  // Any other failure (OOPIF target resolution, detach) must be classified as unexpected.
+  assert.equal(isSameOriginFrameSessionError(new Error('Protocol error (Target.attachToTarget): No target with given id found')), false);
+  assert.equal(isSameOriginFrameSessionError(undefined), false);
+  assert.equal(isSameOriginFrameSessionError(null), false);
+});
+
+test('getAriaSnapshot rethrows an UNEXPECTED OOPIF acquisition error for an explicit subframe (no silent whole-page fallback)', async () => {
+  const mainFrame = { childFrames: () => [] };
+  const subframe = { childFrames: () => [] }; // a Frame (has childFrames) distinct from mainFrame
+  const page = {
+    mainFrame: () => mainFrame,
+    context: () => ({
+      newCDPSession: async () => { throw new Error('Protocol error (Target.attachToTarget): No target with given id found'); },
+    }),
+  };
+  const cdp = { send: async () => ({ nodes: [] }) };
+  await assert.rejects(
+    () => getAriaSnapshot({ page, frame: subframe, cdp }),
+    /Failed to acquire a CDP session for the requested subframe/,
+  );
 });
 
 // ── Phase 2: frame stitching helpers (pure) ──────────────────────────────────
