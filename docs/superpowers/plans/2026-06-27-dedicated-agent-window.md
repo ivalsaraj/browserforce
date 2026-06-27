@@ -186,6 +186,8 @@ Wire the plan into `createTab`. The async wrapper reads the `dedicatedWindow` se
 
 **Files:**
 - Modify: `extension/background.js:2` (import), `extension/background.js:305-322` (`resolveCreateTabWindowId` → `resolveCreateTabWindowPlan`), `extension/background.js:422-463` (`createTab`)
+- Test: `test/agent/background-window-plan.test.js` (new — static source-contract test, matching the `extension-manifest.test.js` / `popup-contract.test.js` text-assertion pattern, since Chrome APIs can't run under `node:test`)
+- Modify: `package.json` (register the new test in the explicitly-enumerated `scripts.test` and `scripts.test:agent` chains, otherwise CI never runs it)
 
 **Interfaces:**
 - Consumes: `resolveCreateWindowPlan(...)` from Task 1.
@@ -324,15 +326,52 @@ async function createTab(params) {
 }
 ```
 
-- [ ] **Step 4: Run the full agent + relay suites to confirm no regression**
+- [ ] **Step 4: Add a static source-contract test for the new-window branch**
 
-Run: `node --test test/agent/window-affinity.test.js && node --test relay/test/relay-server.test.js`
-Expected: PASS — resolver tests pass and relay integration (affinity pinning / re-pin from returned `windowId`) is unaffected.
+Chrome APIs can't run under `node:test`, but the repo already guards extension
+source with text-assertion tests (`test/agent/extension-manifest.test.js`,
+`test/agent/popup-contract.test.js`). Add `test/agent/background-window-plan.test.js`
+to lock the `createTab` contract so a typo/regression in the new-window branch
+is caught in CI:
 
-- [ ] **Step 5: Commit**
+```js
+import fs from 'node:fs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const bg = fs.readFileSync('extension/background.js', 'utf8');
+
+test('createTab imports and uses the plan resolver', () => {
+  assert.match(bg, /import \{ resolveCreateWindowPlan \} from '\.\/window-affinity\.js'/);
+  assert.match(bg, /resolveCreateTabWindowPlan\(params, !!settings\.dedicatedWindow\)/);
+});
+
+test('createTab reads the dedicatedWindow setting from storage', () => {
+  assert.match(bg, /'dedicatedWindow'/);
+});
+
+test('new-window plan opens a background window via chrome.windows.create', () => {
+  assert.match(bg, /plan\.action === 'new-window'/);
+  assert.match(bg, /chrome\.windows\.create\(/);
+  assert.match(bg, /focused:\s*false/);
+});
+```
+
+Then **register it in `package.json`** — both `scripts.test` and `scripts.test:agent`
+enumerate every test file explicitly, so a new file is never run by CI unless added.
+Insert `&& node --test test/agent/background-window-plan.test.js` immediately after the
+existing `node --test test/agent/window-affinity.test.js` segment in **both** scripts.
+
+- [ ] **Step 5: Run the full agent + relay suites to confirm no regression**
+
+Run: `node --test test/agent/window-affinity.test.js && node --test test/agent/background-window-plan.test.js && node --test relay/test/relay-server.test.js`
+Then confirm the script wiring is valid: `pnpm test:agent` (repo uses `pnpm` — `pnpm-lock.yaml`).
+Expected: PASS — resolver + background-contract tests pass, the new test runs under `test:agent`, and relay integration (affinity pinning / re-pin from returned `windowId`) is unaffected.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add extension/background.js
+git add extension/background.js test/agent/background-window-plan.test.js package.json
 git commit -m "feat(extension): open agent-created tabs in a dedicated background window"
 ```
 
@@ -437,7 +476,8 @@ Update the evergreen project guide and append the timeline entry (project rules 
 
 **Files:**
 - Modify: `AGENTS.md` ("Agent Window Affinity" section)
-- Modify: `docs/knowledge/timeline1.md` (append entry)
+- Modify: `docs/DEVELOPMENT.md` ("Agent Window Affinity" section — keep the evergreen dev doc in sync; it currently only describes the closed-window→current-window fallback)
+- Modify: `docs/knowledge/timeline1.md` (append entry) — **local-only**: `docs/knowledge/` is gitignored (`.gitignore:11 knowledge/`), so this file is updated for the compounding protocol but is **NOT** committed/pushed.
 
 - [ ] **Step 1: Update the "Agent Window Affinity" section in `AGENTS.md`**
 
@@ -454,7 +494,23 @@ join it. If the dedicated window is closed mid-session, the next create spawns a
 agent-**created** tabs only — manually attached tabs are never moved. Default is OFF.
 ```
 
-- [ ] **Step 2: Append the timeline entry**
+- [ ] **Step 2: Update the "Agent Window Affinity" section in `docs/DEVELOPMENT.md`**
+
+Append a paragraph to the `## Agent Window Affinity` section so the evergreen dev
+doc reflects dedicated mode (it currently only documents the closed-window →
+current-window fallback):
+
+```markdown
+**Dedicated window (opt-in):** With the **Open agent tabs in a dedicated window**
+popup setting ON, a create with no valid pinned window opens a fresh **background**
+(`focused: false`) Chrome window for the agent's tabs instead of using the user's
+current window; affinity then pins to it. If that window is closed mid-session, the
+next create spawns a **new** dedicated window rather than falling back to the user's
+window. Scope is agent-**created** tabs only; manually attached tabs are never moved.
+Default is OFF.
+```
+
+- [ ] **Step 3: Append the timeline entry (local-only — `docs/knowledge/` is gitignored)**
 
 Append to `docs/knowledge/timeline1.md` (use today's date `2026-06-27` and `@Valsaraj`):
 
@@ -472,13 +528,17 @@ organized in their own window.
 `createTab` executes the plan via `chrome.windows.create`. Relay unchanged — it
 already re-pins affinity from the returned `windowId`.
 **Files**: extension/window-affinity.js, extension/background.js, extension/popup.html,
-extension/popup.js, test/agent/window-affinity.test.js, test/agent/popup-contract.test.js
+extension/popup.js, test/agent/window-affinity.test.js, test/agent/popup-contract.test.js,
+test/agent/background-window-plan.test.js, AGENTS.md, docs/DEVELOPMENT.md
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
+
+`docs/knowledge/` is gitignored, so the timeline file is updated locally for the
+compounding protocol but is **NOT** staged. Commit only the tracked docs:
 
 ```bash
-git add AGENTS.md docs/knowledge/timeline1.md
+git add AGENTS.md docs/DEVELOPMENT.md
 git commit -m "docs: document opt-in dedicated agent window"
 ```
 
@@ -490,9 +550,12 @@ Run the agent suite to confirm everything is green:
 
 ```bash
 node --test test/agent/window-affinity.test.js \
+  && node --test test/agent/background-window-plan.test.js \
   && node --test test/agent/popup-contract.test.js \
   && node --test relay/test/relay-server.test.js
 ```
+
+Also confirm the new test is wired into the enumerated scripts: `pnpm test:agent`.
 
 Manual smoke (in Chrome, with the extension reloaded):
 1. Toggle **Open agent tabs in a dedicated window** ON in the popup.
