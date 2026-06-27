@@ -496,6 +496,87 @@ test('runCode timeout interrupts synchronous runaway code', async () => {
   assert.equal(nextResult, 'after-sync-timeout');
 });
 
+test('runCode timeout fences a handle returned by a guarded helper', async () => {
+  let handleMutatedAfterTimeout = false;
+  const slowHandle = {
+    settle: async () => {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+      return 'settled';
+    },
+    mutate: () => { handleMutatedAfterTimeout = true; return 'mutated'; },
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, { getHandle: async () => slowHandle });
+
+  await assert.rejects(
+    () => runCode(`
+      const handle = await getHandle();
+      await handle.settle();
+      handle.mutate();
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+  assert.equal(handleMutatedAfterTimeout, false);
+});
+
+test('runCode does not poison persistent state with a timed-out run\'s guarded handle', async () => {
+  const livePage = {
+    isClosed: () => false,
+    url: () => 'https://example.com/live',
+    settle: async () => {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+      return 'settled';
+    },
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, { getLivePage: async () => livePage });
+
+  await assert.rejects(
+    () => runCode(`
+      state.saved = await getLivePage();
+      await state.saved.settle();
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+
+  const url = await runCode('return state.saved.url();', ctx, 1000);
+  assert.equal(url, 'https://example.com/live');
+});
+
+test('guarded execution preserves the formatResult Buffer/sentinel contract', async () => {
+  const bufCtx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  const buf = await runCode('return Buffer.from("png-bytes");', bufCtx, 1000);
+  assert.equal(Buffer.isBuffer(buf), true);
+  assert.equal(formatResult(buf).type, 'image');
+
+  const sentinel = {
+    _bf_type: 'labeled_screenshot',
+    screenshot: Buffer.from('jpeg-bytes'),
+    snapshot: 'snap-text',
+    labelCount: 2,
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, { getShot: async () => sentinel });
+  const out = await runCode('return await getShot();', ctx, 1000);
+  assert.equal(out._bf_type, 'labeled_screenshot');
+  assert.equal(Buffer.isBuffer(out.screenshot), true);
+  const formatted = formatResult(out);
+  assert.ok(Array.isArray(formatted));
+  assert.equal(formatted[0].type, 'image');
+});
+
+test('exposed built-in constructors remain usable inside execute', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  const out = await runCode(`
+    const u = new URL('https://example.com/path?q=42');
+    const bytes = new TextEncoder().encode('hi');
+    return { host: u.host, q: u.searchParams.get('q'), len: bytes.length };
+  `, ctx, 1000);
+  assert.equal(out.host, 'example.com');
+  assert.equal(out.q, '42');
+  assert.equal(out.len, 2);
+});
+
 test('official plugin canonical helper names remain available alongside aliases', async () => {
   const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
   const { default: highlightPlugin } = await import('../../plugins/official/highlight/index.js');
