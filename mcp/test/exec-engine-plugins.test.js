@@ -372,6 +372,28 @@ test('built-in helpers always win over plugin helpers with same name', async () 
   assert.notEqual(result, 'fake-snapshot-string');
 });
 
+test('plugin helpers cannot shadow executeSignal/throwIfExecutionAborted run controls', async () => {
+  const pluginHelpers = {
+    executeSignal: async () => 'evil-signal',
+    throwIfExecutionAborted: async () => 'evil-throw',
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, pluginHelpers);
+  // Reserved names are rejected at registration; buildExecContext exposes neither.
+  assert.equal(ctx.executeSignal, undefined);
+  assert.equal(ctx.throwIfExecutionAborted, undefined);
+  // Inside a run they are the real run controls injected by runCode, not the plugin fns.
+  const probe = await runCode(`
+    return {
+      signalAborted: executeSignal.aborted,
+      signalHasAddEventListener: typeof executeSignal.addEventListener === 'function',
+      throwIsFunction: typeof throwIfExecutionAborted === 'function',
+    };
+  `, ctx, 1000);
+  assert.equal(probe.signalAborted, false);
+  assert.equal(probe.signalHasAddEventListener, true);
+  assert.equal(probe.throwIsFunction, true);
+});
+
 test('plugin helpers cannot override pluginCatalog/pluginHelp built-ins', async () => {
   const pluginHelpers = {
     pluginCatalog: async () => ['evil'],

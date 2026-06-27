@@ -829,6 +829,8 @@ export function buildExecContext(
     'clearTimeout',
     'TextEncoder',
     'TextDecoder',
+    'executeSignal',
+    'throwIfExecutionAborted',
   ]);
 
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
@@ -876,8 +878,64 @@ function normalizeRunError(err, timeoutMs) {
   return err;
 }
 
+// Per-run cancellation state. abort() aborts the signal with a
+// CodeExecutionTimeoutError reason and cancels every still-pending run timer, so
+// continuations suspended on a run timer never resume after the timeout fires.
+function createRunController(timeoutMs) {
+  const controller = new AbortController();
+  const pendingTimers = new Set();
+  let hasTimedOut = false;
+
+  const abort = () => {
+    hasTimedOut = true;
+    controller.abort(new CodeExecutionTimeoutError(timeoutMs));
+    for (const timerId of pendingTimers) globalThis.clearTimeout(timerId);
+    pendingTimers.clear();
+  };
+
+  const throwIfAborted = () => {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason || new CodeExecutionTimeoutError(timeoutMs);
+    }
+  };
+
+  return { signal: controller.signal, pendingTimers, abort, throwIfAborted, get hasTimedOut() { return hasTimedOut; } };
+}
+
+// Run-scoped setTimeout/clearTimeout exposed to user snippets. A scheduled
+// callback never fires after the run aborts, and pending timers are tracked so
+// abort() can clear them.
+function createRunTimers(run) {
+  const setTimeoutForRun = (callback, delay = 0, ...args) => {
+    run.throwIfAborted();
+    const timerId = globalThis.setTimeout(() => {
+      run.pendingTimers.delete(timerId);
+      if (run.signal.aborted) return;
+      callback(...args);
+    }, delay);
+    run.pendingTimers.add(timerId);
+    return timerId;
+  };
+
+  const clearTimeoutForRun = (timerId) => {
+    run.pendingTimers.delete(timerId);
+    return globalThis.clearTimeout(timerId);
+  };
+
+  return { setTimeout: setTimeoutForRun, clearTimeout: clearTimeoutForRun };
+}
+
 export async function runCode(code, execCtx, timeoutMs) {
-  const vmContext = vm.createContext(execCtx);
+  const run = createRunController(timeoutMs);
+  const runTimers = createRunTimers(run);
+  const guardedExecCtx = {
+    ...execCtx,
+    ...runTimers,
+    executeSignal: run.signal,
+    throwIfExecutionAborted: run.throwIfAborted,
+  };
+  const vmContext = vm.createContext(guardedExecCtx);
+
   let userPromise;
   try {
     userPromise = vm.runInContext(wrapExecuteCode(code), vmContext, {
@@ -885,15 +943,31 @@ export async function runCode(code, execCtx, timeoutMs) {
       displayErrors: true,
     });
   } catch (err) {
+    run.abort();
     throw normalizeRunError(err, timeoutMs);
   }
+
   let result;
-  const nativeSetTimeout = globalThis.setTimeout;
-  await Promise.race([
-    (async () => { result = await userPromise; })(),
-    new Promise((_, reject) =>
-      nativeSetTimeout(() => reject(new CodeExecutionTimeoutError(timeoutMs)), timeoutMs)),
-  ]);
+  let isComplete = false;
+  let timeoutId;
+  try {
+    await Promise.race([
+      userPromise.then((value) => {
+        run.throwIfAborted();
+        result = value;
+        isComplete = true;
+      }),
+      new Promise((_, reject) => {
+        timeoutId = globalThis.setTimeout(() => {
+          run.abort();
+          reject(new CodeExecutionTimeoutError(timeoutMs));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) globalThis.clearTimeout(timeoutId);
+    if (!isComplete) run.abort();
+  }
   return result;
 }
 
