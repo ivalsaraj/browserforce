@@ -171,7 +171,7 @@ async function cmdScreenshot() {
 
 async function cmdSnapshot() {
   const index = parseInt(positionals[1] || '0', 10);
-  const { getAriaSnapshot, renderRefLines } = await import('./mcp/src/aria-snapshot-engine.js');
+  const { getAriaSnapshot, renderRefLines, renderFrameErrors } = await import('./mcp/src/aria-snapshot-engine.js');
   const browser = await connectBrowser();
   try {
     const pages = getFirstContext(browser).pages();
@@ -191,7 +191,8 @@ async function cmdSnapshot() {
       ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}): ${r.locator ?? '(frame-scoped)'}`).join('\n')
       : '';
     const title = await page.title().catch(() => '');
-    output(`Page: ${title} (${page.url()})\nRefs: ${result.refs.length} interactive elements\n\n${renderRefLines(result.tree)}${refTable}`, values.json);
+    const frameWarning = renderFrameErrors(result.frameErrors);
+    output(`Page: ${title} (${page.url()})\nRefs: ${result.refs.length} interactive elements${frameWarning}\n\n${renderRefLines(result.tree)}${refTable}`, values.json);
   } finally {
     await browser.close().catch(() => {});
   }
