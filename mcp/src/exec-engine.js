@@ -680,23 +680,21 @@ export function buildExecContext(
     const { text: snapText, refs, page } = await buildSnapshotData({
       selector,
       search: null,
-      refAll: !interactiveOnly,
+      interactiveOnly,
     });
 
     const sema = new Semaphore(LABEL_BOX_CONCURRENCY);
     const labelCandidates = refs
-      .map(ref => ({ ref: ref.ref, role: ref.role, locator: ref.locator }))
+      .map((ref) => ({ ref: ref.shortRef ?? ref.ref, role: ref.role, locator: ref.locator, frameChain: ref.frameChain || [] }))
+      .filter((c) => c.locator)
       .slice(0, MAX_LABEL_OVERLAY_REFS);
     const labels = (await Promise.all(labelCandidates.map(async (candidate) => {
       await sema.acquire();
       try {
-        const box = await page.locator(candidate.locator).first().boundingBox();
+        const loc = buildRefLocator(page, { locator: candidate.locator, frameChain: candidate.frameChain });
+        const box = await loc.first().boundingBox();
         if (!box || box.width <= 0 || box.height <= 0) return null;
-        return {
-          ref: candidate.ref,
-          role: candidate.role,
-          box: { x: box.x, y: box.y, width: box.width, height: box.height },
-        };
+        return { ref: candidate.ref, role: candidate.role, box: { x: box.x, y: box.y, width: box.width, height: box.height } };
       } catch {
         return null;
       } finally {
