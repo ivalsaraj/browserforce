@@ -35,7 +35,42 @@ function mockFetch(urlToBody) {
   return () => { globalThis.fetch = originalFetch; };
 }
 
-const mockPage = { isClosed: () => false, url: () => 'about:blank', title: async () => 'Test' };
+// The CDP snapshot engine pulls the tree from a page CDP session, not page.evaluate.
+// This fake session answers the two engine fetches; other methods no-op.
+function makeFakeCdpSession(domNodes, axNodes) {
+  return {
+    async send(method) {
+      if (method === 'DOM.getFlattenedDocument') return { nodes: domNodes };
+      if (method === 'Accessibility.getFullAXTree') return { nodes: axNodes };
+      return {};
+    },
+    async detach() {},
+  };
+}
+
+// Fixture DOM/AX for <main><button>Submit</button></main>. Only the button is an
+// interactive role, so the engine refs it (e1); main is structure-only (no ref).
+const SNAPSHOT_DOM_NODES = [
+  { nodeId: 1, backendNodeId: 1, nodeName: 'BODY', attributes: [] },
+  { nodeId: 2, parentId: 1, backendNodeId: 2, nodeName: 'MAIN', attributes: [] },
+  { nodeId: 3, parentId: 2, backendNodeId: 3, nodeName: 'BUTTON', attributes: [] },
+];
+const SNAPSHOT_AX_NODES = [
+  { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, backendDOMNodeId: 1, childIds: ['2'] },
+  { nodeId: '2', role: { value: 'main' }, name: { value: '' }, backendDOMNodeId: 2, childIds: ['3'] },
+  { nodeId: '3', role: { value: 'button' }, name: { value: 'Submit' }, backendDOMNodeId: 3, childIds: [] },
+];
+
+function fakeSnapshotContext() {
+  return { newCDPSession: async () => makeFakeCdpSession(SNAPSHOT_DOM_NODES, SNAPSHOT_AX_NODES) };
+}
+
+const mockPage = {
+  isClosed: () => false,
+  url: () => 'about:blank',
+  title: async () => 'Test',
+  context: () => fakeSnapshotContext(),
+};
 const mockCtx = { pages: () => [mockPage] };
 
 function createSnapshotPage() {
@@ -43,22 +78,7 @@ function createSnapshotPage() {
     isClosed: () => false,
     url: () => 'https://example.test',
     title: async () => 'Snapshot Test',
-    evaluate: async (_fn, arg) => {
-      if (arg && typeof arg === 'object' && Array.isArray(arg.testIdAttrs)) {
-        return {};
-      }
-      return {
-        role: 'WebArea',
-        name: '',
-        children: [
-          {
-            role: 'main',
-            name: '',
-            children: [{ role: 'button', name: 'Submit', children: [] }],
-          },
-        ],
-      };
-    },
+    context: () => fakeSnapshotContext(),
   };
 }
 
@@ -71,6 +91,7 @@ function createLabeledScreenshotPage() {
     isClosed: () => false,
     url: () => 'https://example.test',
     title: async () => 'Snapshot Test',
+    context: () => fakeSnapshotContext(),
     screenshot: async (opts) => {
       screenshotCalls.push(opts);
       return screenshotBuffer;
@@ -1349,7 +1370,8 @@ test('screenshotWithAccessibilityLabels runs snapshot and direct screenshot sequ
   const locatorCalls = page.getLocatorCalls();
 
   assert.equal(calls.length, 1);
-  assert.equal(locatorCalls.length, 2);
+  // CDP engine refs only interactive roles → one box (the button) → one locator call.
+  assert.equal(locatorCalls.length, 1);
   assert.deepEqual(calls[0], {
     type: 'jpeg',
     quality: 80,
@@ -1359,9 +1381,10 @@ test('screenshotWithAccessibilityLabels runs snapshot and direct screenshot sequ
   assert.equal(result._bf_type, 'labeled_screenshot');
   assert.equal(result.screenshot.toString('base64'), page.getScreenshotBuffer().toString('base64'));
   assert.ok(result.snapshot.includes('Page: Snapshot Test (https://example.test)'));
-  assert.ok(result.snapshot.includes('- button "Submit" [ref=e2]'));
-  assert.equal(result.labelCount, 2);
-  assert.ok(result.snapshot.includes('- main [ref=e1]'));
+  assert.ok(result.snapshot.includes('- button "Submit" [ref=e1]'));
+  assert.equal(result.labelCount, 1);
+  // main is a structure-only context role: present in full-mode text, never reffed/labeled.
+  assert.ok(result.snapshot.includes('- main:'));
 });
 
 test('buildExecContext exposes callable ref and CDP helpers', async () => {
