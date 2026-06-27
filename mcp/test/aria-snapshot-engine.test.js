@@ -6,6 +6,7 @@ import {
   mapTokenToBackendId, orderFramesParentFirst, buildFrameChain,
   createRefContext, buildScopedNodes, buildSnapshotLines, buildShortRefMap,
   finalizeSnapshotOutput, reconcileRefLocators, isSameOriginFrameSessionError,
+  renderFrameErrors,
 } from '../src/aria-snapshot-engine.js';
 
 // ── fixture builders ─────────────────────────────────────────────────────────
@@ -113,6 +114,59 @@ test('getAriaSnapshot rethrows an UNEXPECTED OOPIF acquisition error for an expl
     () => getAriaSnapshot({ page, frame: subframe, cdp }),
     /Failed to acquire a CDP session for the requested subframe/,
   );
+});
+
+test('renderFrameErrors surfaces a visible warning block (empty when nothing skipped)', () => {
+  assert.equal(renderFrameErrors([]), '');
+  assert.equal(renderFrameErrors(undefined), '');
+  const out = renderFrameErrors([{ selector: '[id="ads"]', frameChain: ['[id="ads"]'], reason: 'subframe CDP session/fetch failed: boom' }]);
+  assert.match(out, /⚠️ 1 subframe\(s\) not stitched/);
+  assert.match(out, /\[id="ads"\]: subframe CDP session\/fetch failed: boom/);
+});
+
+// Drives the REAL full-page walk in getAriaSnapshot (not a reimplementation): a first-level OOPIF
+// whose newCDPSession fails for a NON-same-origin reason must be best-effort skipped (page survives)
+// AND recorded in frameErrors so the loss is visible — Codex Round-2 IMPORTANT fix.
+test('getAriaSnapshot full-page walk records a failed first-level OOPIF in frameErrors (not silent, not fatal)', async () => {
+  const state = {};
+  const mainFrame = { parentFrame: () => null };
+  const ownerHandle = { evaluate: async (_fn, tok) => { state.ownerToken = tok; } };
+  const oopif = {
+    parentFrame: () => mainFrame,
+    frameElement: async () => ownerHandle,
+    locator: () => ({ evaluate: async (_fn, tok) => { state.rootToken = tok; } }),
+  };
+  const page = {
+    mainFrame: () => mainFrame,
+    frames: () => [mainFrame, oopif],
+    context: () => ({ newCDPSession: async () => { throw new Error('Protocol error: No target with given id found'); } }),
+  };
+  const cdp = {
+    send: async (method) => {
+      if (method === 'DOM.getFlattenedDocument') {
+        return { nodes: [
+          dom(1, 1, 'BODY'),
+          dom(2, 2, 'BUTTON', ['data-testid', 'go'], 1),
+          dom(3, 3, 'IFRAME', ['id', 'adframe', 'data-pw-frame-owner', state.ownerToken], 1),
+        ] };
+      }
+      if (method === 'Accessibility.getFullAXTree') {
+        return { nodes: [
+          axRoot(['2', '3']),
+          ax('2', 'button', 'Go', 2),
+          ax('3', 'Iframe', '', 3),
+        ] };
+      }
+      return {};
+    },
+  };
+  const result = await getAriaSnapshot({ page, cdp, interactiveOnly: true });
+  // page survived (main content present) despite the OOPIF failure
+  assert.match(result.snapshot, /button "Go"/);
+  // the failed OOPIF is recorded, not silently dropped
+  assert.equal(result.frameErrors.length, 1);
+  assert.equal(result.frameErrors[0].selector, '[id="adframe"]');
+  assert.match(result.frameErrors[0].reason, /subframe CDP session\/fetch failed/);
 });
 
 // ── Phase 2: frame stitching helpers (pure) ──────────────────────────────────

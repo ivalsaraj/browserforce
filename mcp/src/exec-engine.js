@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import {
   createSmartDiff, parseSearchPattern,
 } from './snapshot.js';
-import { getAriaSnapshot, renderRefLines } from './aria-snapshot-engine.js';
+import { getAriaSnapshot, renderRefLines, renderFrameErrors } from './aria-snapshot-engine.js';
 import { Semaphore, injectA11yClient, showLabels, hideLabels } from './a11y-labels.js';
 import { getCleanHTML } from './clean-html.js';
 import { getPageMarkdown } from './page-markdown.js';
@@ -549,7 +549,8 @@ export function buildExecContext(
     const refTable = result.refs.length > 0
       ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}${r.name ? ` "${r.name}"` : ''}): ${r.locator ?? '(frame-scoped; use locatorForRef)'}`).join('\n')
       : '';
-    const fullSnapshot = `Page: ${title} (${pageUrl})\nRefs: ${result.refs.length} interactive elements\n\n${renderRefLines(result.tree)}${refTable}`;
+    const frameWarning = renderFrameErrors(result.frameErrors);
+    const fullSnapshot = `Page: ${title} (${pageUrl})\nRefs: ${result.refs.length} interactive elements${frameWarning}\n\n${renderRefLines(result.tree)}${refTable}`;
 
     let pageSnapshots = lastSnapshots.get(page);
     if (!(pageSnapshots instanceof Map)) {
@@ -594,8 +595,9 @@ export function buildExecContext(
     const refTable = result.refs.length > 0
       ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}): ${r.locator ?? '(frame-scoped)'}`).join('\n')
       : '';
+    const frameWarning = renderFrameErrors(result.frameErrors);
     return {
-      text: `Page: ${title} (${pageUrl})\nRefs: ${result.refs.length} labeled elements\n\n${renderRefLines(result.tree)}${refTable}`,
+      text: `Page: ${title} (${pageUrl})\nRefs: ${result.refs.length} labeled elements${frameWarning}\n\n${renderRefLines(result.tree)}${refTable}`,
       refs: result.refs,
       page,
     };

@@ -330,6 +330,14 @@ export function renderRefLines(tree) {
   return walk(tree, 0).join('\n');
 }
 
+// Render the full-page walk's skipped-subframe list (getAriaSnapshot `frameErrors`) as a visible
+// warning block so a dropped first-level OOPIF is never silent. Returns '' when nothing was skipped.
+export function renderFrameErrors(frameErrors) {
+  if (!Array.isArray(frameErrors) || frameErrors.length === 0) return '';
+  const lines = frameErrors.map((f) => `  - ${f.selector ?? 'iframe'}: ${f.reason}`);
+  return `\n⚠️ ${frameErrors.length} subframe(s) not stitched into the snapshot (content may be missing — retry, wait, or snapshot the frame explicitly):\n${lines.join('\n')}`;
+}
+
 export function buildDomIndex(nodes) {
   const domById = new Map();
   const domByBackendId = new Map();
@@ -665,8 +673,14 @@ export function isSameOriginFrameSessionError(err) {
  * `frameChain` (iframe selectors top→target) so `locatorForRef` can pierce via `frameLocator`.
  * Explicit `frame`/`locator` keeps Phase-1 single-region behavior (empty frameChain).
  *
- * Returns { snapshot, tree, refs, mainDomNodes }. mainDomNodes is the page session's flattened
- * DOM. refs: { ref, role, name, locator, backendNodeId, frameChain, shortRef }.
+ * Full-page degradation is VISIBLE, never silent: a first-level OOPIF that fails to acquire/fetch
+ * or is empty after retry is best-effort skipped (one flaky/blank subframe must not nuke the whole
+ * page) but recorded in `frameErrors` so callers can see what was dropped and why (and retry, wait,
+ * or scope the frame explicitly for a hard error). Explicit `frame` scope still throws on failure.
+ *
+ * Returns { snapshot, tree, refs, mainDomNodes, frameErrors }. mainDomNodes is the page session's
+ * flattened DOM. refs: { ref, role, name, locator, backendNodeId, frameChain, shortRef }.
+ * frameErrors: [{ selector, frameChain, reason }] (empty unless the full-page walk skipped a subframe).
  */
 export async function getAriaSnapshot({ page, frame, locator, refFilter, interactiveOnly = false, cdp }) {
   if (!cdp) throw new Error('getAriaSnapshot requires a page CDP session (cdp). Pass getCDPSession({ page }).');
@@ -707,6 +721,8 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
   const frameMeta = [];      // { frame, ownerToken, rootToken, iframeSelector?, frameChain? }
   const tagged = [];         // { ownerHandle, frame, rootToken } — attributes to clean up
   const childSessions = [];  // OOPIF sessions owned + detached by the walk
+  const frameErrors = [];    // first-level subframes that could NOT be stitched (full-page walk):
+                             // surfaced in the result so the loss is VISIBLE, never silent.
 
   try {
     // Reconciliation 5: Accessibility.enable is NOT in the relay's INIT_ONLY_METHODS, so it
@@ -775,7 +791,7 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
         }
       }
       const assembled = assembleSnapshot({ axNodes, domNodes, scopeBackendId, interactiveOnly, refFilter, frameChain: [] });
-      return { ...assembled, mainDomNodes: domNodes };
+      return { ...assembled, mainDomNodes: domNodes, frameErrors: [] };
     }
 
     // ── Full page (Phase 2): main tree with iframes as leaves, then stitch each subframe. ──
@@ -807,10 +823,15 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
         childSessions.push(frameCdp);
         await frameCdp.send('Accessibility.enable');
         await frameCdp.send('DOM.enable');
-        // Same empty-AX retry contract as the main session (a child tree can lag); on the
-        // full-page walk an empty/never-ready child is best-effort skipped, not thrown.
+        // Same empty-AX retry contract as the main session (a child tree can lag). On the
+        // full-page walk an empty/never-ready child is best-effort skipped (NOT thrown — a single
+        // blank/pixel cross-origin iframe must not nuke the whole-page snapshot) but is RECORDED
+        // so the omission is visible rather than silent.
         const { domNodes: cDom, axNodes: cAx } = await fetchDomAndAxWithRetry(frameCdp);
-        if (isEmptyAx(cAx)) continue;
+        if (isEmptyAx(cAx)) {
+          frameErrors.push({ selector: meta.iframeSelector, frameChain: meta.frameChain, reason: 'empty accessibility tree after retry (blank, cross-origin-blocked, or still loading)' });
+          continue;
+        }
         ({ nodes: childNodes } = buildScopedNodes({
           axNodes: cAx, domNodes: cDom, interactiveOnly, refFilter,
           frameChain: meta.frameChain, refCtx,
@@ -818,10 +839,14 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
         }));
       } catch (err) {
         // ONLY the genuine same-origin "no separate CDP session" error means we should
-        // re-assemble from the parent session. Any other failure (real OOPIF acquisition
-        // error, frame detach, AX enable failure) is best-effort skipped so one bad frame
-        // never poisons the whole-page snapshot (documented one-level-OOPIF limitation).
-        if (!isSameOriginFrameSessionError(err)) continue;
+        // re-assemble from the parent session. Any OTHER failure (OOPIF target-resolution error,
+        // frame detach, AX/DOM enable failure) is best-effort skipped — hard-throwing here would
+        // let one flaky subframe break the whole-page snapshot — but RECORDED so the loss is
+        // visible (callers can retry, wait, or scope the frame explicitly to get a hard error).
+        if (!isSameOriginFrameSessionError(err)) {
+          frameErrors.push({ selector: meta.iframeSelector, frameChain: meta.frameChain, reason: `subframe CDP session/fetch failed: ${err?.message ?? err}` });
+          continue;
+        }
         // same-origin: re-assemble from the parent session's already-fetched axNodes/domNodes,
         // scoped to the frame's content root, SAME boundary cutoff (nested iframes stay leaves).
         const rootBackendId = rootByToken.get(meta.rootToken)?.backendNodeId;
@@ -839,7 +864,7 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
     const shortRefMap = buildShortRefMap({ refs: refCtx.refs });
     const { snapshot, tree } = finalizeSnapshotOutput(lines, stitched, shortRefMap);
     const refs = reconcileRefLocators(refCtx.refs, tree, shortRefMap);
-    return { snapshot, tree, refs, mainDomNodes: domNodes };
+    return { snapshot, tree, refs, mainDomNodes: domNodes, frameErrors };
   } finally {
     if (scopeApplied && scopeTarget) {
       await scopeTarget.evaluate((el, attr) => el.removeAttribute(attr), scopeAttr).catch(() => {});
