@@ -101,25 +101,11 @@ test('runCode timeout fences async continuations after guarded helper calls', as
 
 This captures the BrowserForce-specific risk: a Playwright call may settle after timeout, and the next statement must not run.
 
-**Step 3: Add a failing regression for synchronous runaway code**
+**Step 3: Leave the synchronous runaway regression for the VM task**
 
-This is the Playwriter wheel we should reuse:
+Do not add or run `runCode('while (true) {}', ...)` while `runCode()` still uses `new Function()`. The current implementation runs that loop on the Node event loop, so the outer `Promise.race` timeout cannot fire and the test process can hang.
 
-```js
-test('runCode timeout interrupts synchronous runaway code', async () => {
-  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
-
-  await assert.rejects(
-    () => runCode('while (true) {}', ctx, 10),
-    /Code execution timed out after 10ms/,
-  );
-
-  const nextResult = await runCode('return "after-sync-timeout";', ctx, 1000);
-  assert.equal(nextResult, 'after-sync-timeout');
-});
-```
-
-This currently hangs or relies on the outer async race in a way that cannot interrupt a CPU-bound loop. After the fix, `node:vm` should stop it.
+Add that regression only in Task 2 after the `vm.runInContext()` path exists, or add it as `test.todo()` here with a comment that it must be enabled after the VM migration.
 
 **Step 4: Run the focused test and confirm failure**
 
@@ -129,7 +115,7 @@ Run:
 node --test /Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engine-plugins.test.js
 ```
 
-Expected before implementation: at least the late timer mutation test fails. The sync runaway test may time out the test process if implemented naively; keep its test timeout small and run it only once the `vm` path is in progress if needed.
+Expected before implementation: the late timer mutation test fails because timed-out async work still mutates state. The guarded async object method test also fails until the handle-fencing task. No pre-VM test should be able to hang the Node process.
 
 **Step 5: Commit**
 
@@ -190,7 +176,39 @@ function normalizeRunError(err, timeoutMs) {
 }
 ```
 
-**Step 4: Run tests**
+**Step 4: Add the synchronous runaway regression now**
+
+Now that `runCode()` enters `vm.runInContext()` before user code runs, add the synchronous timeout regression:
+
+```js
+test('runCode timeout interrupts synchronous runaway code', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+
+  await assert.rejects(
+    () => runCode('while (true) {}', ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  const nextResult = await runCode('return "after-sync-timeout";', ctx, 1000);
+  assert.equal(nextResult, 'after-sync-timeout');
+});
+```
+
+Wrap the `vm.runInContext()` call itself so synchronous VM timeout errors are normalized before the async race is built:
+
+```js
+let userPromise;
+try {
+  userPromise = vm.runInContext(wrapExecuteCode(code), vmContext, {
+    timeout: timeoutMs,
+    displayErrors: true,
+  });
+} catch (err) {
+  throw normalizeRunError(err, timeoutMs);
+}
+```
+
+**Step 5: Run focused tests**
 
 Run:
 
@@ -200,7 +218,17 @@ node --test /Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engine
 
 Expected: the synchronous runaway test passes once VM timeout mapping is correct. The async leak tests still fail until Task 3.
 
-**Step 5: Commit**
+**Step 6: Run full MCP tests for realm safety**
+
+Run:
+
+```bash
+pnpm test:mcp
+```
+
+Expected: all MCP tests pass. This gate belongs here because moving from `new Function()` to `vm.createContext()` changes the execution realm; cross-realm assumptions must be caught at the point the VM migration lands.
+
+**Step 7: Commit**
 
 ```bash
 git add /Users/valsaraj/Documents/projects/browserforce/mcp/src/exec-engine.js /Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engine-plugins.test.js
@@ -351,7 +379,7 @@ git commit -m "fix(mcp): abort execute timers on timeout"
 
 ---
 
-### Task 4: Fence Exposed Async Helpers and Browser Handles
+### Task 4: Fence Exposed Async Helpers and Stored/Returned Browser Handles
 
 **Files:**
 - Modify: `/Users/valsaraj/Documents/projects/browserforce/mcp/src/exec-engine.js`
@@ -379,31 +407,34 @@ function guardAsyncFunction(fn, run) {
 
 This prevents code after a long helper call from continuing once the outer `execute` timeout has fired.
 
-**Step 2: Add targeted proxying instead of a broad object membrane**
+**Step 2: Add targeted handle guarding instead of a broad object membrane**
 
-Avoid an ambitious generic sandbox. Wrap only BrowserForce's exposed async entry points:
+Avoid an ambitious generic sandbox. Playwright `Page`/`BrowserContext` objects are live third-party objects with identity-sensitive behavior. A naive proxy can break getters, private-field access, or comparisons such as `context.pages().includes(page)`.
 
-- `page`
-- `context`
-- helper functions returned from `buildExecContext()`
-- objects returned by those helper calls when they are known Playwright-like handles, if practical
+Guard in this order:
 
-Use a conservative proxy:
+- `state` writes/deletes, so late continuations cannot mutate persistent BrowserForce state.
+- BrowserForce helper functions returned from `buildExecContext()`, so helper calls check the run before and after awaits.
+- Stored handles read from `state`, so `state.page`, `state.locator`, or helper-returned handles from a prior run are not raw escape hatches.
+- Object values returned by guarded helpers when they are Playwright-like handles or BrowserForce helper objects.
+
+Use a conservative guard that wraps object-valued property reads and async function results. If the implementation wraps live `page` or `context`, the proxy must use the raw object as the getter receiver and must preserve identity-sensitive behavior in tests.
 
 ```js
-function guardObjectMethods(target, run, seen = new WeakMap()) {
+function guardObject(target, run, seen = new WeakMap()) {
   if (!target || (typeof target !== 'object' && typeof target !== 'function')) return target;
   if (seen.has(target)) return seen.get(target);
 
   const proxy = new Proxy(target, {
-    get(obj, prop, receiver) {
-      const value = Reflect.get(obj, prop, receiver);
-      if (typeof value !== 'function') return value;
-      return guardAsyncFunction(value.bind(obj), run);
-    },
-    set(obj, prop, value, receiver) {
+    get(obj, prop) {
       run.throwIfAborted();
-      return Reflect.set(obj, prop, value, receiver);
+      const value = Reflect.get(obj, prop, obj);
+      if (typeof value === 'function') return guardAsyncFunction(value.bind(obj), run, seen);
+      return guardObject(value, run, seen);
+    },
+    set(obj, prop, value) {
+      run.throwIfAborted();
+      return Reflect.set(obj, prop, value, obj);
     },
     deleteProperty(obj, prop) {
       run.throwIfAborted();
@@ -416,25 +447,61 @@ function guardObjectMethods(target, run, seen = new WeakMap()) {
 }
 ```
 
-Use it for `state`, `page`, and `context`. Do not proxy constructors like `URL`, `URLSearchParams`, `Buffer`, `TextEncoder`, or `TextDecoder`.
+Use it for `state` and for stored/returned handles. Do not proxy constructors like `URL`, `URLSearchParams`, `Buffer`, `TextEncoder`, or `TextDecoder`.
+
+Treat direct top-level `page` and `context` carefully:
+
+- Start by leaving them raw if the state/helper guards satisfy the tests and docs guarantee.
+- If direct `page`/`context` method fencing is required to satisfy the browser-level repro, wrap them with the same guard but add identity/regression tests first.
+- Never use `Reflect.get(obj, prop, receiver)` with the proxy as receiver for Playwright objects; use the raw object receiver to avoid private-field getter failures.
 
 **Step 3: Guard built-in helpers in the execute context**
 
 When building `guardedExecCtx`, wrap function values:
 
 ```js
+const seen = new WeakMap();
 for (const [key, value] of Object.entries(execCtx)) {
   if (key === 'state' || key === 'page' || key === 'context') continue;
-  guardedExecCtx[key] = typeof value === 'function' ? guardAsyncFunction(value, run) : value;
+  guardedExecCtx[key] = typeof value === 'function' ? guardAsyncFunction(value, run, seen) : value;
 }
-guardedExecCtx.state = guardObjectMethods(execCtx.state, run);
-guardedExecCtx.page = guardObjectMethods(execCtx.page, run);
-guardedExecCtx.context = guardObjectMethods(execCtx.context, run);
+guardedExecCtx.state = guardObject(execCtx.state, run, seen);
+guardedExecCtx.page = execCtx.page;
+guardedExecCtx.context = execCtx.context;
 ```
 
 Be careful with `console`: keep the existing execute console shim usable, but guard method calls the same way or leave it unproxied if tests show proxying changes formatting.
 
-**Step 4: Update polling helpers to observe cancellation directly**
+Update `guardAsyncFunction()` so returned handles cannot escape raw:
+
+```js
+function guardAsyncFunction(fn, run, seen) {
+  return function guardedFunction(...args) {
+    run.throwIfAborted();
+    const value = fn.apply(this, args);
+    if (!value || typeof value.then !== 'function') {
+      run.throwIfAborted();
+      return guardObject(value, run, seen);
+    }
+    return value.then((resolved) => {
+      run.throwIfAborted();
+      return guardObject(resolved, run, seen);
+    });
+  };
+}
+```
+
+**Step 4: Add handle-guard regression tests**
+
+Add tests to `/Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engine-plugins.test.js` for:
+
+- `state.page` from a prior run is guarded when read in a timed-out run.
+- A helper-returned page/locator-like object is guarded after await.
+- If `page`/`context` are wrapped, `context.pages().includes(page)` or an equivalent identity check still behaves as expected.
+
+The first two tests are required. The identity test is required only if direct `page`/`context` proxying is implemented.
+
+**Step 5: Update polling helpers to observe cancellation directly**
 
 Modify these helpers to accept or close over `executeSignal` / `throwIfExecutionAborted` where they wait:
 
@@ -458,9 +525,30 @@ function abortableDelay(ms, signal) {
 }
 ```
 
+Remove the abort listener when the timer resolves or rejects:
+
+```js
+function abortableDelay(ms, signal) {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    const timerId = globalThis.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const abort = () => {
+      globalThis.clearTimeout(timerId);
+      cleanup();
+      reject(signal.reason);
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+```
+
 Use this only inside BrowserForce helpers. User snippets still receive the run-scoped `setTimeout`.
 
-**Step 5: Run focused tests**
+**Step 6: Run focused tests**
 
 Run:
 
@@ -470,7 +558,7 @@ node --test /Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engine
 
 Expected: all new timeout lifecycle tests pass.
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```bash
 git add /Users/valsaraj/Documents/projects/browserforce/mcp/src/exec-engine.js /Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engine-plugins.test.js
@@ -558,6 +646,8 @@ Do not overpromise impossible cancellation of a Chrome action that already reach
 ```md
 An `execute` timeout is a cancellation boundary for BrowserForce-controlled continuations: run-scoped timers, helper polling loops, and guarded follow-up calls stop observing the old run after timeout. A browser action already delivered to Chrome before timeout may still have taken effect, so retry code should observe the page before issuing more mutations.
 ```
+
+Also document the JavaScript limitation plainly: if a snippet is suspended on a Promise whose resolver was cancelled after timeout, that abandoned continuation may remain pending in memory until process cleanup, but it no longer has a BrowserForce-controlled path to mutate state or issue guarded helper follow-up work.
 
 **Step 2: Add a short implementation note if needed**
 
@@ -681,4 +771,3 @@ If no changes were needed, do not create an empty commit.
 - Do not add dependencies such as `acorn`; Playwriter uses it for auto-return parsing, not timeout cancellation.
 - Do not move Playwright execution into a worker thread. Playwright `Page`/`BrowserContext` handles are not transferable, and reconnecting inside a worker would be a larger architecture change.
 - Do not promise that an already-sent Chrome/CDP command can be rolled back. The fix is to stop late BrowserForce continuations and future helper calls after timeout.
-
