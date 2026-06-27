@@ -71,10 +71,14 @@ The test should fail before implementation because the exposed `setTimeout` is t
 
 **Step 2: Add a failing regression for guarded async object methods**
 
-Add a fake page method that resolves after the outer timeout, then tries to mutate state:
+Add a fake page method that resolves after the outer timeout, then tries to mutate state.
+Call it through a **stored handle** (`state.page`) — not the top-level `page` — because the
+implementation (Task 4) intentionally leaves top-level `page`/`context` raw and guards `state`,
+BrowserForce helpers, and stored/returned handles. Calling through `state.page` keeps this
+regression consistent with that decision:
 
 ```js
-test('runCode timeout fences async continuations after guarded helper calls', async () => {
+test('runCode timeout fences async continuations after a stored-handle call', async () => {
   const slowPage = {
     isClosed: () => false,
     url: () => 'about:blank',
@@ -85,21 +89,26 @@ test('runCode timeout fences async continuations after guarded helper calls', as
     },
   };
   const ctx = buildExecContext(slowPage, { pages: () => [slowPage] }, {}, {}, {});
+  ctx.state.page = slowPage; // stored handle assigned by a prior step
 
   await assert.rejects(
     () => runCode(`
-      await page.delayed();
-      state.leakedAfterGuardedMethod = true;
+      await state.page.delayed();
+      state.leakedAfterStoredHandle = true;
     `, ctx, 10),
     /Code execution timed out after 10ms/,
   );
 
   await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
-  assert.equal(ctx.state.leakedAfterGuardedMethod, undefined);
+  assert.equal(ctx.state.leakedAfterStoredHandle, undefined);
 });
 ```
 
-This captures the BrowserForce-specific risk: a Playwright call may settle after timeout, and the next statement must not run.
+This captures the BrowserForce-specific risk: a Playwright call reached through a stored handle
+may settle after timeout, and the next statement must not run. The observable leak (`state` write)
+is blocked by the guarded `state` proxy, and the continuation after `state.page.delayed()` is
+blocked by the guarded handle — both land in Task 4. Top-level `page` stays raw, so do NOT write
+this regression against `page.delayed()` directly.
 
 **Step 3: Leave the synchronous runaway regression for the VM task**
 
@@ -360,6 +369,14 @@ const guardedExecCtx = {
 
 Use `executeSignal` as the public name for advanced helpers. It is intentionally additive and does not change existing snippets.
 
+Because `executeSignal` and `throwIfExecutionAborted` now become part of the exposed execute
+context, add both names to the `reservedContextNames` set in `buildExecContext()`
+(`mcp/src/exec-engine.js`, alongside `setTimeout`/`clearTimeout`/`fetch`/etc.). Otherwise a plugin
+helper named `executeSignal`/`throwIfExecutionAborted` would be accepted, then silently overridden
+in `guardedExecCtx`, with no collision warning. In `mcp/test/exec-engine-plugins.test.js`, add a
+collision assertion mirroring the existing "built-in helpers always win over plugin helpers"
+test so a plugin cannot shadow these names.
+
 **Step 5: Run focused tests**
 
 Run:
@@ -420,15 +437,33 @@ Guard in this order:
 
 Use a conservative guard that wraps object-valued property reads and async function results. If the implementation wraps live `page` or `context`, the proxy must use the raw object as the getter receiver and must preserve identity-sensitive behavior in tests.
 
+**A guard predicate is mandatory, not optional.** A recursive proxy that wraps *every* object
+breaks the `formatResult()` contract (`mcp/src/exec-engine.js`): `Buffer.isBuffer(proxiedBuffer)`
+returns `false`, and the `_bf_type === 'labeled_screenshot'` sentinel / its `.screenshot` Buffer
+must survive untouched. Gate `guardObject()` on `shouldGuardObject(value)` so it only wraps
+guardable targets (`state`, BrowserForce helpers, Playwright-like handles, and functions) and
+skips value types that must stay raw:
+
 ```js
+function shouldGuardObject(value) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  if (typeof value === 'function') return true;                  // guard methods so calls observe the run
+  if (Buffer.isBuffer(value)) return false;                      // preserve Buffer.isBuffer(result) in formatResult
+  if (value._bf_type === 'labeled_screenshot') return false;     // preserve the labeled-screenshot sentinel contract
+  if (value instanceof URL || value instanceof URLSearchParams) return false;
+  if (value instanceof TextEncoder || value instanceof TextDecoder) return false;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return false; // typed arrays / DataView
+  return true;
+}
+
 function guardObject(target, run, seen = new WeakMap()) {
-  if (!target || (typeof target !== 'object' && typeof target !== 'function')) return target;
+  if (!shouldGuardObject(target)) return target;
   if (seen.has(target)) return seen.get(target);
 
   const proxy = new Proxy(target, {
     get(obj, prop) {
       run.throwIfAborted();
-      const value = Reflect.get(obj, prop, obj);
+      const value = Reflect.get(obj, prop, obj); // raw obj as receiver — never the proxy (private-field safe)
       if (typeof value === 'function') return guardAsyncFunction(value.bind(obj), run, seen);
       return guardObject(value, run, seen);
     },
@@ -447,7 +482,12 @@ function guardObject(target, run, seen = new WeakMap()) {
 }
 ```
 
-Use it for `state` and for stored/returned handles. Do not proxy constructors like `URL`, `URLSearchParams`, `Buffer`, `TextEncoder`, or `TextDecoder`.
+Use it for `state` and for stored/returned handles. The `shouldGuardObject()` skips above mean
+that returning a `Buffer`, the labeled-screenshot sentinel, a `URL`/`URLSearchParams`, or a typed
+array from a guarded helper still flows through `formatResult()` unchanged. Plain JSON-ish result
+objects may still be proxied, which is harmless because they only reach `JSON.stringify` — but the
+binary/sentinel/URL types above must never be proxied. Do not proxy the constructors `URL`,
+`URLSearchParams`, `Buffer`, `TextEncoder`, or `TextDecoder` either (they stay raw in the context).
 
 Treat direct top-level `page` and `context` carefully:
 
@@ -497,9 +537,15 @@ Add tests to `/Users/valsaraj/Documents/projects/browserforce/mcp/test/exec-engi
 
 - `state.page` from a prior run is guarded when read in a timed-out run.
 - A helper-returned page/locator-like object is guarded after await.
+- **`shouldGuardObject` / `formatResult` contract survival (required):** a successful (non-timed-out)
+  run that returns a `Buffer` keeps `Buffer.isBuffer(result) === true`, and a run that returns the
+  `{ _bf_type: 'labeled_screenshot', screenshot: Buffer, ... }` sentinel still has a real `Buffer`
+  at `.screenshot` (i.e. `formatResult()` emits the image content, not a JSON dump). Assert that
+  `shouldGuardObject(buffer) === false` and `shouldGuardObject(sentinel) === false` if the predicate
+  is exported, otherwise assert through `formatResult(await runCode(...))`.
 - If `page`/`context` are wrapped, `context.pages().includes(page)` or an equivalent identity check still behaves as expected.
 
-The first two tests are required. The identity test is required only if direct `page`/`context` proxying is implemented.
+The first three tests are required. The identity test is required only if direct `page`/`context` proxying is implemented.
 
 **Step 5: Update polling helpers to observe cancellation directly**
 
@@ -509,27 +555,21 @@ Modify these helpers to accept or close over `executeSignal` / `throwIfExecution
 - `waitForPageLoad` wrapper inside `buildExecContext()`
 - `getBrowserforcePageForTab()`
 
-Add a shared private delay helper:
+Add a shared private delay helper. It must always reject with a real `Error` — never a bare
+`undefined` — because `signal.reason` is only guaranteed to be set when the run controller aborts
+with its `CodeExecutionTimeoutError`. Anything else that aborts the signal without a reason must
+still reject with a meaningful error, so derive the rejection through an `abortReason()` fallback
+and always remove the abort listener on resolve or reject:
 
 ```js
-function abortableDelay(ms, signal) {
-  if (signal?.aborted) return Promise.reject(signal.reason);
-  return new Promise((resolve, reject) => {
-    const timerId = globalThis.setTimeout(resolve, ms);
-    const abort = () => {
-      globalThis.clearTimeout(timerId);
-      reject(signal.reason);
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-  });
+function abortReason(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error('Execution aborted before its scheduled delay completed');
 }
-```
 
-Remove the abort listener when the timer resolves or rejects:
-
-```js
 function abortableDelay(ms, signal) {
-  if (signal?.aborted) return Promise.reject(signal.reason);
+  if (signal?.aborted) return Promise.reject(abortReason(signal));
   return new Promise((resolve, reject) => {
     const cleanup = () => signal?.removeEventListener('abort', abort);
     const timerId = globalThis.setTimeout(() => {
@@ -539,12 +579,16 @@ function abortableDelay(ms, signal) {
     const abort = () => {
       globalThis.clearTimeout(timerId);
       cleanup();
-      reject(signal.reason);
+      reject(abortReason(signal));
     };
     signal?.addEventListener('abort', abort, { once: true });
   });
 }
 ```
+
+In normal operation `signal.reason` is the `CodeExecutionTimeoutError` set by `createRunController()`,
+so `abortReason()` returns it unchanged and the MCP layer still treats the rejection as a timeout
+(no reset hint). The fallback `Error` is purely defensive for an abort with no reason.
 
 Use this only inside BrowserForce helpers. User snippets still receive the run-scoped `setTimeout`.
 
@@ -632,6 +676,7 @@ git commit -m "test(mcp): preserve execute timeout contract at callers"
 - Modify: `/Users/valsaraj/Documents/projects/browserforce/docs/BROWSERFORCE_AGENT.md`
 - Modify: `/Users/valsaraj/Documents/projects/browserforce/docs/USE_CASES.md` if execute timeout behavior is described there
 - Modify: `/Users/valsaraj/Documents/projects/browserforce/AGENTS.md` only if a new durable gotcha needs to be added
+- Inspect: `/Users/valsaraj/Documents/projects/browserforce/mcp/src/help-docs.js` — the `execute`/`help` tool descriptions surfaced to agents may describe timeout behavior and must not claim timeout is merely a late error response
 
 **Step 1: Add user-facing behavior docs**
 
@@ -669,7 +714,9 @@ Run:
 rg -n "timeout|waitForPageLoad|runCode|executeSignal|throwIfExecutionAborted" /Users/valsaraj/Documents/projects/browserforce/docs /Users/valsaraj/Documents/projects/browserforce/AGENTS.md /Users/valsaraj/Documents/projects/browserforce/mcp/src
 ```
 
-Expected: no stale claims that timeout is merely a late error response.
+The `mcp/src` path intentionally covers `mcp/src/help-docs.js` (the in-product `execute`/`help`
+tool copy). Expected: no stale claims that timeout is merely a late error response — including in
+`help-docs.js`.
 
 **Step 4: Commit**
 
@@ -771,3 +818,12 @@ If no changes were needed, do not create an empty commit.
 - Do not add dependencies such as `acorn`; Playwriter uses it for auto-return parsing, not timeout cancellation.
 - Do not move Playwright execution into a worker thread. Playwright `Page`/`BrowserContext` handles are not transferable, and reconnecting inside a worker would be a larger architecture change.
 - Do not promise that an already-sent Chrome/CDP command can be rolled back. The fix is to stop late BrowserForce continuations and future helper calls after timeout.
+
+---
+
+## Post-Implementation Amendments
+
+_Auto-applied after Codex code-review (gpt-5.5, approved round 3). These are plan gaps surfaced by review/runtime evidence, not implementation errors._
+
+- **Documentation must scope the guarantee, not say "drives Chrome".** Task 6's "phrase the guarantee narrowly / do not overpromise" intent needed to be enforced literally in every surface. The first implementation wording ("a timed-out snippet stops driving Chrome") was tightened across `AGENTS.md`, `docs/BROWSERFORCE_AGENT.md`, and the in-product `mcp/src/help-docs.js` (`errors` section) to "stops issuing BrowserForce-controlled work" — because top-level `page`/`context` are deliberately raw (Task 4 Step 2), a continuation resuming after awaiting a raw top-level handle can still issue one further Chrome command by design. Root cause: the plan stated the narrow-phrasing rule but did not flag the specific overclaim verb, and `help-docs.js` is an easy-to-miss third surface.
+- **New documented limit: synchronous CPU loop after an `await`.** `vm.runInContext(..., { timeout })` only bounds the synchronous window up to the first `await`. A CPU-bound loop scheduled after an `await` (e.g. `await Promise.resolve(); while (true) {}`) runs as a microtask the vm `timeout` does not bound and can block the event loop so the outer abort timer never fires. This is inherent to the cooperative-cancellation model (worker isolation is a Non-Goal) and is now documented in `AGENTS.md` + `docs/BROWSERFORCE_AGENT.md`. Codex proposed `vm.createContext(..., { microtaskMode: 'afterEvaluate' })`; a runtime probe disproved it — `afterEvaluate` makes legitimate host-promise awaits (every real `await page.*()`) never resume and time out, so it is explicitly recorded as NOT a fix. Root cause: the plan's vm-timeout step implicitly assumed the synchronous timeout covered all CPU runaways.

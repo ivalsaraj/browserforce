@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import vm from 'node:vm';
 import {
   createSmartDiff, parseSearchPattern,
 } from './snapshot.js';
@@ -331,7 +332,7 @@ const FILTERED_EXTENSIONS = ['.gif', '.ico', '.cur', '.woff', '.woff2', '.ttf', 
 const STUCK_THRESHOLD_MS = 10000;
 const SLOW_RESOURCE_THRESHOLD_MS = 3000;
 
-export async function smartWaitForPageLoad(page, timeout, pollInterval = 100, minWait = 500) {
+export async function smartWaitForPageLoad(page, timeout, pollInterval = 100, minWait = 500, { signal } = {}) {
   const startTime = Date.now();
   let lastReadyState = '';
   let lastPendingRequests = [];
@@ -383,7 +384,7 @@ export async function smartWaitForPageLoad(page, timeout, pollInterval = 100, mi
     // page may not be ready for evaluate yet
   }
 
-  await new Promise((r) => globalThis.setTimeout(r, minWait));
+  await abortableDelay(minWait, signal);
 
   while (Date.now() - startTime < timeout) {
     try {
@@ -403,7 +404,7 @@ export async function smartWaitForPageLoad(page, timeout, pollInterval = 100, mi
         waitTimeMs: Date.now() - startTime, timedOut: false,
       };
     }
-    await new Promise((r) => globalThis.setTimeout(r, pollInterval));
+    await abortableDelay(pollInterval, signal);
   }
 
   return {
@@ -616,7 +617,7 @@ export function buildExecContext(
   };
 
   const waitForPageLoad = (opts = {}) =>
-    smartWaitForPageLoad(activePage(), opts.timeout ?? 30000);
+    smartWaitForPageLoad(activePage(), opts.timeout ?? 30000, undefined, undefined, { signal: opts.signal });
 
   const getLogs = ({ count } = {}) => {
     if (!consoleLogs || !setupConsoleCapture) return [];
@@ -650,6 +651,7 @@ export function buildExecContext(
     url,
     manualOnly = true,
     timeoutMs = ATTACHED_PAGE_LOOKUP_TIMEOUT_MS,
+    signal,
   } = {}) => {
     const status = await getBrowserforceStatus();
     const tabs = manualOnly ? status?.manualAttachedTabs : status?.attachedTabs;
@@ -672,7 +674,7 @@ export function buildExecContext(
     do {
       const page = ctx.pages().find((candidate) => candidate.url() === requestedTab.url);
       if (page) return page;
-      await new Promise((resolve) => globalThis.setTimeout(resolve, ATTACHED_PAGE_LOOKUP_POLL_MS));
+      await abortableDelay(ATTACHED_PAGE_LOOKUP_POLL_MS, signal);
     } while (Date.now() < deadline);
 
     throw new Error(
@@ -828,6 +830,8 @@ export function buildExecContext(
     'clearTimeout',
     'TextEncoder',
     'TextDecoder',
+    'executeSignal',
+    'throwIfExecutionAborted',
   ]);
 
   // Wrap plugin helpers to auto-inject (page, ctx, state) as first three args
@@ -861,17 +865,273 @@ export function buildExecContext(
   };
 }
 
+function wrapExecuteCode(code) {
+  return `(async function() {\n${code}\n})()`;
+}
+
+// vm.runInContext's synchronous timeout throws ERR_SCRIPT_EXECUTION_TIMEOUT;
+// map it back to BrowserForce's CodeExecutionTimeoutError so the MCP boundary
+// keeps the terse, no-reset-hint timeout response.
+function normalizeRunError(err, timeoutMs) {
+  if (err?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' || /Script execution timed out/.test(String(err?.message || ''))) {
+    return new CodeExecutionTimeoutError(timeoutMs);
+  }
+  return err;
+}
+
+// Per-run cancellation state. abort() aborts the signal with a
+// CodeExecutionTimeoutError reason and cancels every still-pending run timer, so
+// continuations suspended on a run timer never resume after the timeout fires.
+function createRunController(timeoutMs) {
+  const controller = new AbortController();
+  const pendingTimers = new Set();
+  let hasTimedOut = false;
+
+  const abort = () => {
+    hasTimedOut = true;
+    controller.abort(new CodeExecutionTimeoutError(timeoutMs));
+    for (const timerId of pendingTimers) globalThis.clearTimeout(timerId);
+    pendingTimers.clear();
+  };
+
+  const throwIfAborted = () => {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason || new CodeExecutionTimeoutError(timeoutMs);
+    }
+  };
+
+  return { signal: controller.signal, pendingTimers, abort, throwIfAborted, get hasTimedOut() { return hasTimedOut; } };
+}
+
+// Run-scoped setTimeout/clearTimeout exposed to user snippets. A scheduled
+// callback never fires after the run aborts, and pending timers are tracked so
+// abort() can clear them.
+function createRunTimers(run) {
+  const setTimeoutForRun = (callback, delay = 0, ...args) => {
+    run.throwIfAborted();
+    const timerId = globalThis.setTimeout(() => {
+      run.pendingTimers.delete(timerId);
+      if (run.signal.aborted) return;
+      callback(...args);
+    }, delay);
+    run.pendingTimers.add(timerId);
+    return timerId;
+  };
+
+  const clearTimeoutForRun = (timerId) => {
+    run.pendingTimers.delete(timerId);
+    return globalThis.clearTimeout(timerId);
+  };
+
+  return { setTimeout: setTimeoutForRun, clearTimeout: clearTimeoutForRun };
+}
+
+// Reject value for an aborted run-scoped delay. signal.reason is the
+// CodeExecutionTimeoutError set by createRunController(); the fallback Error is
+// purely defensive for an abort with no reason.
+function abortReason(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error('Execution aborted before its scheduled delay completed');
+}
+
+// setTimeout-style delay that rejects (and removes its listener) the moment the
+// run aborts, so BrowserForce polling loops stop promptly on timeout. User
+// snippets still receive the run-scoped setTimeout, not this.
+function abortableDelay(ms, signal) {
+  if (signal?.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    const timerId = globalThis.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const abort = () => {
+      globalThis.clearTimeout(timerId);
+      cleanup();
+      reject(abortReason(signal));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+// Guard an exposed function so a call cannot start, and its awaited result cannot
+// be used, once the run has aborted. Results are re-guarded so handles reached
+// through a helper stay fenced too.
+function guardAsyncFunction(fn, run, seen) {
+  return function guardedFunction(...args) {
+    run.throwIfAborted();
+    const value = fn.apply(this, args);
+    if (!value || typeof value.then !== 'function') {
+      run.throwIfAborted();
+      return guardObject(value, run, seen);
+    }
+    return value.then((resolved) => {
+      run.throwIfAborted();
+      return guardObject(resolved, run, seen);
+    });
+  };
+}
+
+// Maps every guard proxy back to its raw target so a proxy is never re-wrapped or
+// persisted. Module-scoped WeakMap so a proxy created in one run can still be
+// unwrapped in a later run; entries are GC'd once the proxy is unreachable.
+const GUARD_TARGET = new WeakMap();
+function unwrapGuard(value) {
+  while (value && GUARD_TARGET.has(value)) value = GUARD_TARGET.get(value);
+  return value;
+}
+
+// A value is "behavioral" — worth fencing — when it can act on Chrome or carry
+// methods: a class instance (Playwright Page/Locator/Response have a custom
+// prototype) or a plain object/array exposing a callable own property (the mock
+// handles used in tests, helper-returned handle objects). Plain data — POJOs and
+// arrays of values like pluginCatalog()/getBrowserforceStatus() results — is left
+// raw so deepStrictEqual and JSON.stringify see the original value, not a proxy.
+function hasGuardableBehavior(value) {
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== null && proto !== Object.prototype && proto !== Array.prototype) return true;
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && typeof descriptor.value === 'function') return true;
+  }
+  return false;
+}
+
+// Only guard values that can drive Chrome or mutate persistent state: state,
+// BrowserForce helpers, Playwright-like handles, and functions. Binary/result
+// value types and plain data stay raw so formatResult()'s Buffer/labeled-screenshot
+// contract and plain JSON/deepStrictEqual results survive untouched.
+function shouldGuardObject(value) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  if (typeof value === 'function') return true;
+  if (Buffer.isBuffer(value)) return false;
+  if (value._bf_type === 'labeled_screenshot') return false;
+  if (value instanceof URL || value instanceof URLSearchParams) return false;
+  if (value instanceof TextEncoder || value instanceof TextDecoder) return false;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return false;
+  return hasGuardableBehavior(value);
+}
+
+// Targeted guard (not a broad membrane). Reads/writes/deletes check the run, and
+// object-valued reads + method results are re-guarded. Uses the raw object as the
+// receiver so Playwright private-field getters keep working. `force` always wraps
+// (used for the persistent `state` object, which is plain-shaped yet must be
+// fenced); nested reads re-enter without force and defer to shouldGuardObject.
+// Writes store the unwrapped value so a timed-out run never persists a run-bound
+// proxy onto state and poison the next run that reads it.
+function guardObject(target, run, seen = new WeakMap(), { force = false } = {}) {
+  target = unwrapGuard(target);
+  if (force) {
+    if (!target || (typeof target !== 'object' && typeof target !== 'function')) return target;
+  } else if (!shouldGuardObject(target)) {
+    return target;
+  }
+  if (seen.has(target)) return seen.get(target);
+
+  const proxy = new Proxy(target, {
+    get(obj, prop) {
+      run.throwIfAborted();
+      const value = Reflect.get(obj, prop, obj);
+      if (typeof value === 'function') return guardAsyncFunction(value.bind(obj), run, seen);
+      return guardObject(value, run, seen);
+    },
+    set(obj, prop, value) {
+      run.throwIfAborted();
+      return Reflect.set(obj, prop, unwrapGuard(value), obj);
+    },
+    deleteProperty(obj, prop) {
+      run.throwIfAborted();
+      return Reflect.deleteProperty(obj, prop);
+    },
+  });
+
+  seen.set(target, proxy);
+  GUARD_TARGET.set(proxy, target);
+  return proxy;
+}
+
+// Exposed built-in constructors/utilities that must stay raw: wrapping a
+// constructor breaks `new URL(...)` and drops static methods like Buffer.from.
+const RAW_CONTEXT_BUILTINS = new Set([
+  'URL', 'URLSearchParams', 'Buffer', 'TextEncoder', 'TextDecoder', 'setTimeout', 'clearTimeout',
+]);
+
 export async function runCode(code, execCtx, timeoutMs) {
-  const keys = Object.keys(execCtx);
-  const vals = Object.values(execCtx);
-  const fn = new Function(...keys, `return (async function() {\n${code}\n})()`);
+  const run = createRunController(timeoutMs);
+  const runTimers = createRunTimers(run);
+  const seen = new WeakMap();
+
+  // Guard exposed BrowserForce helpers + persistent state; keep top-level page and
+  // context raw (identity-sensitive Playwright handles), and keep exposed built-in
+  // constructors/utilities raw. Stored handles read through state are guarded
+  // lazily by the state proxy.
+  const guardedExecCtx = {};
+  for (const [key, value] of Object.entries(execCtx)) {
+    if (key === 'state' || key === 'page' || key === 'context') continue;
+    guardedExecCtx[key] = (typeof value === 'function' && !RAW_CONTEXT_BUILTINS.has(key))
+      ? guardAsyncFunction(value, run, seen)
+      : value;
+  }
+  guardedExecCtx.state = guardObject(execCtx.state, run, seen, { force: true });
+  guardedExecCtx.page = execCtx.page;
+  guardedExecCtx.context = execCtx.context;
+
+  // Polling helpers observe this run's cancellation signal by default so their
+  // internal wait loops stop promptly on timeout (still overridable per call).
+  if (typeof execCtx.waitForPageLoad === 'function') {
+    guardedExecCtx.waitForPageLoad = guardAsyncFunction(
+      (opts = {}) => execCtx.waitForPageLoad({ signal: run.signal, ...opts }),
+      run, seen,
+    );
+  }
+  if (typeof execCtx.getBrowserforcePageForTab === 'function') {
+    guardedExecCtx.getBrowserforcePageForTab = guardAsyncFunction(
+      (opts = {}) => execCtx.getBrowserforcePageForTab({ signal: run.signal, ...opts }),
+      run, seen,
+    );
+  }
+
+  // Run-scoped timers + cancellation handle override any same-named entries.
+  guardedExecCtx.setTimeout = runTimers.setTimeout;
+  guardedExecCtx.clearTimeout = runTimers.clearTimeout;
+  guardedExecCtx.executeSignal = run.signal;
+  guardedExecCtx.throwIfExecutionAborted = run.throwIfAborted;
+
+  const vmContext = vm.createContext(guardedExecCtx);
+
+  let userPromise;
+  try {
+    userPromise = vm.runInContext(wrapExecuteCode(code), vmContext, {
+      timeout: timeoutMs,
+      displayErrors: true,
+    });
+  } catch (err) {
+    run.abort();
+    throw normalizeRunError(err, timeoutMs);
+  }
+
   let result;
-  const nativeSetTimeout = globalThis.setTimeout;
-  await Promise.race([
-    (async () => { result = await fn(...vals); })(),
-    new Promise((_, reject) =>
-      nativeSetTimeout(() => reject(new CodeExecutionTimeoutError(timeoutMs)), timeoutMs)),
-  ]);
+  let isComplete = false;
+  let timeoutId;
+  try {
+    await Promise.race([
+      userPromise.then((value) => {
+        run.throwIfAborted();
+        result = value;
+        isComplete = true;
+      }),
+      new Promise((_, reject) => {
+        timeoutId = globalThis.setTimeout(() => {
+          run.abort();
+          reject(new CodeExecutionTimeoutError(timeoutMs));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) globalThis.clearTimeout(timeoutId);
+    if (!isComplete) run.abort();
+  }
   return result;
 }
 

@@ -151,6 +151,21 @@ describe('CLI', () => {
     // Should complete well under 10s — if teardown leaks, it would hang
     assert.ok(elapsed < 10000, `CLI took ${elapsed}ms — possible teardown leak`);
   });
+
+  it('-e surfaces a timeout error and exits non-zero for runaway code', async () => {
+    // Shares the same runCode() boundary as the MCP server: a runaway snippet
+    // must be stopped by the vm timeout and surfaced as a timeout error, not hang.
+    try {
+      await exec('node', ['bin.js', '-e', 'while (true) {}', '--timeout', '300'], {
+        env: { ...process.env, BF_CDP_URL: cdpUrl },
+        timeout: 15000,
+      });
+      assert.fail('runaway execute should have exited non-zero');
+    } catch (err) {
+      assert.notEqual(err.code, 0);
+      assert.match(err.stderr, /timed out after 300ms/);
+    }
+  });
 });
 
 describe('CLI plugin commands', () => {

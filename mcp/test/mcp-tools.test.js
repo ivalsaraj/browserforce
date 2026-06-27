@@ -436,6 +436,57 @@ describe('Tool Definitions', () => {
     assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
   });
 
+  it('execute catches CodeExecutionTimeoutError and omits the reset hint on timeout', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+
+    assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'execute should detect timeout errors');
+    assert.ok(execHandler.includes("const hint = isTimeout ? ''"), 'timeout errors should produce an empty hint (no reset suggestion)');
+    assert.ok(
+      execHandler.indexOf("isTimeout ? ''") < execHandler.indexOf('[HINT: Call reset only'),
+      'the reset hint must live in the non-timeout branch only'
+    );
+  });
+
+  it('execute routes code through the shared runCode boundary with no extra timeout race', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+
+    assert.ok(execHandler.includes('await runCode(code, execCtx, timeout)'), 'execute should delegate to the shared runCode boundary');
+    assert.ok(!execHandler.includes('Promise.race'), 'execute must not add its own timeout race around runCode');
+  });
+
+  it('runCode owns the single timeout boundary that aborts the run', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('export async function runCode'), 'runCode should be the exported execution entry point');
+    assert.ok(source.includes('vm.runInContext'), 'runCode should run user code inside the vm timeout boundary');
+    assert.ok(source.includes('run.abort()'), 'runCode should abort the run when the timeout fires');
+  });
+
+  it('CLI one-shot execute shares the runCode boundary without its own timeout race', () => {
+    const source = readFileSync(
+      join(MCP_ROOT, '../bin.js'),
+      'utf8'
+    );
+    const execHandler = source.slice(
+      source.indexOf('async function cmdExecute'),
+      source.indexOf('async function cmdServe'),
+    );
+
+    assert.ok(execHandler.includes('await runCode(code, execCtx, timeoutMs)'), 'CLI execute should delegate to the shared runCode boundary');
+    assert.ok(!execHandler.includes('Promise.race'), 'CLI execute must not add its own timeout race around runCode');
+  });
+
   it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),

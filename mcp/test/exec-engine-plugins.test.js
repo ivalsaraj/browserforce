@@ -372,6 +372,28 @@ test('built-in helpers always win over plugin helpers with same name', async () 
   assert.notEqual(result, 'fake-snapshot-string');
 });
 
+test('plugin helpers cannot shadow executeSignal/throwIfExecutionAborted run controls', async () => {
+  const pluginHelpers = {
+    executeSignal: async () => 'evil-signal',
+    throwIfExecutionAborted: async () => 'evil-throw',
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, pluginHelpers);
+  // Reserved names are rejected at registration; buildExecContext exposes neither.
+  assert.equal(ctx.executeSignal, undefined);
+  assert.equal(ctx.throwIfExecutionAborted, undefined);
+  // Inside a run they are the real run controls injected by runCode, not the plugin fns.
+  const probe = await runCode(`
+    return {
+      signalAborted: executeSignal.aborted,
+      signalHasAddEventListener: typeof executeSignal.addEventListener === 'function',
+      throwIsFunction: typeof throwIfExecutionAborted === 'function',
+    };
+  `, ctx, 1000);
+  assert.equal(probe.signalAborted, false);
+  assert.equal(probe.signalHasAddEventListener, true);
+  assert.equal(probe.throwIsFunction, true);
+});
+
 test('plugin helpers cannot override pluginCatalog/pluginHelp built-ins', async () => {
   const pluginHelpers = {
     pluginCatalog: async () => ['evil'],
@@ -409,6 +431,150 @@ test('plugin helper receives null page gracefully when no page open', async () =
   // Calling safeHelper should not throw
   const result = await runCode('return await safeHelper()', ctx, 5000);
   assert.equal(result, 'no-page');
+});
+
+// ─── Execute timeout lifecycle ───────────────────────────────────────────────
+// A timed-out snippet must stop being able to mutate state or drive Chrome after
+// the timeout fires. These regressions pin the current leak; they are made to
+// pass across Tasks 3-4 (run controller + handle fencing). The synchronous
+// runaway regression is intentionally added in Task 2, after runCode() enters
+// vm.runInContext() — adding it here would hang the event loop under new Function().
+
+test('runCode timeout stops late timer continuations from mutating state', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+
+  await assert.rejects(
+    () => runCode(`
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      state.leakedAfterTimeout = true;
+      return 'late';
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+  assert.equal(ctx.state.leakedAfterTimeout, undefined);
+
+  const nextResult = await runCode('return "next-run-ok";', ctx, 1000);
+  assert.equal(nextResult, 'next-run-ok');
+});
+
+test('runCode timeout fences async continuations after a stored-handle call', async () => {
+  const slowPage = {
+    isClosed: () => false,
+    url: () => 'about:blank',
+    title: async () => 'Slow',
+    delayed: async () => {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+      return 'done';
+    },
+  };
+  const ctx = buildExecContext(slowPage, { pages: () => [slowPage] }, {}, {}, {});
+  ctx.state.page = slowPage; // stored handle assigned by a prior step
+
+  await assert.rejects(
+    () => runCode(`
+      await state.page.delayed();
+      state.leakedAfterStoredHandle = true;
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+  assert.equal(ctx.state.leakedAfterStoredHandle, undefined);
+});
+
+test('runCode timeout interrupts synchronous runaway code', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+
+  await assert.rejects(
+    () => runCode('while (true) {}', ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  const nextResult = await runCode('return "after-sync-timeout";', ctx, 1000);
+  assert.equal(nextResult, 'after-sync-timeout');
+});
+
+test('runCode timeout fences a handle returned by a guarded helper', async () => {
+  let handleMutatedAfterTimeout = false;
+  const slowHandle = {
+    settle: async () => {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+      return 'settled';
+    },
+    mutate: () => { handleMutatedAfterTimeout = true; return 'mutated'; },
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, { getHandle: async () => slowHandle });
+
+  await assert.rejects(
+    () => runCode(`
+      const handle = await getHandle();
+      await handle.settle();
+      handle.mutate();
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+  assert.equal(handleMutatedAfterTimeout, false);
+});
+
+test('runCode does not poison persistent state with a timed-out run\'s guarded handle', async () => {
+  const livePage = {
+    isClosed: () => false,
+    url: () => 'https://example.com/live',
+    settle: async () => {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+      return 'settled';
+    },
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, { getLivePage: async () => livePage });
+
+  await assert.rejects(
+    () => runCode(`
+      state.saved = await getLivePage();
+      await state.saved.settle();
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+
+  const url = await runCode('return state.saved.url();', ctx, 1000);
+  assert.equal(url, 'https://example.com/live');
+});
+
+test('guarded execution preserves the formatResult Buffer/sentinel contract', async () => {
+  const bufCtx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  const buf = await runCode('return Buffer.from("png-bytes");', bufCtx, 1000);
+  assert.equal(Buffer.isBuffer(buf), true);
+  assert.equal(formatResult(buf).type, 'image');
+
+  const sentinel = {
+    _bf_type: 'labeled_screenshot',
+    screenshot: Buffer.from('jpeg-bytes'),
+    snapshot: 'snap-text',
+    labelCount: 2,
+  };
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, { getShot: async () => sentinel });
+  const out = await runCode('return await getShot();', ctx, 1000);
+  assert.equal(out._bf_type, 'labeled_screenshot');
+  assert.equal(Buffer.isBuffer(out.screenshot), true);
+  const formatted = formatResult(out);
+  assert.ok(Array.isArray(formatted));
+  assert.equal(formatted[0].type, 'image');
+});
+
+test('exposed built-in constructors remain usable inside execute', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+  const out = await runCode(`
+    const u = new URL('https://example.com/path?q=42');
+    const bytes = new TextEncoder().encode('hi');
+    return { host: u.host, q: u.searchParams.get('q'), len: bytes.length };
+  `, ctx, 1000);
+  assert.equal(out.host, 'example.com');
+  assert.equal(out.q, '42');
+  assert.equal(out.len, 2);
 });
 
 test('official plugin canonical helper names remain available alongside aliases', async () => {
