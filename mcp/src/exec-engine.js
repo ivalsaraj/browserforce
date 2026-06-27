@@ -7,9 +7,9 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
-  TEST_ID_ATTRS, createSmartDiff,
-  buildSnapshotText, parseSearchPattern, annotateStableAttrs,
+  createSmartDiff, parseSearchPattern,
 } from './snapshot.js';
+import { getAriaSnapshot, renderRefLines, renderFrameErrors } from './aria-snapshot-engine.js';
 import { Semaphore, injectA11yClient, showLabels, hideLabels } from './a11y-labels.js';
 import { getCleanHTML } from './clean-html.js';
 import { getPageMarkdown } from './page-markdown.js';
@@ -413,207 +413,6 @@ export async function smartWaitForPageLoad(page, timeout, pollInterval = 100, mi
   };
 }
 
-// ─── Accessibility Tree via DOM ──────────────────────────────────────────────
-// Replaces page.accessibility.snapshot() which was removed in Playwright 1.58.
-// Walks the DOM and builds an AX tree using ARIA roles, HTML semantics, and
-// computed accessible names. Supports Shadow DOM (open roots).
-
-export async function getAccessibilityTree(page, rootSelector) {
-  if (!page || typeof page.evaluate !== 'function') return null;
-  return page.evaluate((sel) => {
-    function getRole(el) {
-      if (el.nodeType !== 1) return null;
-      const explicit = el.getAttribute('role');
-      if (explicit) return explicit;
-      switch (el.tagName) {
-        case 'A': return el.hasAttribute('href') ? 'link' : null;
-        case 'BUTTON': case 'SUMMARY': return 'button';
-        case 'INPUT': {
-          const t = (el.type || 'text').toLowerCase();
-          if (t === 'hidden') return null;
-          return { text: 'textbox', search: 'searchbox', email: 'textbox', url: 'textbox',
-            tel: 'textbox', password: 'textbox', number: 'spinbutton',
-            checkbox: 'checkbox', radio: 'radio', range: 'slider',
-            button: 'button', submit: 'button', reset: 'button', image: 'button',
-          }[t] || 'textbox';
-        }
-        case 'SELECT': return 'combobox';
-        case 'TEXTAREA': return 'textbox';
-        case 'IMG': return 'img';
-        case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6': return 'heading';
-        case 'NAV': return 'navigation';
-        case 'MAIN': return 'main';
-        case 'HEADER': return el.closest('article, aside, main, nav, section') ? null : 'banner';
-        case 'FOOTER': return el.closest('article, aside, main, nav, section') ? null : 'contentinfo';
-        case 'ASIDE': return 'complementary';
-        case 'FORM': return (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || el.getAttribute('name')) ? 'form' : null;
-        case 'TABLE': return 'table';
-        case 'THEAD': case 'TBODY': case 'TFOOT': return 'rowgroup';
-        case 'TR': return 'row';
-        case 'TH': return 'columnheader';
-        case 'TD': return 'cell';
-        case 'UL': case 'OL': return 'list';
-        case 'LI': return 'listitem';
-        case 'DIALOG': return 'dialog';
-        case 'DETAILS': case 'FIELDSET': return 'group';
-        case 'PROGRESS': return 'progressbar';
-        case 'METER': return 'meter';
-        case 'OPTION': return 'option';
-        case 'SECTION': return (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) ? 'region' : null;
-        case 'ARTICLE': return 'article';
-        case 'SEARCH': return 'search';
-        default: return null;
-      }
-    }
-
-    function getName(el) {
-      const ariaLabel = el.getAttribute('aria-label');
-      if (ariaLabel) return ariaLabel.trim();
-      const labelledBy = el.getAttribute('aria-labelledby');
-      if (labelledBy) {
-        const t = labelledBy.split(/\s+/)
-          .map(id => document.getElementById(id)?.textContent?.trim())
-          .filter(Boolean).join(' ');
-        if (t) return t;
-      }
-      if (el.tagName === 'IMG') return (el.alt || '').trim();
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) {
-        if (el.id) {
-          const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-          if (lab) return lab.textContent?.trim() || '';
-        }
-        const parentLabel = el.closest('label');
-        if (parentLabel) {
-          const clone = parentLabel.cloneNode(true);
-          clone.querySelectorAll('input,select,textarea').forEach(i => i.remove());
-          const t = clone.textContent?.trim();
-          if (t) return t;
-        }
-        if (el.placeholder) return el.placeholder.trim();
-      }
-      if (el.title && !['A', 'BUTTON'].includes(el.tagName)) return el.title.trim();
-      const textTags = ['BUTTON', 'A', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SUMMARY', 'OPTION', 'LEGEND', 'CAPTION'];
-      if (textTags.includes(el.tagName)) {
-        return (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 200);
-      }
-      return '';
-    }
-
-    function isHidden(el) {
-      if (el.getAttribute('aria-hidden') === 'true') return true;
-      if (el.hidden) return true;
-      if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD'].includes(el.tagName)) return true;
-      try {
-        const s = window.getComputedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden') return true;
-      } catch { /* ignore */ }
-      return false;
-    }
-
-    function getChildren(el) {
-      const kids = [];
-      // Regular DOM children
-      for (const child of el.children) {
-        kids.push(child);
-      }
-      // Open Shadow DOM
-      if (el.shadowRoot) {
-        for (const child of el.shadowRoot.children) {
-          kids.push(child);
-        }
-      }
-      return kids;
-    }
-
-    let nodeCount = 0;
-    const MAX_NODES = 2000;
-
-    function buildTree(el, depth) {
-      if (!el || el.nodeType !== 1) return null;
-      if (isHidden(el)) return null;
-      if (depth > 30) return null; // prevent runaway recursion
-      if (nodeCount >= MAX_NODES) return null; // cap total nodes
-
-      const role = getRole(el);
-      const children = [];
-      for (const child of getChildren(el)) {
-        if (nodeCount >= MAX_NODES) break;
-        const r = buildTree(child, depth + 1);
-        if (r) {
-          if (Array.isArray(r)) children.push(...r);
-          else children.push(r);
-        }
-      }
-
-      if (role) {
-        nodeCount++;
-        const node = { role, name: getName(el) };
-        if (/^H[1-6]$/.test(el.tagName)) node.level = parseInt(el.tagName[1]);
-        if (['checkbox', 'radio', 'switch'].includes(role)) {
-          node.checked = el.checked ?? el.getAttribute('aria-checked') === 'true';
-        }
-        if (el.disabled || el.getAttribute('aria-disabled') === 'true') node.disabled = true;
-        const exp = el.getAttribute('aria-expanded');
-        if (exp !== null) node.expanded = exp === 'true';
-        if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.value) {
-          node.value = el.value.slice(0, 500);
-        }
-        if (el.tagName === 'SELECT' && el.selectedOptions?.length) {
-          node.value = el.selectedOptions[0]?.text || '';
-        }
-        if (children.length > 0) node.children = children;
-        return node;
-      }
-
-      // No role: pass through children
-      if (children.length === 0) return null;
-      if (children.length === 1) return children[0];
-      return children; // flatten
-    }
-
-    const scope = sel ? document.querySelector(sel) : document.body;
-    if (!scope) return null;
-
-    const result = buildTree(scope, 0);
-    if (!result) return { role: 'WebArea', name: document.title, children: [] };
-    const kids = Array.isArray(result) ? result : (result.children || [result]);
-    return { role: 'WebArea', name: document.title, children: kids };
-  }, rootSelector || null);
-}
-
-// ─── Snapshot Helper ─────────────────────────────────────────────────────────
-
-export async function getStableIds(page, rootSelector) {
-  return page.evaluate(({ testIdAttrs, root }) => {
-    const scope = root ? document.querySelector(root) : document;
-    if (!scope) return {};
-    const result = {};
-    const selectors = testIdAttrs.map(a => `[${a}]`).join(',');
-    const elements = scope.querySelectorAll(selectors + ',[id]');
-    for (const el of elements) {
-      const name = el.getAttribute('aria-label') ||
-                   el.textContent?.trim().slice(0, 100) || '';
-      if (!name) continue;
-      for (const attr of testIdAttrs) {
-        const value = el.getAttribute(attr);
-        if (value) {
-          if (!result[name]) {
-            result[name] = { attr, value };
-          }
-          break;
-        }
-      }
-      if (!result[name]) {
-        const id = el.getAttribute('id');
-        if (id && !/^[:\d]/.test(id) && !id.includes('__')) {
-          result[name] = { attr: 'id', value: id };
-        }
-      }
-    }
-    return result;
-  }, { testIdAttrs: TEST_ID_ATTRS, root: rootSelector || null });
-}
-
 // ─── Execution Engine ────────────────────────────────────────────────────────
 
 export class CodeExecutionTimeoutError extends Error {
@@ -637,7 +436,32 @@ export function buildExecContext(
 ) {
   const { consoleLogs, setupConsoleCapture } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
+  // ref → { locator, frameChain } (engine-built; frameChain pierces OOPIF/same-origin frames)
   const lastRefToLocator = userState.__lastRefToLocator || (userState.__lastRefToLocator = new WeakMap());
+
+  const buildRefLocator = (rootPage, entry) => {
+    if (!entry || !entry.locator) return null;
+    let scope = rootPage;
+    for (const frameSelector of entry.frameChain || []) scope = scope.frameLocator(frameSelector);
+    return scope.locator(entry.locator);
+  };
+
+  const storeRefs = (page, refs) => {
+    const map = new Map();
+    for (const r of refs) {
+      const entry = { locator: r.locator ?? null, frameChain: r.frameChain || [] };
+      map.set(r.ref, entry);
+      if (r.shortRef) map.set(r.shortRef, entry);
+    }
+    lastRefToLocator.set(page, map);
+  };
+
+  const searchToRefFilter = (search) => {
+    const pattern = parseSearchPattern(search);
+    if (!pattern) return undefined;
+    return ({ role, name }) => pattern.test(`${role} ${name || ''}`);
+  };
+
   const execConsoleLogs = Array.isArray(userState.__execConsoleLogs)
     ? userState.__execConsoleLogs
     : (userState.__execConsoleLogs = []);
@@ -702,93 +526,93 @@ export function buildExecContext(
     throw new Error("No active page. Reuse an existing one first: state.page = context.pages()[0]. If there isn't one, create one with: state.page = await context.newPage()");
   };
 
-  const snapshot = async ({ selector, search, showDiffSinceLastCall = true } = {}) => {
+  const snapshot = async ({ frame, locator, selector, interactiveOnly = false, search, showDiffSinceLastCall = true } = {}) => {
     const page = activePage();
-    const axRoot = await getAccessibilityTree(page, selector);
-    if (!axRoot) {
-      lastRefToLocator.set(page, new Map());
-      return 'No accessibility tree available for this page.';
+    // When a frame is given, resolve the CSS selector inside that frame so the scope/locator
+    // is in the right document (the engine evaluates it on the frame's session).
+    const scopeRoot = frame || page;
+    const scopeLocator = locator || (selector ? scopeRoot.locator(selector).first() : null);
+    const cdp = await getCDPSession({ page });
+    let result;
+    try {
+      result = await getAriaSnapshot({
+        page, frame, locator: scopeLocator, interactiveOnly,
+        refFilter: searchToRefFilter(search), cdp,
+      });
+    } finally {
+      await cdp.detach().catch(() => {});
     }
-    const stableIds = await getStableIds(page, selector);
-    annotateStableAttrs(axRoot, stableIds);
-    const searchPattern = parseSearchPattern(search);
-    const { text: fullSnapshotText, refs: fullRefs } = buildSnapshotText(axRoot, null, null);
-    const refMap = new Map(fullRefs.map(({ ref, locator }) => [ref, locator]));
-    lastRefToLocator.set(page, refMap);
+    storeRefs(page, result.refs);
+
     const title = await page.title().catch(() => '');
     const pageUrl = page.url();
-    const formatSnapshot = (snapshotText, refs) => {
-      const refTable = refs.length > 0
-        ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
-        : '';
-      return `Page: ${title} (${pageUrl})\nRefs: ${refs.length} interactive elements\n\n${snapshotText}${refTable}`;
-    };
-    const fullSnapshot = formatSnapshot(fullSnapshotText, fullRefs);
+    const refTable = result.refs.length > 0
+      ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}${r.name ? ` "${r.name}"` : ''}): ${r.locator ?? '(frame-scoped; use locatorForRef)'}`).join('\n')
+      : '';
+    const frameWarning = renderFrameErrors(result.frameErrors);
+    const fullSnapshot = `Page: ${title} (${pageUrl})\nRefs: ${result.refs.length} interactive elements${frameWarning}\n\n${renderRefLines(result.tree)}${refTable}`;
 
     let pageSnapshots = lastSnapshots.get(page);
     if (!(pageSnapshots instanceof Map)) {
-      const migratedSnapshots = new Map();
-      if (typeof pageSnapshots === 'string') {
-        migratedSnapshots.set('__full_page__', pageSnapshots);
-      }
-      pageSnapshots = migratedSnapshots;
+      const migrated = new Map();
+      if (typeof pageSnapshots === 'string') migrated.set('__full_page__', pageSnapshots);
+      pageSnapshots = migrated;
       lastSnapshots.set(page, pageSnapshots);
     }
-    const snapshotKey = selector || '__full_page__';
+    // Key each scope into its own bucket so a scoped snapshot never overwrites the full-page
+    // baseline that the next full-page diff compares against (only full-page calls diff).
+    const snapshotKey = selector || (frame ? '__frame__' : locator ? '__locator__' : '__full_page__');
     const previousSnapshot = pageSnapshots.get(snapshotKey);
     pageSnapshots.set(snapshotKey, fullSnapshot);
 
-    if (!selector && !search && showDiffSinceLastCall && previousSnapshot) {
+    if (!selector && !locator && !frame && !search && showDiffSinceLastCall && previousSnapshot) {
       const diffResult = createSmartDiff(previousSnapshot, fullSnapshot);
       if (diffResult.type === 'no-change') {
         return 'No changes since last snapshot. Use showDiffSinceLastCall: false to see full content.';
       }
       return diffResult.content;
     }
-
-    if (searchPattern) {
-      const { text: filteredSnapshotText, refs: filteredRefs } = buildSnapshotText(axRoot, null, searchPattern);
-      return formatSnapshot(filteredSnapshotText, filteredRefs);
-    }
-
     return fullSnapshot;
   };
 
-  const buildSnapshotData = async ({ selector, search, refAll = false } = {}) => {
+  const buildSnapshotData = async ({ frame, locator, selector, search, interactiveOnly = true } = {}) => {
     const page = activePage();
-    const axRoot = await getAccessibilityTree(page, selector);
-    if (!axRoot) {
-      lastRefToLocator.set(page, new Map());
-      return {
-        text: 'No accessibility tree available for this page.',
-        refs: [],
-        page,
-      };
+    const scopeRoot = frame || page;
+    const scopeLocator = locator || (selector ? scopeRoot.locator(selector).first() : null);
+    const cdp = await getCDPSession({ page });
+    let result;
+    try {
+      result = await getAriaSnapshot({
+        page, frame, locator: scopeLocator, interactiveOnly,
+        refFilter: searchToRefFilter(search), cdp,
+      });
+    } finally {
+      await cdp.detach().catch(() => {});
     }
-
-    const stableIds = await getStableIds(page, selector);
-    annotateStableAttrs(axRoot, stableIds);
-    const searchPattern = parseSearchPattern(search);
-    const { text: snapshotText, refs } = buildSnapshotText(axRoot, null, searchPattern, { refAll });
-    const refMap = new Map(refs.map(({ ref, locator }) => [ref, locator]));
-    lastRefToLocator.set(page, refMap);
+    storeRefs(page, result.refs);
     const title = await page.title().catch(() => '');
     const pageUrl = page.url();
-    const refTable = refs.length > 0
-      ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
+    const refTable = result.refs.length > 0
+      ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}): ${r.locator ?? '(frame-scoped)'}`).join('\n')
       : '';
+    const frameWarning = renderFrameErrors(result.frameErrors);
     return {
-      text: `Page: ${title} (${pageUrl})\nRefs: ${refs.length} labeled elements\n\n${snapshotText}${refTable}`,
-      refs,
+      text: `Page: ${title} (${pageUrl})\nRefs: ${result.refs.length} labeled elements${frameWarning}\n\n${renderRefLines(result.tree)}${refTable}`,
+      refs: result.refs,
       page,
     };
   };
 
   const refToLocator = ({ ref, page: targetPage } = {}) => {
     const p = targetPage || activePage();
-    const map = lastRefToLocator.get(p);
-    if (!map) return null;
-    return map.get(ref) ?? null;
+    const entry = lastRefToLocator.get(p)?.get(ref);
+    return entry?.locator ?? null;
+  };
+
+  const locatorForRef = ({ ref, page: targetPage } = {}) => {
+    const p = targetPage || activePage();
+    const entry = lastRefToLocator.get(p)?.get(ref);
+    return buildRefLocator(p, entry);
   };
 
   const waitForPageLoad = (opts = {}) =>
@@ -806,12 +630,15 @@ export function buildExecContext(
     if (consoleLogs) consoleLogs.set(activePage(), []);
   };
 
-  const getCDPSession = async ({ page: targetPage } = {}) => {
+  const getCDPSession = async ({ page: targetPage, frame } = {}) => {
     const p = targetPage || activePage();
     if (!p || p.isClosed()) {
       throw new Error('Cannot create CDP session for closed page');
     }
-    return p.context().newCDPSession(p);
+    // newCDPSession(frame) is OOPIF-only and throws for same-origin frames (Reconciliation 7).
+    // The engine handles that fallback itself; this param is for callers that explicitly want
+    // a frame session.
+    return p.context().newCDPSession(frame || p);
   };
 
   const getBrowserforceStatus = (opts = {}) => getExtensionStatus(opts);
@@ -857,23 +684,21 @@ export function buildExecContext(
     const { text: snapText, refs, page } = await buildSnapshotData({
       selector,
       search: null,
-      refAll: !interactiveOnly,
+      interactiveOnly,
     });
 
     const sema = new Semaphore(LABEL_BOX_CONCURRENCY);
     const labelCandidates = refs
-      .map(ref => ({ ref: ref.ref, role: ref.role, locator: ref.locator }))
+      .map((ref) => ({ ref: ref.shortRef ?? ref.ref, role: ref.role, locator: ref.locator, frameChain: ref.frameChain || [] }))
+      .filter((c) => c.locator)
       .slice(0, MAX_LABEL_OVERLAY_REFS);
     const labels = (await Promise.all(labelCandidates.map(async (candidate) => {
       await sema.acquire();
       try {
-        const box = await page.locator(candidate.locator).first().boundingBox();
+        const loc = buildRefLocator(page, { locator: candidate.locator, frameChain: candidate.frameChain });
+        const box = await loc.first().boundingBox();
         if (!box || box.width <= 0 || box.height <= 0) return null;
-        return {
-          ref: candidate.ref,
-          role: candidate.role,
-          box: { x: box.x, y: box.y, width: box.width, height: box.height },
-        };
+        return { ref: candidate.ref, role: candidate.role, box: { x: box.x, y: box.y, width: box.width, height: box.height } };
       } catch {
         return null;
       } finally {
@@ -980,6 +805,7 @@ export function buildExecContext(
     'state',
     'snapshot',
     'refToLocator',
+    'locatorForRef',
     'waitForPageLoad',
     'getLogs',
     'clearLogs',
@@ -1023,7 +849,7 @@ export function buildExecContext(
     browserforceSettings,
     browserforceRestrictions,
     page: defaultPage, context: ctx, state: userState,
-    snapshot, refToLocator, waitForPageLoad, getLogs, clearLogs, getCDPSession,
+    snapshot, refToLocator, locatorForRef, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     getBrowserforceStatus, getBrowserforcePageForTab,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,

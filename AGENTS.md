@@ -190,6 +190,17 @@ For side-panel chat continuity, BrowserForce session metadata stores Codex provi
 - Emit and consume `run.usage` and `run.provider_session` events.
 - Side-panel hydrates usage from `GET /v1/sessions/:sessionId` and shows `Context: unavailable` when telemetry is missing.
 
+## Accessibility Snapshot Engine
+
+- **Rule**: The snapshot tree comes from `mcp/src/aria-snapshot-engine.js` (CDP `Accessibility.getFullAXTree` + `DOM.getFlattenedDocument`, cross-referenced by `backendNodeId`). There is **no DOM-walker fallback** — an empty AX tree throws a descriptive error after one retry. `mcp/src/snapshot.js` keeps only shared constants/helpers + `createSmartDiff`/`parseSearchPattern`.
+- **Rule**: Send `Accessibility.enable` **before** `DOM.enable`. `DOM.enable` is in the relay's `INIT_ONLY_METHODS` and no-ops on a not-yet-attached tab; AX enable forces the lazy `chrome.debugger.attach()` first. Fetch DOM + AX from the **same** session (backendNodeIds are per-process).
+- **Rule**: Interaction refs keep the `- role "name" [ref=eN]` line contract (`renderRefLines`). Act on a ref with `locatorForRef({ ref })` (frame-aware Playwright `Locator`, pierces `frameChain`); `refToLocator({ ref })` returns the top-frame locator string. The CDP-accurate locator is also shown in the snapshot's "Ref → Locator" table. `EXECUTE_PROMPT` is unchanged.
+- **Rule**: Only **interactive** roles get refs/labels (incl. the screenshot label overlay). Context roles (`main`, `nav`, …) are structure-only lines.
+- **Rule**: Subframe scoping — `context.newCDPSession(frame)` is **OOPIF-only**; same-origin frames throw, so fall back to the page session and scope via a `data-pw-scope` attribute. OOPIF AX additionally needs the relay to resolve the frame's `Target.attachToTarget` to the existing child sessionId.
+- **Rule**: Full-page `snapshot()` (no explicit `frame`/`locator`) **stitches** subframe content: each `<iframe>`/`<frame>` is a leaf in the main tree, every subframe is (re)assembled once into a single shared `refCtx`, then stitched under its owner leaf by `backendNodeId` and finalized once. In-frame refs carry a `frameChain` so `locatorForRef` pierces via `frameLocator`. Explicit `frame`/`locator` keeps single-region behavior (empty `frameChain`).
+- **Rule**: Full-page degradation is **visible, never silent**. A first-level OOPIF that fails to acquire/fetch (relay target-resolution error, detach, enable failure) or is empty after retry is **best-effort skipped** — one flaky/blank cross-origin subframe must not nuke the whole-page snapshot — but recorded in `getAriaSnapshot`'s `frameErrors` and surfaced via `renderFrameErrors` as a `⚠️ N subframe(s) not stitched` block. Callers can then retry, wait, or scope the frame explicitly (explicit `frame` scope still **throws** on failure). **Limitation**: owners are matched only in the page-process DOM, so one level of OOPIF is stitched; iframes nested inside an OOPIF are skipped (their owner is not in the page DOM, so they are not recorded as errors).
+- **Why**: `backendNodeId` anchoring gives stable refs, subtree scoping, and cross-origin iframe reach that the old JS DOM walk could not.
+
 ## Security Rules
 
 - Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.

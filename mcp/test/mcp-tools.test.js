@@ -6,8 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
-  buildSnapshotText, createSmartDiff, parseSearchPattern,
-  annotateStableAttrs, buildLocator, escapeLocatorName,
+  createSmartDiff, parseSearchPattern,
 } from '../src/snapshot.js';
 
 const MCP_ROOT = join(import.meta.url.replace('file://', ''), '../../');
@@ -325,9 +324,8 @@ describe('Tool Definitions', () => {
       'exec engine should return snapshot no-change guidance'
     );
     assert.ok(
-      source.includes('!selector && !search && showDiffSinceLastCall') ||
-      source.includes('showDiffSinceLastCall && !selector && !search'),
-      'snapshot diff mode should only run for full-page snapshots with no search'
+      source.includes('!selector && !locator && !frame && !search && showDiffSinceLastCall'),
+      'snapshot diff mode should only run for unscoped full-page snapshots with no search'
     );
   });
 
@@ -624,160 +622,6 @@ describe('MCP Response Format', () => {
   });
 });
 
-// ─── Snapshot Tree Building (imports from snapshot.js) ───────────────────────
-
-describe('Snapshot Tree Building', () => {
-  it('builds snapshot from a simple AX tree', () => {
-    const axTree = {
-      role: 'WebArea', name: 'Example',
-      children: [
-        { role: 'banner', name: '', children: [
-          { role: 'link', name: 'Home', children: [] },
-          { role: 'link', name: 'About', children: [] },
-        ]},
-        { role: 'main', name: '', children: [
-          { role: 'heading', name: 'Welcome', children: [] },
-          { role: 'button', name: 'Submit', children: [] },
-          { role: 'textbox', name: 'Email', children: [] },
-        ]},
-      ],
-    };
-
-    const { text, refs } = buildSnapshotText(axTree, null, null);
-
-    assert.ok(text.includes('- banner:'));
-    assert.ok(text.includes('- link "Home" [ref=e1]'));
-    assert.ok(text.includes('- link "About" [ref=e2]'));
-    assert.ok(text.includes('- main:'));
-    assert.ok(text.includes('- heading "Welcome"'));
-    assert.ok(text.includes('- button "Submit" [ref=e3]'));
-    assert.ok(text.includes('- textbox "Email" [ref=e4]'));
-    assert.equal(refs.length, 4);
-    assert.equal(refs[0].ref, 'e1');
-    assert.equal(refs[0].locator, 'role=link[name="Home"]');
-    assert.equal(refs[2].locator, 'role=button[name="Submit"]');
-  });
-
-  it('uses stable IDs via _stableAttr annotation', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'main', name: '', children: [
-          { role: 'button', name: 'Submit Form', children: [] },
-        ]},
-      ],
-    };
-
-    const stableIds = { 'Submit Form': { attr: 'data-testid', value: 'submit-btn' } };
-    annotateStableAttrs(axTree, stableIds);
-
-    const { refs } = buildSnapshotText(axTree, null, null);
-    assert.equal(refs.length, 1);
-    assert.equal(refs[0].ref, 'submit-btn');
-    assert.equal(refs[0].locator, '[data-testid="submit-btn"]');
-  });
-
-  it('deduplicates refs with suffix when same stable ID appears twice', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'form', name: 'Login', children: [
-          { role: 'button', name: 'Submit', _stableAttr: { attr: 'data-testid', value: 'submit-btn' }, children: [] },
-        ]},
-        { role: 'form', name: 'Register', children: [
-          { role: 'button', name: 'Submit', _stableAttr: { attr: 'data-testid', value: 'submit-btn' }, children: [] },
-        ]},
-      ],
-    };
-
-    const { refs } = buildSnapshotText(axTree, null, null);
-    assert.equal(refs.length, 2);
-    assert.equal(refs[0].ref, 'submit-btn');
-    assert.equal(refs[1].ref, 'submit-btn-2');
-  });
-
-  it('filters by search pattern', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'navigation', name: '', children: [
-          { role: 'link', name: 'Home', children: [] },
-        ]},
-        { role: 'main', name: '', children: [
-          { role: 'button', name: 'Submit', children: [] },
-          { role: 'textbox', name: 'Email', children: [] },
-        ]},
-      ],
-    };
-
-    const { text, refs } = buildSnapshotText(axTree, null, /button/i);
-    assert.ok(text.includes('button'));
-    assert.ok(!text.includes('link'));
-    assert.ok(!text.includes('textbox'));
-    assert.equal(refs.length, 1);
-    assert.equal(refs[0].name, 'Submit');
-  });
-
-  it('skips generic/presentation roles', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'generic', name: '', children: [
-          { role: 'button', name: 'Click Me', children: [] },
-        ]},
-      ],
-    };
-
-    const { text, refs } = buildSnapshotText(axTree, null, null);
-    assert.ok(!text.includes('generic'));
-    assert.ok(text.includes('button "Click Me"'));
-    assert.equal(refs.length, 1);
-  });
-
-  it('handles empty AX tree gracefully', () => {
-    const axTree = { role: 'WebArea', name: '', children: [] };
-    const { text, refs } = buildSnapshotText(axTree, null, null);
-    assert.equal(text, '');
-    assert.equal(refs.length, 0);
-  });
-
-  it('preserves indentation hierarchy', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'navigation', name: 'Main Nav', children: [
-          { role: 'list', name: '', children: [
-            { role: 'listitem', name: '', children: [
-              { role: 'link', name: 'Home', children: [] },
-            ]},
-          ]},
-        ]},
-      ],
-    };
-
-    const { text } = buildSnapshotText(axTree, null, null);
-    const lines = text.split('\n');
-    assert.ok(lines[0].startsWith('  - navigation'));
-    assert.ok(lines[1].startsWith('    - list'));
-    assert.ok(lines[2].startsWith('      - listitem'));
-    assert.ok(lines[3].startsWith('        - link'));
-  });
-
-  it('locator escapes special characters in names', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'main', name: '', children: [
-          { role: 'button', name: 'Click "here"', children: [] },
-        ]},
-      ],
-    };
-
-    const { refs } = buildSnapshotText(axTree, null, null);
-    assert.equal(refs[0].locator, 'role=button[name="Click \\"here\\""]');
-  });
-});
-
 // ─── Snapshot Diff Mode ──────────────────────────────────────────────────────
 
 describe('Snapshot Diff Mode', () => {
@@ -850,31 +694,6 @@ describe('Search Pattern Validation', () => {
       () => parseSearchPattern('button['),
       /Invalid search regex/
     );
-  });
-});
-
-// ─── annotateStableAttrs ─────────────────────────────────────────────────────
-
-describe('annotateStableAttrs', () => {
-  it('attaches _stableAttr to matching interactive nodes', () => {
-    const axTree = {
-      role: 'WebArea', name: '',
-      children: [
-        { role: 'main', name: '', children: [
-          { role: 'button', name: 'Save', children: [] },
-          { role: 'heading', name: 'Title', children: [] },
-        ]},
-      ],
-    };
-
-    const stableIds = {
-      'Save': { attr: 'data-testid', value: 'save-btn' },
-      'Title': { attr: 'id', value: 'page-title' },
-    };
-    annotateStableAttrs(axTree, stableIds);
-
-    assert.deepEqual(axTree.children[0].children[0]._stableAttr, { attr: 'data-testid', value: 'save-btn' });
-    assert.equal(axTree.children[0].children[1]._stableAttr, undefined);
   });
 });
 

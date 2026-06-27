@@ -39,8 +39,11 @@ const HELP_SECTIONS = Object.freeze({
     summary: 'Use the cheapest page-reading surface that fits the task.',
     text: `# Snapshot And Extraction
 
-- Prefer snapshot() for text, page structure, and interaction refs.
-- Use snapshot({ search: /.../ }) to narrow large pages.
+- Prefer snapshot() for text, page structure, and interaction refs ([ref=eN]).
+- Act on a ref with locatorForRef({ ref }) — returns a Playwright Locator that also reaches into iframes (same-origin and cross-origin). refToLocator({ ref }) still returns the locator string for the top frame.
+- Scope with snapshot({ locator }) (a Playwright Locator) or snapshot({ frame }) (a Frame/FrameLocator) to read one region/iframe.
+- Use snapshot({ interactiveOnly: true }) to list only actionable elements; omit for full structure.
+- Use snapshot({ search: /.../ }) to narrow which interactive elements are reffed on large pages.
 - Use snapshot({ showDiffSinceLastCall: true }) for repeated observations of the same page, and false when full output is needed.
 - Use cleanHTML(selector?, opts?) for structured DOM extraction.
 - Use pageMarkdown() for article-like content.

@@ -1950,6 +1950,55 @@ describe('CDP Event Forwarding', () => {
     ext.close();
     await sleep(100);
   });
+
+  it('resolves Target.attachToTarget + getTargets for OOPIF iframe targets', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, { headers: { Origin: 'chrome-extension://test' } });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') { ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } })); return; }
+      if (msg.id !== undefined && msg.method === 'createTab') {
+        ext.send(JSON.stringify({ id: msg.id, result: { tabId: 31, targetId: 'real-target-31', sessionId: msg.params.sessionId, targetInfo: { targetId: 'real-target-31', type: 'page', title: 'OOPIF Test', url: msg.params.url || 'about:blank' } } }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const events = [];
+    cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://oopif-parent.test' } }));
+    await sleep(300);
+
+    // Extension reports an auto-attached cross-origin iframe. NOTE: browserContextId is
+    // deliberately OMITTED here — the relay must normalize it.
+    ext.send(JSON.stringify({ method: 'cdpEvent', params: { tabId: 31, method: 'Target.attachedToTarget', params: { sessionId: 'oopif-session-1', targetInfo: { targetId: 'oopif-target-1', type: 'iframe', title: '', url: 'https://cross.test/', attached: true }, waitingForDebugger: false } } }));
+    await sleep(100);
+
+    const attachResp = await sendAndReceive(cdp, { id: 2, method: 'Target.attachToTarget', params: { targetId: 'oopif-target-1' } });
+    assert.equal(attachResp.result.sessionId, 'oopif-session-1', 'attachToTarget returns the existing child sessionId');
+
+    const targetsResp = await sendAndReceive(cdp, { id: 3, method: 'Target.getTargets', params: {} });
+    const oopifInfo = targetsResp.result.targetInfos.find((t) => t.targetId === 'oopif-target-1');
+    assert.ok(oopifInfo, 'getTargets includes the OOPIF target');
+    assert.equal(oopifInfo.type, 'iframe', 'OOPIF target typed as iframe');
+    assert.equal(oopifInfo.browserContextId, 'bf-default-context', 'relay normalizes browserContextId even when the extension omits it');
+
+    const infoResp = await sendAndReceive(cdp, { id: 4, method: 'Target.getTargetInfo', params: { targetId: 'oopif-target-1' } });
+    assert.equal(infoResp.result.targetInfo.browserContextId, 'bf-default-context', 'getTargetInfo returns the normalized OOPIF info');
+
+    cdp.close();
+    ext.close();
+    await sleep(100);
+  });
+
+  it('Target.attachToTarget still rejects unknown targets', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, { headers: { Origin: 'chrome-extension://test' } });
+    ext.on('message', (data) => { const m = JSON.parse(data.toString()); if (m.method === 'ping') ext.send(JSON.stringify({ method: 'pong' })); else if (m.id && m.method === 'getRestrictions') ext.send(JSON.stringify({ id: m.id, result: { mode: 'auto' } })); });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const resp = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToTarget', params: { targetId: 'nope' } });
+    assert.ok(resp.error, 'unknown target rejected');
+    cdp.close(); ext.close(); await sleep(100);
+  });
 });
 
 // ─── CDP JSONL Logging ──────────────────────────────────────────────────────
