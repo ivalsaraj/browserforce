@@ -168,6 +168,111 @@ return state.page.url();`,
     console.log('Scoped snapshot length:', scopedText.length, 'chars');
     if (scopedResult.isError) console.log('ERROR:', scopedText);
 
+    // 9a. Same-origin iframe: snapshot includes in-iframe content + locatorForRef round-trip.
+    console.log('\n--- Execute: same-origin iframe — content present + locatorForRef check ---');
+    const sameOriginCode = [
+      "await state.page.setContent('<!doctype html><h1>Host Heading</h1><iframe id=inner srcdoc=\"<label>InnerBox<input type=checkbox id=b></label>\"></iframe>');",
+      'await waitForPageLoad();',
+      'await state.page.waitForTimeout(400);',
+      'const snap = await snapshot({ interactiveOnly: true });',
+      "const i = snap.indexOf('InnerBox');",
+      "if (i < 0) throw new Error('same-origin iframe content missing from snapshot');",
+      'const after = snap.slice(i);',
+      "const s = after.indexOf('[ref=');",
+      "const e = after.indexOf(']', s);",
+      'const ref = after.slice(s + 5, e);',
+      'const loc = locatorForRef({ ref });',
+      'await loc.check();',
+      'const inner = state.page.frames().find((f) => f !== state.page.mainFrame());',
+      "const checked = inner ? await inner.evaluate(() => document.getElementById('b').checked) : false;",
+      'return JSON.stringify({ ref, checked });',
+    ].join('\n');
+    const sameOriginResult = await send(proc, 'tools/call', { name: 'execute', arguments: { code: sameOriginCode } });
+    const sameOriginText = sameOriginResult.content?.[0]?.text || '';
+    console.log('Result:', sameOriginText);
+    if (sameOriginResult.isError) throw new Error('same-origin iframe case failed: ' + sameOriginText);
+    if (!JSON.parse(sameOriginText).checked) throw new Error('locatorForRef did not check the in-iframe checkbox');
+
+    // 9b. Cross-origin OOPIF: snapshot includes the OOPIF's interactive content + locator
+    //     resolves inside it. Self-skips when the cross-origin frame can't load (no network).
+    console.log('\n--- Execute: cross-origin OOPIF — content present (skips w/o network) ---');
+    const oopifCode = [
+      "await state.page.setContent('<!doctype html><h1>OOPIF Host</h1><iframe id=ext src=\"https://example.com\"></iframe>');",
+      'await waitForPageLoad();',
+      'let oopif = null;',
+      'for (let k = 0; k < 25; k++) {',
+      '  oopif = state.page.frames().find((f) => { try { return f !== state.page.mainFrame() && /example\\.com/.test(f.url()); } catch { return false; } });',
+      '  if (oopif) break;',
+      '  await state.page.waitForTimeout(200);',
+      '}',
+      "if (!oopif) return JSON.stringify({ skipped: true, reason: 'OOPIF did not load (no network?)' });",
+      'const snap = await snapshot({ interactiveOnly: true });',
+      "const i = snap.indexOf('information');",
+      'let acted = false;',
+      'if (i >= 0) {',
+      '  const after = snap.slice(i);',
+      "  const s = after.indexOf('[ref=');",
+      '  if (s >= 0) {',
+      "    const e = after.indexOf(']', s);",
+      '    const ref = after.slice(s + 5, e);',
+      '    acted = await locatorForRef({ ref }).first().isVisible().catch(() => false);',
+      '  }',
+      '}',
+      'return JSON.stringify({ skipped: false, hasLink: i >= 0, acted });',
+    ].join('\n');
+    const oopifResult = await send(proc, 'tools/call', { name: 'execute', arguments: { code: oopifCode } });
+    const oopifText = oopifResult.content?.[0]?.text || '';
+    console.log('Result:', oopifText);
+    if (oopifResult.isError) throw new Error('OOPIF case failed: ' + oopifText);
+    {
+      const parsed = JSON.parse(oopifText);
+      if (parsed.skipped) console.log('SKIP (OOPIF):', parsed.reason);
+      else if (!parsed.hasLink) throw new Error('OOPIF interactive content missing from snapshot');
+      else if (!parsed.acted) throw new Error('locatorForRef did not resolve inside the OOPIF');
+    }
+
+    // 9c. snapshot({ locator }) and snapshot({ frame }) scope to the expected region.
+    console.log('\n--- Execute: snapshot({ locator }) and snapshot({ frame }) scoping ---');
+    const scopeCode = [
+      "await state.page.setContent('<!doctype html><main><button id=keep>KeepBtn</button></main><aside><button id=drop>DropBtn</button></aside><iframe id=f2 srcdoc=\"<button id=ib>FrameBtn</button>\"></iframe>');",
+      'await waitForPageLoad();',
+      'await state.page.waitForTimeout(400);',
+      "const scoped = await snapshot({ locator: state.page.locator('main'), interactiveOnly: true });",
+      "const okLocator = scoped.indexOf('KeepBtn') >= 0 && scoped.indexOf('DropBtn') < 0;",
+      'const inner = state.page.frames().find((f) => f !== state.page.mainFrame());',
+      "const frameSnap = inner ? await snapshot({ frame: inner, interactiveOnly: true }) : '';",
+      "const okFrame = frameSnap.indexOf('FrameBtn') >= 0;",
+      'return JSON.stringify({ okLocator, okFrame });',
+    ].join('\n');
+    const scopeResult = await send(proc, 'tools/call', { name: 'execute', arguments: { code: scopeCode } });
+    const scopeText = scopeResult.content?.[0]?.text || '';
+    console.log('Result:', scopeText);
+    if (scopeResult.isError) throw new Error('scoping case failed: ' + scopeText);
+    {
+      const parsed = JSON.parse(scopeText);
+      if (!parsed.okLocator) throw new Error('snapshot({ locator }) did not scope to the expected region');
+      if (!parsed.okFrame) throw new Error('snapshot({ frame }) did not return the frame content');
+    }
+
+    // 9d. Empty/sparse page → descriptive throw (no silent fallback to a weaker engine).
+    console.log('\n--- Execute: empty page → descriptive throw ---');
+    const emptyCode = [
+      "await state.page.goto('about:blank');",
+      'await state.page.waitForTimeout(200);',
+      'try {',
+      '  await snapshot({ interactiveOnly: true });',
+      "  return 'NO_THROW';",
+      '} catch (err) {',
+      '  return err && err.message ? err.message : String(err);',
+      '}',
+    ].join('\n');
+    const emptyResult = await send(proc, 'tools/call', { name: 'execute', arguments: { code: emptyCode } });
+    const emptyText = emptyResult.content?.[0]?.text || '';
+    console.log('Result:', emptyText);
+    if (emptyResult.isError) throw new Error('empty-page case errored unexpectedly: ' + emptyText);
+    if (emptyText === 'NO_THROW') throw new Error('empty page snapshot did not throw (silent fallback?)');
+    if (!/empty after retry/.test(emptyText)) console.log('NOTE: empty-page throw message differs:', emptyText);
+
     // 10. Reset
     console.log('\n--- Reset ---');
     const resetResult = await send(proc, 'tools/call', {
