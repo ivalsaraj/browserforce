@@ -1,20 +1,31 @@
-// Pure, synchronous resolver for the window a new agent tab should be created in.
+// Pure, synchronous resolver for where a new agent tab should be created.
 //
 // All async Chrome IO (validating the requested window still exists, reading the
-// current focused window) happens in background.js; this module only encodes the
-// decision so it is unit-testable without Chrome APIs. Centralizes the single
-// windowId validity predicate (Number.isInteger).
+// current focused window, creating a new window) happens in background.js; this
+// module only encodes the decision so it is unit-testable without Chrome APIs.
+// Centralizes the single windowId validity predicate (Number.isInteger).
 //
-// Returns the requested window when it is an integer AND still valid; otherwise
-// falls back to the current focused window (which may itself be undefined when
-// Chrome could not report one).
-export function resolveCreateWindowId({
+// Returns a plan describing what background.js should do:
+//   { action: 'use-window', windowId }     → open a tab in this existing window
+//   { action: 'new-window' }               → create a fresh dedicated window
+//   { action: 'current-window', windowId } → open a tab in the current window
+//                                            (windowId may be undefined when
+//                                             Chrome reports no current window)
+//
+// When the requested (relay-pinned) window is gone and dedicated mode is on, we
+// deliberately return 'new-window' rather than dropping the agent's tab into the
+// user's current window — keeping the agent's work isolated is the whole point.
+export function resolveCreateWindowPlan({
   requestedWindowId,
   isRequestedWindowValid,
   currentWindowId,
+  dedicatedWindowEnabled = false,
 } = {}) {
   if (Number.isInteger(requestedWindowId) && isRequestedWindowValid === true) {
-    return requestedWindowId;
+    return { action: 'use-window', windowId: requestedWindowId };
   }
-  return currentWindowId;
+  if (dedicatedWindowEnabled === true) {
+    return { action: 'new-window' };
+  }
+  return { action: 'current-window', windowId: currentWindowId };
 }

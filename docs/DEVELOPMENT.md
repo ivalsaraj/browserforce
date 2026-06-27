@@ -84,6 +84,14 @@ when the pinned window has been closed, and then re-pins to that fallback window
 Tab `windowId` is surfaced in `listTabs`, `/extension/status`, and
 `/attached-tabs` whenever it is known.
 
+**Dedicated window (opt-in):** With the **Open agent tabs in a dedicated window**
+popup setting ON, a create with no valid pinned window opens a fresh **background**
+(`focused: false`) Chrome window for the agent's tabs instead of using the user's
+current window; affinity then pins to it. If that window is closed mid-session, the
+next create spawns a **new** dedicated window rather than falling back to the user's
+window. Scope is agent-**created** tabs only; manually attached tabs are never moved.
+Default is OFF.
+
 ## Relay Status & Introspection Endpoints
 
 The relay exposes localhost-only status endpoints that read existing relay state

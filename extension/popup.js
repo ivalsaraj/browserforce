@@ -31,6 +31,7 @@ const parallelVisibilitySelect = document.getElementById('bf-parallel-visibility
 const lockUrlCb = document.getElementById('bf-lock-url');
 const noNewTabsCb = document.getElementById('bf-no-new-tabs');
 const readOnlyCb = document.getElementById('bf-read-only');
+const dedicatedWindowCb = document.getElementById('bf-dedicated-window');
 const autoDetachSelect = document.getElementById('bf-auto-detach');
 const autoCloseSelect = document.getElementById('bf-auto-close');
 const instructionsEl = document.getElementById('bf-instructions');
@@ -51,7 +52,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 const SETTINGS_KEYS = [
   'relayUrl', 'autoDetachMinutes', 'autoCloseMinutes',
   'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions',
-  'executionMode', 'parallelVisibilityMode',
+  'executionMode', 'parallelVisibilityMode', 'dedicatedWindow',
 ];
 
 chrome.storage.local.get(SETTINGS_KEYS, (s) => {
@@ -64,6 +65,7 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   lockUrlCb.checked = !!s.lockUrl;
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
+  dedicatedWindowCb.checked = !!s.dedicatedWindow;
   instructionsEl.value = s.userInstructions || '';
   setAutoModeState(s.mode || 'auto');
 });
@@ -119,6 +121,10 @@ executionModeSelect.addEventListener('change', () => {
 
 parallelVisibilitySelect.addEventListener('change', () => {
   chrome.storage.local.set({ parallelVisibilityMode: parallelVisibilitySelect.value });
+});
+
+dedicatedWindowCb.addEventListener('change', () => {
+  chrome.storage.local.set({ dedicatedWindow: dedicatedWindowCb.checked });
 });
 
 autoDetachSelect.addEventListener('change', () => {

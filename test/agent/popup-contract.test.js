@@ -42,3 +42,11 @@ test('auto mode uses bottom note instead of dotted popup border', () => {
   assert.match(popupCss, /\.auto-mode-note::after[\s\S]*background:\s*var\(--bf-accent\)/);
   assert.equal(/\.bf-popup\.auto-mode\s*\{[\s\S]*dotted/.test(popupCss), false);
 });
+
+test('popup exposes a dedicated-window toggle wired to storage', () => {
+  assert.match(html, /id="bf-dedicated-window"/);
+  assert.match(html, /Open agent tabs in a dedicated window/);
+  assert.match(popupJs, /'dedicatedWindow'/);
+  assert.match(popupJs, /dedicatedWindowCb/);
+  assert.match(popupJs, /chrome\.storage\.local\.set\(\{\s*dedicatedWindow:/);
+});
