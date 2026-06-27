@@ -90,7 +90,7 @@ const HELP_SECTIONS = Object.freeze({
 - Navigation failed: inspect current URL, logs, and snapshot before retrying.
 - BF_NO_ATTACHED_PAGE or BF_NEW_TABS_DISABLED: manual/no-new-tabs mode needs an attached tab or relaxed restrictions.
 - Connection/internal failures: call reset, then reinitialize state.page from context.pages().
-- Execute timeout is a cancellation boundary, not just a late error: a timed-out snippet stops driving Chrome and cannot mutate state afterward, so re-observe the page (snapshot/url) before retrying. Do not call reset for ordinary timeouts.`,
+- Execute timeout is a cancellation boundary, not just a late error: it aborts BrowserForce-controlled continuations (run timers, guarded helpers, state) so a timed-out snippet cannot mutate state or issue new guarded calls — re-observe the page (snapshot/url) before retrying. Two limits by design: a continuation resuming after awaiting a raw top-level page/context op can still issue one more Chrome command, and a CPU loop after an await may not be interruptible. Do not call reset for ordinary timeouts.`,
   },
   parallel: {
     title: 'Parallel Work',

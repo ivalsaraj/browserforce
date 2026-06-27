@@ -818,3 +818,12 @@ If no changes were needed, do not create an empty commit.
 - Do not add dependencies such as `acorn`; Playwriter uses it for auto-return parsing, not timeout cancellation.
 - Do not move Playwright execution into a worker thread. Playwright `Page`/`BrowserContext` handles are not transferable, and reconnecting inside a worker would be a larger architecture change.
 - Do not promise that an already-sent Chrome/CDP command can be rolled back. The fix is to stop late BrowserForce continuations and future helper calls after timeout.
+
+---
+
+## Post-Implementation Amendments
+
+_Auto-applied after Codex code-review (gpt-5.5, approved round 3). These are plan gaps surfaced by review/runtime evidence, not implementation errors._
+
+- **Documentation must scope the guarantee, not say "drives Chrome".** Task 6's "phrase the guarantee narrowly / do not overpromise" intent needed to be enforced literally in every surface. The first implementation wording ("a timed-out snippet stops driving Chrome") was tightened across `AGENTS.md`, `docs/BROWSERFORCE_AGENT.md`, and the in-product `mcp/src/help-docs.js` (`errors` section) to "stops issuing BrowserForce-controlled work" — because top-level `page`/`context` are deliberately raw (Task 4 Step 2), a continuation resuming after awaiting a raw top-level handle can still issue one further Chrome command by design. Root cause: the plan stated the narrow-phrasing rule but did not flag the specific overclaim verb, and `help-docs.js` is an easy-to-miss third surface.
+- **New documented limit: synchronous CPU loop after an `await`.** `vm.runInContext(..., { timeout })` only bounds the synchronous window up to the first `await`. A CPU-bound loop scheduled after an `await` (e.g. `await Promise.resolve(); while (true) {}`) runs as a microtask the vm `timeout` does not bound and can block the event loop so the outer abort timer never fires. This is inherent to the cooperative-cancellation model (worker isolation is a Non-Goal) and is now documented in `AGENTS.md` + `docs/BROWSERFORCE_AGENT.md`. Codex proposed `vm.createContext(..., { microtaskMode: 'afterEvaluate' })`; a runtime probe disproved it — `afterEvaluate` makes legitimate host-promise awaits (every real `await page.*()`) never resume and time out, so it is explicitly recorded as NOT a fix. Root cause: the plan's vm-timeout step implicitly assumed the synchronous timeout covered all CPU runaways.
