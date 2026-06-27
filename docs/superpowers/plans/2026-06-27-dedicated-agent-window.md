@@ -8,6 +8,8 @@
 
 **Tech Stack:** Vanilla JS ES modules, MV3 extension (`chrome.windows`, `chrome.tabs`, `chrome.storage`, `chrome.debugger`), `node:test` for unit tests.
 
+**GitHub Issue:** #14 — https://github.com/ivalsaraj/browserforce/issues/14
+
 **Spec:** `docs/superpowers/specs/2026-06-27-dedicated-agent-window-design.md`
 
 ## Global Constraints
