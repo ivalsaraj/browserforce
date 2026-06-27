@@ -110,7 +110,7 @@ Context-first reading found gaps between the spec's §7 file table and the real 
 
 **Why:** Spec §9 Risk 1. Phase 1 needs no answer here (same-origin content is already in the page session's AX tree; the engine scopes to a frame via attribute injection, never `frameId` — Reconciliation 7). Phase 2 (cross-origin OOPIF) does. This spike decides whether the engine can reach an OOPIF and what minimal relay change is required.
 
-- [ ] **Step 1: Confirm the (already-resolved) acquisition path**
+- [x] **Step 1: Confirm the (already-resolved) acquisition path**
 
 The fork is resolved analytically by the "Verified API/relay facts" table above — this step just records confirmation:
 - **Path (only viable one):** `context.newCDPSession(oopifFrame)` (std `playwright-core@1.61.1` supports `Page|Frame`). It sends `Target.attachToTarget({ targetId, flatten:true })` for the OOPIF target.
@@ -119,7 +119,7 @@ The fork is resolved analytically by the "Verified API/relay facts" table above 
 
 Minimal relay change (Phase 2, Task 11): index iframe `targetId → { childSessionId, tabId, targetInfo }` in the existing `Target.attachedToTarget` handler; include OOPIF targets in `Target.getTargets`/`getTargetInfo`; resolve `Target.attachToTarget({ targetId })` for those to the **existing** child sessionId (no new `chrome.debugger` attach).
 
-- [ ] **Step 2: If a live stack is available, empirically confirm; else record the analytic decision**
+- [x] **Step 2: If a live stack is available, empirically confirm; else record the analytic decision**
 
 Run only if a relay + extension + Chrome are live (`~/.browserforce/cdp-url` present and `GET /extension/status` shows `connected:true`). Otherwise skip and record the analytic decision below.
 
@@ -131,7 +131,7 @@ If live, `mcp/test/_spike-oopif.mjs` connects via `chromium.connectOverCDP(cdpUr
 
 Run: `node mcp/test/_spike-oopif.mjs` — Expected: confirms iframe target is not reachable until the Task 11 relay change.
 
-- [ ] **Step 3: Record the decision and delete the spike script**
+- [x] **Step 3: Record the decision and delete the spike script**
 
 Append the outcome to this plan under "Spike Result" (below) and to `docs/knowledge/timeline1.md` (created in Task 9). Decision is fixed: **engine + additive relay change** (not engine-only). Delete `mcp/test/_spike-oopif.mjs`.
 
@@ -139,7 +139,11 @@ Append the outcome to this plan under "Spike Result" (below) and to `docs/knowle
 rm -f mcp/test/_spike-oopif.mjs
 ```
 
-> **Spike Result (fill during execution):** _Path chosen: `context.newCDPSession(oopifFrame)` (std-core OOPIF acquisition) + additive relay resolution of its `Target.attachToTarget`. Same-origin subframes need no child session (page-session scope). Empirical confirmation: <ran / skipped — no live stack>._
+> **Spike Result (2026-06-27, empirical):** Ran `_spike-oopif.mjs` against a **live** stack (relay + extension + Chrome, `connected:true`, 36 targets).
+> - **Positive signal:** `page.setContent('<iframe src=https://example.com>')` → after settle, `page.frames()` **surfaced the cross-origin frame** (`['about:blank','https://example.com/']`). So Playwright's frame tree already sees the OOPIF through the current relay — `resolveFrame`/`frame.frameElement()` matching (Task 13) has a real frame object to work with.
+> - **Observed crash (confounded):** the probe ran as a **second concurrent `/cdp` client** against the user's already-connected browser (relay default `multi-client`). During OOPIF settle it tripped Playwright's `_CRSession._onMessage` assertion `assert(!object.id, …)` (coreBundle `:33780`) — a CDP **response** (has `id`) reaching a session with no matching pending callback. This is the signature of **multi-client response cross-talk** (a response for the other client's command id landing on the spike's session), **not** an OOPIF-specific engine/relay defect. It crashed before the `newCDPSession(oopifFrame)` probe could run.
+> - **Decision (unchanged, analytically grounded):** **engine + additive relay change** (not engine-only). Path = `context.newCDPSession(oopifFrame)` (only std-core OOPIF acquisition path — Reconciliation 7) + Task 11 relay resolution of its `Target.attachToTarget` to the existing child sessionId. Same-origin subframes need no child session (page-session scope + attribute injection).
+> - **Phase-2 risk carried forward:** clean **single-client** OOPIF acquisition (`newCDPSession(oopifFrame)` → `Accessibility.getFullAXTree`) is **deferred to Task 14 e2e**, run as the sole MCP client after the Task 11 relay change, where the multi-client confound does not apply. If that e2e reproduces an id-routing assertion as the sole client, escalate to relay child-session response/event routing (out of current plan scope) before claiming Phase 2 complete.
 
 ---
 
