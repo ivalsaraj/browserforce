@@ -325,9 +325,8 @@ describe('Tool Definitions', () => {
       'exec engine should return snapshot no-change guidance'
     );
     assert.ok(
-      source.includes('!selector && !search && showDiffSinceLastCall') ||
-      source.includes('showDiffSinceLastCall && !selector && !search'),
-      'snapshot diff mode should only run for full-page snapshots with no search'
+      source.includes('!selector && !locator && !frame && !search && showDiffSinceLastCall'),
+      'snapshot diff mode should only run for unscoped full-page snapshots with no search'
     );
   });
 
