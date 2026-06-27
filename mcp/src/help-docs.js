@@ -89,7 +89,8 @@ const HELP_SECTIONS = Object.freeze({
 - Element missing: refresh snapshot output and use stable refs, roles, test IDs, or tighter search.
 - Navigation failed: inspect current URL, logs, and snapshot before retrying.
 - BF_NO_ATTACHED_PAGE or BF_NEW_TABS_DISABLED: manual/no-new-tabs mode needs an attached tab or relaxed restrictions.
-- Connection/internal failures: call reset, then reinitialize state.page from context.pages().`,
+- Connection/internal failures: call reset, then reinitialize state.page from context.pages().
+- Execute timeout is a cancellation boundary, not just a late error: a timed-out snippet stops driving Chrome and cannot mutate state afterward, so re-observe the page (snapshot/url) before retrying. Do not call reset for ordinary timeouts.`,
   },
   parallel: {
     title: 'Parallel Work',

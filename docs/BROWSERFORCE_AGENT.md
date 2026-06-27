@@ -150,6 +150,7 @@ Optional external config:
   - `execute` keeps a small prompt so tab rules remain visible to agents.
   - Call `help(section)` for detailed BrowserForce guidance; sections are cached per MCP session and do not require Chrome/CDP.
   - No BrowserForce skill is required for the help gate.
+  - `execute` timeout is a cancellation boundary, not merely a late error response: when a snippet exceeds its timeout, BrowserForce aborts the run's timers and fences its helper/state continuations so the timed-out code stops driving Chrome and cannot mutate `state` afterward. `waitForPageLoad()` stays a page-readiness heuristic; cancellation is handled at the execution boundary. A browser action already delivered to Chrome before the timeout may still take effect, so retry code should observe the page (snapshot/url) before issuing more mutations. A continuation left pending on a cancelled wait may stay in memory until process cleanup, but it no longer has a BrowserForce-controlled path to mutate `state` or call guarded helpers. Timeout errors do not suggest `reset`.
 - `agent_not_running` in side panel:
   - Run `browserforce agent start`.
 - `extension_not_connected` from `/chatd-url`:
