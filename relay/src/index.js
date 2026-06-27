@@ -226,6 +226,22 @@ function buildTargetInfo(target) {
   return info;
 }
 
+// Normalize a raw extension iframe targetInfo so OOPIF targets carry the same
+// invariants Playwright's CRBrowser._onAttachedToTarget asserts — notably
+// browserContextId (see AGENTS.md "browserContextId Requirement"). The extension
+// may omit fields; fill them deterministically here so getTargets/getTargetInfo
+// stay consistent.
+function buildOopifTargetInfo(rawTargetInfo) {
+  return {
+    targetId: rawTargetInfo.targetId,
+    type: 'iframe',
+    title: rawTargetInfo.title || '',
+    url: rawTargetInfo.url || '',
+    attached: true,
+    browserContextId: rawTargetInfo.browserContextId || DEFAULT_BROWSER_CONTEXT_ID,
+  };
+}
+
 class RelayServer {
   constructor(port = DEFAULT_PORT, pluginsDir = BF_PLUGINS_DIR) {
     this.port = port;
@@ -250,6 +266,7 @@ class RelayServer {
     this.targets = new Map();      // sessionId -> { tabId, targetId, targetInfo }
     this.tabToSession = new Map(); // tabId -> sessionId
     this.childSessions = new Map(); // childSessionId -> { tabId, parentSessionId }
+    this.oopifTargets = new Map();  // iframe targetId -> { childSessionId, tabId, targetInfo }
     this.agentWindowByClientId = new Map(); // clientId -> windowId (agent window affinity)
     this.sessionCounter = 0;
 
@@ -923,6 +940,7 @@ class RelayServer {
     this.targets.clear();
     this.tabToSession.clear();
     this.childSessions.clear();
+    this.oopifTargets.clear();
   }
 
   _handleExtMessage(msg) {
@@ -1056,9 +1074,22 @@ class RelayServer {
     // Track child sessions (iframes / OOPIFs)
     if (method === 'Target.attachedToTarget' && params?.sessionId) {
       this.childSessions.set(params.sessionId, { tabId, parentSessionId: sessionId });
+      // Index cross-origin iframe targets so Target.attachToTarget/getTargets can
+      // resolve them. Store the NORMALIZED targetInfo so every command that returns
+      // it stays consistent (browserContextId etc.).
+      if (params.targetInfo?.type === 'iframe' && params.targetInfo.targetId) {
+        this.oopifTargets.set(params.targetInfo.targetId, {
+          childSessionId: params.sessionId,
+          tabId,
+          targetInfo: buildOopifTargetInfo(params.targetInfo),
+        });
+      }
     }
     if (method === 'Target.detachedFromTarget' && params?.sessionId) {
       this.childSessions.delete(params.sessionId);
+      for (const [targetId, info] of this.oopifTargets) {
+        if (info.childSessionId === params.sessionId) this.oopifTargets.delete(targetId);
+      }
     }
 
     // Route: child-session events must preserve the child session id so
@@ -1082,6 +1113,9 @@ class RelayServer {
     // Clean up child sessions for this tab
     for (const [childId, child] of this.childSessions) {
       if (child.tabId === tabId) this.childSessions.delete(childId);
+    }
+    for (const [targetId, info] of this.oopifTargets) {
+      if (info.tabId === tabId) this.oopifTargets.delete(targetId);
     }
 
     this.targets.delete(sessionId);
@@ -1247,7 +1281,10 @@ class RelayServer {
 
       case 'Target.getTargets':
         return {
-          targetInfos: [...this.targets.values()].map((t) => buildTargetInfo(t)),
+          targetInfos: [
+            ...[...this.targets.values()].map((t) => buildTargetInfo(t)),
+            ...[...this.oopifTargets.values()].map((o) => o.targetInfo),
+          ],
         };
 
       case 'Target.getTargetInfo': {
@@ -1257,6 +1294,8 @@ class RelayServer {
               return { targetInfo: buildTargetInfo(target) };
             }
           }
+          const oopif = this.oopifTargets.get(params.targetId);
+          if (oopif) return { targetInfo: oopif.targetInfo };
         }
         // No targetId or unrecognized targetId → return browser target
         return {
@@ -1277,6 +1316,9 @@ class RelayServer {
             return { sessionId };
           }
         }
+        // Cross-origin iframe (OOPIF): resolve to the existing child sessionId.
+        const oopif = this.oopifTargets.get(params.targetId);
+        if (oopif) return { sessionId: oopif.childSessionId };
         throw new Error(`Target ${params.targetId} not found or not attached`);
       }
 
@@ -1532,6 +1574,9 @@ class RelayServer {
     // Clean up child sessions
     for (const [childId, child] of this.childSessions) {
       if (child.tabId === tabId) this.childSessions.delete(childId);
+    }
+    for (const [targetId, info] of this.oopifTargets) {
+      if (info.tabId === tabId) this.oopifTargets.delete(targetId);
     }
 
     this.targets.delete(sessionId);
