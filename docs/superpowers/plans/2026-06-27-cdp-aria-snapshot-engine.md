@@ -1943,3 +1943,19 @@ EOF
 - [ ] `a11y-labels.js` untouched + green; `pnpm test` green; no stale references.
 - [ ] Knowledge timeline + `AGENTS.md` updated; atomic commits per task.
 
+---
+
+## Post-Implementation Amendments (Codex code-review reconciliation)
+
+These were **plan gaps** surfaced by the post-implementation Codex code review (model `gpt-5.5`, session `019f0899…`, APPROVED Round 4). The implementation followed the plan faithfully; the plan simply did not anticipate these edge cases. Recorded so the plan stays a learning artifact.
+
+1. **OOPIF session-acquisition error discrimination (Round 1 CRITICAL).** The plan said "OOPIF via `newCDPSession(frame)`; same-origin throws → fall back to page session", but did not distinguish the *genuine* same-origin error from an *unexpected* acquisition failure. Fix: `isSameOriginFrameSessionError()` keyed on Playwright's exact stable string (`crBrowser.js:507`); explicit `frame` scope now **rethrows** unexpected failures (instead of silently scoping the page session to the whole page); the full-page walk best-effort skips them. Root cause: plan treated all `newCDPSession` throws as same-origin.
+
+2. **Child-frame empty-AX retry contract (Round 1 IMPORTANT).** The plan specified the empty-AX retry/throw only for the main session. Child OOPIF fetches must share it. Fix: extracted `fetchDomAndAxWithRetry(session)` used by both main and child paths. Root cause: plan's retry rule wasn't propagated to the Phase-2 child path.
+
+3. **Scoped-snapshot diff-cache key (Round 1 IMPORTANT).** The plan didn't note that `exec-engine` keys the last-snapshot cache by scope. A `snapshot({ frame })` was overwriting the `__full_page__` baseline. Fix: added a `__frame__` bucket to `snapshotKey`. Root cause: plan didn't enumerate the diff-cache keys vs the new `frame` scope.
+
+4. **Visible degradation for full-page OOPIF failures (Round 2 IMPORTANT).** The plan documented the nested-OOPIF limitation but not the *silent* drop of a first-level OOPIF that fails to acquire/fetch or is empty. Fix: `getAriaSnapshot` returns `frameErrors`, surfaced via `renderFrameErrors` as a `⚠️ N subframe(s) not stitched` block (best-effort skip kept — one flaky/blank cross-origin iframe must not break the whole-page snapshot). Root cause: plan's "best-effort" wasn't paired with a visibility requirement.
+
+5. **Consumer parity for `frameErrors` (Round 3 IMPORTANT).** Surfacing was added to the two `exec-engine` consumers but the plan didn't enumerate the third direct consumer (CLI `bin.js cmdSnapshot`, re-pointed in Task 6). Fix: `cmdSnapshot` now renders `frameErrors` identically. Root cause: plan didn't maintain a canonical list of direct `getAriaSnapshot` consumers.
+
