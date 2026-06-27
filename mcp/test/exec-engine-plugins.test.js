@@ -411,6 +411,57 @@ test('plugin helper receives null page gracefully when no page open', async () =
   assert.equal(result, 'no-page');
 });
 
+// ─── Execute timeout lifecycle ───────────────────────────────────────────────
+// A timed-out snippet must stop being able to mutate state or drive Chrome after
+// the timeout fires. These regressions pin the current leak; they are made to
+// pass across Tasks 3-4 (run controller + handle fencing). The synchronous
+// runaway regression is intentionally added in Task 2, after runCode() enters
+// vm.runInContext() — adding it here would hang the event loop under new Function().
+
+test('runCode timeout stops late timer continuations from mutating state', async () => {
+  const ctx = buildExecContext(mockPage, mockCtx, {}, {}, {});
+
+  await assert.rejects(
+    () => runCode(`
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      state.leakedAfterTimeout = true;
+      return 'late';
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+  assert.equal(ctx.state.leakedAfterTimeout, undefined);
+
+  const nextResult = await runCode('return "next-run-ok";', ctx, 1000);
+  assert.equal(nextResult, 'next-run-ok');
+});
+
+test('runCode timeout fences async continuations after a stored-handle call', async () => {
+  const slowPage = {
+    isClosed: () => false,
+    url: () => 'about:blank',
+    title: async () => 'Slow',
+    delayed: async () => {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+      return 'done';
+    },
+  };
+  const ctx = buildExecContext(slowPage, { pages: () => [slowPage] }, {}, {}, {});
+  ctx.state.page = slowPage; // stored handle assigned by a prior step
+
+  await assert.rejects(
+    () => runCode(`
+      await state.page.delayed();
+      state.leakedAfterStoredHandle = true;
+    `, ctx, 10),
+    /Code execution timed out after 10ms/,
+  );
+
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+  assert.equal(ctx.state.leakedAfterStoredHandle, undefined);
+});
+
 test('official plugin canonical helper names remain available alongside aliases', async () => {
   const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
   const { default: highlightPlugin } = await import('../../plugins/official/highlight/index.js');
