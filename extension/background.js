@@ -1,5 +1,5 @@
 import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
-import { resolveCreateWindowId } from './window-affinity.js';
+import { resolveCreateWindowPlan } from './window-affinity.js';
 
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
@@ -302,10 +302,11 @@ async function getCurrentWindowId() {
   return undefined;
 }
 
-// Resolve the window a new agent tab should open in. Honors the relay-pinned
-// `params.windowId` when that window still exists, otherwise falls back to the
-// current focused window (which becomes the new pinned window upstream).
-async function resolveCreateTabWindowId(params) {
+// Resolve where a new agent tab should open. Honors the relay-pinned
+// `params.windowId` when that window still exists; otherwise, when dedicated
+// mode is on, plans a fresh background window, else falls back to the current
+// focused window (which becomes the new pinned window upstream).
+async function resolveCreateTabWindowPlan(params, dedicatedWindowEnabled) {
   const requestedWindowId = params?.windowId;
   let isRequestedWindowValid = false;
   if (Number.isInteger(requestedWindowId)) {
@@ -313,12 +314,17 @@ async function resolveCreateTabWindowId(params) {
       const win = await chrome.windows.get(requestedWindowId);
       isRequestedWindowValid = !!win && typeof win.id === 'number';
     } catch {
-      // The pinned window may have been closed; fall back to the current window.
+      // The pinned window may have been closed; fall back per the plan.
       isRequestedWindowValid = false;
     }
   }
   const currentWindowId = await getCurrentWindowId();
-  return resolveCreateWindowId({ requestedWindowId, isRequestedWindowValid, currentWindowId });
+  return resolveCreateWindowPlan({
+    requestedWindowId,
+    isRequestedWindowValid,
+    currentWindowId,
+    dedicatedWindowEnabled,
+  });
 }
 
 async function listTabs() {
@@ -422,7 +428,10 @@ async function detachTab(tabId) {
 async function createTab(params) {
   // Check restrictions
   const settings = await new Promise((resolve) => {
-    chrome.storage.local.get(['mode', 'noNewTabs', 'lockUrl', 'readOnly', 'userInstructions'], resolve);
+    chrome.storage.local.get(
+      ['mode', 'noNewTabs', 'lockUrl', 'readOnly', 'userInstructions', 'dedicatedWindow'],
+      resolve,
+    );
   });
 
   if (settings.mode === 'manual' || settings.noNewTabs) {
@@ -437,22 +446,35 @@ async function createTab(params) {
   }
 
   const agentSettings = await getAgentExecutionSettings();
-  const windowId = await resolveCreateTabWindowId(params);
-  const createOptions = {
-    url: params.url || 'about:blank',
-    // Keep agent-created tabs visible; do not spawn separate windows.
-    active: true,
-  };
-  if (typeof windowId === 'number') {
-    createOptions.windowId = windowId;
-  }
+  const plan = await resolveCreateTabWindowPlan(params, !!settings.dedicatedWindow);
 
-  // rotate-visible remains normalized to visible tab creation in current window.
-  if (agentSettings.parallelVisibilityMode === 'rotate-visible') {
-    createOptions.active = true;
-  }
+  let tab;
+  if (plan.action === 'new-window') {
+    // Dedicated agent window: open in the background so the user keeps focus.
+    const win = await chrome.windows.create({
+      url: params.url || 'about:blank',
+      focused: false,
+      type: 'normal',
+    });
+    tab = win?.tabs?.[0];
+    if (!tab) throw new Error('Failed to create dedicated agent window');
+  } else {
+    const createOptions = {
+      url: params.url || 'about:blank',
+      // Keep agent-created tabs visible; do not spawn separate windows.
+      active: true,
+    };
+    if (typeof plan.windowId === 'number') {
+      createOptions.windowId = plan.windowId;
+    }
 
-  const tab = await chrome.tabs.create(createOptions);
+    // rotate-visible remains normalized to visible tab creation in current window.
+    if (agentSettings.parallelVisibilityMode === 'rotate-visible') {
+      createOptions.active = true;
+    }
+
+    tab = await chrome.tabs.create(createOptions);
+  }
 
   // Brief delay for Chrome to finalize tab creation
   await sleep(200);
