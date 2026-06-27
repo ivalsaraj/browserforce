@@ -171,8 +171,7 @@ async function cmdScreenshot() {
 
 async function cmdSnapshot() {
   const index = parseInt(positionals[1] || '0', 10);
-  const { getAccessibilityTree, getStableIds } = await import('./mcp/src/exec-engine.js');
-  const { buildSnapshotText, annotateStableAttrs } = await import('./mcp/src/snapshot.js');
+  const { getAriaSnapshot, renderRefLines } = await import('./mcp/src/aria-snapshot-engine.js');
   const browser = await connectBrowser();
   try {
     const pages = getFirstContext(browser).pages();
@@ -181,16 +180,18 @@ async function cmdSnapshot() {
       process.exit(1);
     }
     const page = pages[index];
-    const axRoot = await getAccessibilityTree(page);
-    if (!axRoot) { console.log('No accessibility tree available.'); return; }
-    const stableIds = await getStableIds(page);
-    annotateStableAttrs(axRoot, stableIds);
-    const { text, refs } = buildSnapshotText(axRoot);
-    const refTable = refs.length > 0
-      ? '\n\n--- Ref → Locator ---\n' + refs.map(r => `${r.ref}: ${r.locator}`).join('\n')
+    const cdp = await page.context().newCDPSession(page);
+    let result;
+    try {
+      result = await getAriaSnapshot({ page, cdp, interactiveOnly: false });
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+    const refTable = result.refs.length > 0
+      ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}): ${r.locator ?? '(frame-scoped)'}`).join('\n')
       : '';
     const title = await page.title().catch(() => '');
-    output(`Page: ${title} (${page.url()})\nRefs: ${refs.length} interactive elements\n\n${text}${refTable}`, values.json);
+    output(`Page: ${title} (${page.url()})\nRefs: ${result.refs.length} interactive elements\n\n${renderRefLines(result.tree)}${refTable}`, values.json);
   } finally {
     await browser.close().catch(() => {});
   }
