@@ -2,7 +2,8 @@
 // Ported from Playwriter (aria-snapshot.ts) to standard playwright-core. Builds an
 // AX snapshot via CDP Accessibility.getFullAXTree + DOM.getFlattenedDocument,
 // cross-referenced by backendNodeId, with frame/locator/interactiveOnly scoping.
-// Cross-origin OOPIF stitching is added in Phase 2.
+// Phase 2 stitches same-origin + cross-origin (OOPIF) subframe content under their iframe
+// leaves with frameChain-aware refs (see getAriaSnapshot).
 
 import crypto from 'node:crypto';
 import {
@@ -113,17 +114,24 @@ function shiftIndent(nodes, offset) {
   return nodes.map((node) => ({ ...node, indentOffset: (node.indentOffset ?? 0) + offset }));
 }
 
-export function buildRawSnapshotTree({ nodeId, axById, isNodeInScope }) {
+export function buildRawSnapshotTree({ nodeId, axById, isNodeInScope, frameBoundaryBackendIds }) {
   const node = axById.get(nodeId);
   if (!node) return null;
   const role = getAxRole(node);
   const name = getAxValueString(node.name).trim();
-  const children = (node.childIds ?? [])
-    .map((childId) => buildRawSnapshotTree({ nodeId: childId, axById, isNodeInScope }))
-    .filter(isTruthy);
-  const inScope = isNodeInScope(node) || children.length > 0;
+  // An <iframe>/<frame> element node is a frame boundary: keep it but stop recursing
+  // (its content is (re)assembled by the frame walk and stitched back under it).
+  const isFrameBoundary = !!frameBoundaryBackendIds
+    && node.backendDOMNodeId != null
+    && frameBoundaryBackendIds.has(node.backendDOMNodeId);
+  const children = isFrameBoundary
+    ? []
+    : (node.childIds ?? [])
+        .map((childId) => buildRawSnapshotTree({ nodeId: childId, axById, isNodeInScope, frameBoundaryBackendIds }))
+        .filter(isTruthy);
+  const inScope = isNodeInScope(node) || children.length > 0 || isFrameBoundary;
   if (!inScope) return null;
-  return { role, name, backendNodeId: node.backendDOMNodeId, ignored: node.ignored, children };
+  return { role, name, backendNodeId: node.backendDOMNodeId, ignored: node.ignored, isFrameBoundary, children };
 }
 
 export function filterInteractiveSnapshotTree(options) {
@@ -141,6 +149,11 @@ export function filterInteractiveSnapshotTree(options) {
   }));
   const childNodes = childResults.flatMap((r) => r.nodes);
   const childNames = childResults.reduce((acc, r) => { r.names.forEach((n) => acc.add(n)); return acc; }, new Set());
+
+  // Frame-boundary nodes always survive so the walk can stitch frame content under them.
+  if (node.isFrameBoundary) {
+    return { nodes: [{ role, name, baseLocator: undefined, ref: undefined, backendNodeId: node.backendNodeId, children: childNodes }], names: childNames };
+  }
 
   if (node.ignored) return { nodes: shiftIndent(childNodes, 1), names: childNames };
 
@@ -198,6 +211,11 @@ export function filterFullSnapshotTree(options) {
   }));
   const childNodes = childResults.flatMap((r) => r.nodes);
   const childNames = childResults.reduce((acc, r) => { r.names.forEach((n) => acc.add(n)); return acc; }, new Set());
+
+  // Frame-boundary nodes always survive so the walk can stitch frame content under them.
+  if (node.isFrameBoundary) {
+    return { nodes: [{ role, name, baseLocator: undefined, ref: undefined, backendNodeId: node.backendNodeId, children: childNodes }], names: childNames };
+  }
 
   if (node.ignored) return { nodes: shiftIndent(childNodes, 1), names: childNames };
 
@@ -411,9 +429,142 @@ function findRootAxNodeId(axNodes, scopeRootBackendId, axByBackendId) {
   return root ? root.nodeId : null;
 }
 
-// Pure assembly from already-fetched CDP arrays. Separated from I/O so it can be
-// unit-tested with fabricated fixtures (no browser).
-export function assembleSnapshot({ axNodes, domNodes, scopeBackendId = null, interactiveOnly = false, refFilter, frameChain = [] }) {
+// ── Phase 2 frame helpers (pure) ─────────────────────────────────────────────
+
+// backendNodeIds of <iframe>/<frame> elements — the frame-boundary leaves of an assembly.
+export function collectFrameBoundaryBackendIds(domNodes) {
+  const ids = new Set();
+  for (const n of domNodes) {
+    const name = (n.nodeName || '').toUpperCase();
+    if ((name === 'IFRAME' || name === 'FRAME') && n.backendNodeId != null) ids.add(n.backendNodeId);
+  }
+  return ids;
+}
+
+// Selector for an <iframe> element from its DOM attributes (a Map), preferring stable
+// attributes, then name/title/src, then nth among iframes (computed by the caller).
+export function deriveIframeSelector(ownerAttrs, nthIndex) {
+  const attrs = ownerAttrs instanceof Map ? ownerAttrs : new Map();
+  const stable = getStableRefFromAttributes(attrs);
+  if (stable) return buildLocatorFromStable(stable);
+  for (const attr of ['name', 'title', 'src']) {
+    const v = attrs.get(attr);
+    if (v) return `iframe[${attr}="${escapeLocatorName(v)}"]`;
+  }
+  return `iframe >> nth=${nthIndex ?? 0}`;
+}
+
+// Attach childNodes under the tree node whose backendNodeId === ownerBackendId. Pure.
+// Default 'append' is used for every frame because parent assembly cut iframe content
+// (frame boundaries are leaves); the walk supplies the real content.
+export function stitchFrameTree(tree, ownerBackendId, childNodes, { mode = 'append' } = {}) {
+  const walk = (nodes) => nodes.map((node) => {
+    if (node.backendNodeId === ownerBackendId) {
+      const base = mode === 'replace' ? [] : (node.children ?? []);
+      return { ...node, children: [...base, ...childNodes] };
+    }
+    return { ...node, children: walk(node.children ?? []) };
+  });
+  return walk(tree);
+}
+
+// token value (from a tagged attribute) → { backendNodeId, attrs } by scanning flattened DOM.
+export function mapTokenToBackendId(domNodes, attr) {
+  const map = new Map();
+  for (const n of domNodes) {
+    if (!n.attributes) continue;
+    for (let i = 0; i < n.attributes.length; i += 2) {
+      if (n.attributes[i] === attr) {
+        map.set(n.attributes[i + 1], { backendNodeId: n.backendNodeId, attrs: toAttributeMap(n.attributes) });
+      }
+    }
+  }
+  return map;
+}
+
+// Owner index in flattened-DOM order — deterministic nth fallback for deriveIframeSelector.
+// Global DOM order; per-parent-document nth for nested same-origin frames is a documented
+// edge (see Task 13 limitation) — acceptable since attribute-less nested iframes are rare.
+function iframeNthIndex(domNodes, backendNodeId) {
+  let seen = -1;
+  for (const n of domNodes) {
+    const name = (n.nodeName || '').toUpperCase();
+    if (name !== 'IFRAME' && name !== 'FRAME') continue;
+    seen += 1;
+    if (n.backendNodeId === backendNodeId) return seen;
+  }
+  return 0;
+}
+
+// Topologically order frame metas so a parent is stitched before its children (stitchFrameTree
+// needs the parent's iframe leaf already present in the tree). Uses PUBLIC parentFrame() only.
+export function orderFramesParentFirst(frameMeta) {
+  const depth = (f) => {
+    let d = 0;
+    let cur = typeof f?.parentFrame === 'function' ? f.parentFrame() : null;
+    while (cur) { d += 1; cur = typeof cur.parentFrame === 'function' ? cur.parentFrame() : null; }
+    return d;
+  };
+  return [...frameMeta].sort((a, b) => depth(a.frame) - depth(b.frame));
+}
+
+// Compose the iframe-selector chain (top → target) by walking the PUBLIC parentFrame() chain.
+// Each meta carries a precomputed `iframeSelector` (deriveIframeSelector of its owner element),
+// resolved at the call site where owner attrs are in hand. (Codex plan's loose
+// `(frame, ownerByToken, domNodes)` signature can't map frame→owner-token without per-frame
+// state, so the selector is precomputed and read here.) Pure given metaByFrame.
+export function buildFrameChain(frame, metaByFrame) {
+  const chain = [];
+  let cur = frame;
+  while (cur && typeof cur.parentFrame === 'function' && cur.parentFrame()) {
+    const meta = metaByFrame.get(cur);
+    chain.unshift(meta?.iframeSelector ?? 'iframe');
+    cur = cur.parentFrame();
+  }
+  return chain;
+}
+
+// Shared ref context: one per snapshot so eN fallbacks + dedup stay globally unique across
+// every (main + per-frame) assembly. Per-assembly data (domByBackendId, promoted ids,
+// frameChain) is passed per call, NOT closed over, so one context spans multiple frames.
+export function createRefContext() {
+  const refCounts = new Map();
+  let fallbackCounter = 0;
+  const refs = [];
+  const createRefForNode = ({ backendNodeId, role, name, frameChain, domByBackendId, promotedContentEditableIds }) => {
+    if (!INTERACTIVE_ROLES.has(role)) return null;
+    const domInfo = backendNodeId ? domByBackendId.get(backendNodeId) : undefined;
+    const stable = domInfo ? getStableRefFromAttributes(domInfo.attributes) : null;
+    let baseRef = stable?.value;
+    if (!baseRef) { fallbackCounter += 1; baseRef = `e${fallbackCounter}`; }
+    const count = refCounts.get(baseRef) ?? 0;
+    refCounts.set(baseRef, count + 1);
+    const ref = count === 0 ? baseRef : `${baseRef}-${count + 1}`;
+    let locator;
+    if (stable && count === 0) locator = buildLocatorFromStable(stable);
+    if (!locator && backendNodeId != null && promotedContentEditableIds.has(backendNodeId)) locator = '[contenteditable="true"]';
+    refs.push({ ref, role, name, locator, backendNodeId, frameChain });
+    return ref;
+  };
+  return { refCounts, refs, createRefForNode };
+}
+
+// Replace each ref's bare baseLocator with the nth-disambiguated locator from the finalized
+// tree (and attach shortRef). Refs not present in the finalized tree keep their own locator.
+// Shared by the standalone and multi-frame paths so both agree with the rendered text.
+export function reconcileRefLocators(refs, finalizedTree, shortRefMap) {
+  const finalLocatorByRef = new Map();
+  const collect = (items) => items.forEach((it) => { if (it.ref) finalLocatorByRef.set(it.ref, it.locator); collect(it.children ?? []); });
+  collect(finalizedTree);
+  return refs.map((r) => ({ ...r, locator: finalLocatorByRef.get(r.ref) ?? r.locator, shortRef: shortRefMap.get(r.ref) ?? r.ref }));
+}
+
+// PRE-finalize builder: filtered/scoped node tree whose nodes still carry `baseLocator` +
+// `ref`, with refs pushed into the shared refCtx. Used by the main tree AND every per-frame
+// call. `frameBoundaryBackendIds` makes <iframe>/<frame> nodes leaves (content stitched later).
+// NOT finalized — callers finalize once (assembleSnapshot for one tree; the walk for many).
+export function buildScopedNodes({ axNodes, domNodes, scopeBackendId = null, interactiveOnly = false, refFilter, frameChain = [], refCtx, frameBoundaryBackendIds }) {
+  const ctx = refCtx ?? createRefContext();
   const { domById, domByBackendId, childrenByParent } = buildDomIndex(domNodes);
   const { axById, axByBackendId } = indexAxNodes(axNodes);
   const promotedContentEditableIds = promoteContentEditable(domByBackendId, axByBackendId);
@@ -435,47 +586,37 @@ export function assembleSnapshot({ axNodes, domNodes, scopeBackendId = null, int
     return allowedBackendIds.has(node.backendDOMNodeId);
   };
 
-  const refCounts = new Map();
-  let fallbackCounter = 0;
-  const refs = [];
-  const createRefForNode = ({ backendNodeId, role, name }) => {
-    if (!INTERACTIVE_ROLES.has(role)) return null;
-    const domInfo = backendNodeId ? domByBackendId.get(backendNodeId) : undefined;
-    const stable = domInfo ? getStableRefFromAttributes(domInfo.attributes) : null;
-    let baseRef = stable?.value;
-    if (!baseRef) { fallbackCounter += 1; baseRef = `e${fallbackCounter}`; }
-    const count = refCounts.get(baseRef) ?? 0;
-    refCounts.set(baseRef, count + 1);
-    const ref = count === 0 ? baseRef : `${baseRef}-${count + 1}`;
-    let locator;
-    if (stable && count === 0) locator = buildLocatorFromStable(stable);
-    if (!locator && backendNodeId != null && promotedContentEditableIds.has(backendNodeId)) locator = '[contenteditable="true"]';
-    refs.push({ ref, role, name, locator, backendNodeId, frameChain });
-    return ref;
-  };
+  // Per-assembly wrapper: binds this frame's domByBackendId/promoted ids/frameChain to the
+  // shared ref context so the filter call signature stays unchanged.
+  const createRefForNode = ({ backendNodeId, role, name }) => ctx.createRefForNode({
+    backendNodeId, role, name, frameChain, domByBackendId, promotedContentEditableIds,
+  });
 
   let snapshotNodes = [];
   if (rootAxNodeId) {
     const rootNode = axById.get(rootAxNodeId);
     const rootRole = rootNode ? getAxRole(rootNode) : '';
     const rawRoots = (rootNode && (rootRole === 'rootwebarea' || rootRole === 'webarea') && rootNode.childIds)
-      ? rootNode.childIds.map((id) => buildRawSnapshotTree({ nodeId: id, axById, isNodeInScope })).filter(isTruthy)
-      : [buildRawSnapshotTree({ nodeId: rootAxNodeId, axById, isNodeInScope })].filter(isTruthy);
+      ? rootNode.childIds.map((id) => buildRawSnapshotTree({ nodeId: id, axById, isNodeInScope, frameBoundaryBackendIds })).filter(isTruthy)
+      : [buildRawSnapshotTree({ nodeId: rootAxNodeId, axById, isNodeInScope, frameBoundaryBackendIds })].filter(isTruthy);
     snapshotNodes = rawRoots.flatMap((rawNode) => (interactiveOnly
       ? filterInteractiveSnapshotTree({ node: rawNode, ancestorNames: [], labelContext: false, refFilter, domByBackendId, promotedContentEditableIds, createRefForNode }).nodes
       : filterFullSnapshotTree({ node: rawNode, ancestorNames: [], refFilter, domByBackendId, promotedContentEditableIds, createRefForNode }).nodes));
   }
 
-  const lines = buildSnapshotLines(snapshotNodes);
-  const shortRefMap = buildShortRefMap({ refs });
-  const { snapshot, tree } = finalizeSnapshotOutput(lines, snapshotNodes, shortRefMap);
-  // Replace each ref's bare baseLocator with the nth-disambiguated locator from
-  // the finalized tree so refs and rendered text agree.
-  const finalLocatorByRef = new Map();
-  const collect = (items) => items.forEach((it) => { if (it.ref) finalLocatorByRef.set(it.ref, it.locator); collect(it.children); });
-  collect(tree);
-  const refsOut = refs.map((r) => ({ ...r, locator: finalLocatorByRef.get(r.ref) ?? r.locator, shortRef: shortRefMap.get(r.ref) ?? r.ref }));
-  return { snapshot, tree, refs: refsOut };
+  return { nodes: snapshotNodes, refCtx: ctx };
+}
+
+// Standalone single-tree assembly (Phase 1 / explicit scope): build + finalize once.
+// NEVER call twice with a shared refCtx — it finalizes/reconciles its OWN tree per call.
+// Multi-frame stitching uses buildScopedNodes per frame + a single finalize (see the walk).
+export function assembleSnapshot(opts) {
+  const { nodes, refCtx } = buildScopedNodes(opts);
+  const lines = buildSnapshotLines(nodes);
+  const shortRefMap = buildShortRefMap({ refs: refCtx.refs });
+  const { snapshot, tree } = finalizeSnapshotOutput(lines, nodes, shortRefMap);
+  const refs = reconcileRefLocators(refCtx.refs, tree, shortRefMap);
+  return { snapshot, tree, refs, refCtx };
 }
 
 function isEmptyAx(axNodes) {
@@ -504,14 +645,23 @@ function isEmptyAx(axNodes) {
  *     pass `getFullAXTree({ frameId })`).
  * DOM + AX are ALWAYS fetched from the SAME session — backendNodeIds are per-process, so
  * mixing a page session's DOM with a frame session's AX would mis-resolve refs.
- * Returns { snapshot, tree, refs, mainDomNodes }. mainDomNodes is the scope session's
- * flattened DOM, consumed by the Phase 2 frame walk (Task 13). refs:
- * { ref, role, name, locator, backendNodeId, frameChain, shortRef }.
+ *
+ * Phase 2 (Task 13): with NO explicit `frame`/`locator`, the engine also stitches subframe
+ * content. Every <iframe>/<frame> is a leaf in the main tree (boundary cutoff); each subframe
+ * is (re)assembled once into the SAME shared `refCtx` — OOPIF via `newCDPSession(frame)`,
+ * same-origin from the parent session scoped to the frame root — then stitched under its owner
+ * leaf by backendNodeId, and the whole tree is finalized exactly once. In-frame refs carry a
+ * `frameChain` (iframe selectors top→target) so `locatorForRef` can pierce via `frameLocator`.
+ * Explicit `frame`/`locator` keeps Phase-1 single-region behavior (empty frameChain).
+ *
+ * Returns { snapshot, tree, refs, mainDomNodes }. mainDomNodes is the page session's flattened
+ * DOM. refs: { ref, role, name, locator, backendNodeId, frameChain, shortRef }.
  */
 export async function getAriaSnapshot({ page, frame, locator, refFilter, interactiveOnly = false, cdp }) {
   if (!cdp) throw new Error('getAriaSnapshot requires a page CDP session (cdp). Pass getCDPSession({ page }).');
   const resolvedFrame = await resolveFrame({ frame, page });
   const isSubframe = !!resolvedFrame && resolvedFrame !== page.mainFrame();
+  const explicitScope = !!locator || isSubframe; // explicit region → Phase-1 single assembly
 
   let scopeCdp = cdp;
   let ownsScopeCdp = false;
@@ -534,12 +684,39 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
   const scopeValue = crypto.randomUUID();
   let scopeApplied = false;
 
+  // Phase-2 frame-walk bookkeeping (populated only on the no-explicit-scope page path).
+  const OWNER_ATTR = 'data-pw-frame-owner';
+  const ROOT_ATTR = 'data-pw-frame-root';
+  const frameMeta = [];      // { frame, ownerToken, rootToken, iframeSelector?, frameChain? }
+  const tagged = [];         // { ownerHandle, frame, rootToken } — attributes to clean up
+  const childSessions = [];  // OOPIF sessions owned + detached by the walk
+
   try {
     // Reconciliation 5: Accessibility.enable is NOT in the relay's INIT_ONLY_METHODS, so it
     // triggers lazy debugger attach. DOM.enable IS init-only and would no-op on an
     // unattached tab — enable AX first so the debugger is attached before DOM use.
     await scopeCdp.send('Accessibility.enable');
     await scopeCdp.send('DOM.enable');
+
+    // Tag every subframe's owner element + content root BEFORE the main fetch so the page DOM
+    // carries the tokens in one pass. Owner attrs land in the page DOM (the <iframe> lives in
+    // the parent doc); same-origin content roots land there too (pierce:true), OOPIF roots do
+    // not (cross-process) — those go through the newCDPSession branch instead.
+    if (!explicitScope && typeof page.frames === 'function') {
+      for (const f of page.frames()) {
+        if (f === page.mainFrame()) continue;
+        const ownerToken = crypto.randomUUID();
+        const rootToken = crypto.randomUUID();
+        let ownerHandle;
+        try {
+          ownerHandle = await f.frameElement();
+          await ownerHandle.evaluate((el, t) => el.setAttribute('data-pw-frame-owner', t), ownerToken);
+        } catch { continue; }   // frame detached / owner not reachable
+        await f.locator(':root').evaluate((el, t) => el.setAttribute('data-pw-frame-root', t), rootToken).catch(() => {});
+        tagged.push({ ownerHandle, frame: f, rootToken });
+        frameMeta.push({ frame: f, ownerToken, rootToken });
+      }
+    }
 
     if (scopeTarget) {
       await scopeTarget.evaluate((el, data) => el.setAttribute(data.attr, data.value), { attr: scopeAttr, value: scopeValue });
@@ -564,20 +741,85 @@ export async function getAriaSnapshot({ page, frame, locator, refFilter, interac
       }
     }
 
-    let scopeBackendId = null;
-    if (scopeTarget) {
-      const scopeNodeId = findScopeRootNodeId(domNodes, scopeAttr, scopeValue);
-      if (scopeNodeId != null) {
-        const { domById } = buildDomIndex(domNodes);
-        scopeBackendId = domById.get(scopeNodeId)?.backendNodeId ?? null;
+    // ── Explicit scope (Phase 1): one region, no recursive walk, empty frameChain. ──
+    if (explicitScope) {
+      let scopeBackendId = null;
+      if (scopeTarget) {
+        const scopeNodeId = findScopeRootNodeId(domNodes, scopeAttr, scopeValue);
+        if (scopeNodeId != null) {
+          const { domById } = buildDomIndex(domNodes);
+          scopeBackendId = domById.get(scopeNodeId)?.backendNodeId ?? null;
+        }
       }
+      const assembled = assembleSnapshot({ axNodes, domNodes, scopeBackendId, interactiveOnly, refFilter, frameChain: [] });
+      return { ...assembled, mainDomNodes: domNodes };
     }
 
-    const assembled = assembleSnapshot({ axNodes, domNodes, scopeBackendId, interactiveOnly, refFilter, frameChain: [] });
-    return { ...assembled, mainDomNodes: domNodes };
+    // ── Full page (Phase 2): main tree with iframes as leaves, then stitch each subframe. ──
+    const mainBoundaryIds = collectFrameBoundaryBackendIds(domNodes);
+    const { nodes: mainNodes, refCtx } = buildScopedNodes({
+      axNodes, domNodes, interactiveOnly, refFilter, frameChain: [],
+      frameBoundaryBackendIds: mainBoundaryIds,
+    });
+
+    const ownerByToken = mapTokenToBackendId(domNodes, OWNER_ATTR); // token -> { backendNodeId, attrs }
+    const rootByToken = mapTokenToBackendId(domNodes, ROOT_ATTR);   // same-origin content roots
+    const metaByFrame = new Map();
+    for (const meta of frameMeta) {
+      const owner = ownerByToken.get(meta.ownerToken);
+      meta.iframeSelector = owner
+        ? deriveIframeSelector(owner.attrs, iframeNthIndex(domNodes, owner.backendNodeId))
+        : 'iframe';
+      metaByFrame.set(meta.frame, meta);
+    }
+
+    let stitched = mainNodes;
+    for (const meta of orderFramesParentFirst(frameMeta)) {
+      const owner = ownerByToken.get(meta.ownerToken);
+      if (!owner) continue;   // owner not in the page-process DOM (e.g. nested inside an OOPIF)
+      meta.frameChain = buildFrameChain(meta.frame, metaByFrame);
+      let childNodes;
+      try {
+        const frameCdp = await page.context().newCDPSession(meta.frame); // OOPIF only (else throws)
+        childSessions.push(frameCdp);
+        await frameCdp.send('Accessibility.enable');
+        await frameCdp.send('DOM.enable');
+        const [{ nodes: cDom }, { nodes: cAx }] = await Promise.all([
+          frameCdp.send('DOM.getFlattenedDocument', { depth: -1, pierce: true }),
+          frameCdp.send('Accessibility.getFullAXTree'),
+        ]);
+        ({ nodes: childNodes } = buildScopedNodes({
+          axNodes: cAx, domNodes: cDom, interactiveOnly, refFilter,
+          frameChain: meta.frameChain, refCtx,
+          frameBoundaryBackendIds: collectFrameBoundaryBackendIds(cDom),
+        }));
+      } catch {
+        // same-origin: re-assemble from the parent session's already-fetched axNodes/domNodes,
+        // scoped to the frame's content root, SAME boundary cutoff (nested iframes stay leaves).
+        const rootBackendId = rootByToken.get(meta.rootToken)?.backendNodeId;
+        if (rootBackendId == null) continue;
+        ({ nodes: childNodes } = buildScopedNodes({
+          axNodes, domNodes, scopeBackendId: rootBackendId, interactiveOnly, refFilter,
+          frameChain: meta.frameChain, refCtx, frameBoundaryBackendIds: mainBoundaryIds,
+        }));
+      }
+      stitched = stitchFrameTree(stitched, owner.backendNodeId, childNodes);
+    }
+
+    // ── finalize ONCE over the fully-stitched pre-finalize node tree ──
+    const lines = buildSnapshotLines(stitched);
+    const shortRefMap = buildShortRefMap({ refs: refCtx.refs });
+    const { snapshot, tree } = finalizeSnapshotOutput(lines, stitched, shortRefMap);
+    const refs = reconcileRefLocators(refCtx.refs, tree, shortRefMap);
+    return { snapshot, tree, refs, mainDomNodes: domNodes };
   } finally {
     if (scopeApplied && scopeTarget) {
       await scopeTarget.evaluate((el, attr) => el.removeAttribute(attr), scopeAttr).catch(() => {});
+    }
+    for (const s of childSessions) await s.detach().catch(() => {});
+    for (const t of tagged) {
+      await t.ownerHandle.evaluate((el, a) => el.removeAttribute(a), OWNER_ATTR).catch(() => {});
+      await t.frame.locator(`[data-pw-frame-root="${t.rootToken}"]`).evaluate((el, a) => el.removeAttribute(a), ROOT_ATTR).catch(() => {});
     }
     if (ownsScopeCdp) await scopeCdp.detach().catch(() => {});
   }
