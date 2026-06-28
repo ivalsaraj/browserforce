@@ -16,6 +16,11 @@ const { values, positionals } = parseArgs({
     help: { type: 'boolean', short: 'h', default: false },
     // Atomic session-backed verbs (route through the sessiond daemon).
     sessiond: { type: 'boolean', default: false },
+    // Backend selection (parsed by the canonical resolveRequestedBackend()).
+    real: { type: 'boolean', default: false },
+    managed: { type: 'boolean', default: false },
+    headless: { type: 'boolean', default: false },
+    backend: { type: 'string' },
     selector: { type: 'string' },
     search: { type: 'string' },
     'interactive-only': { type: 'boolean', default: false },
@@ -788,18 +793,39 @@ async function cmdAgent() {
   process.exit(1);
 }
 
+// Read this CLI package's version (the version a freshly-spawned daemon will
+// report). Used to restart a daemon left running by a previous, older install.
+async function getCliPkgVersion() {
+  try {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const pkgDir = dirname(fileURLToPath(import.meta.url));
+    return JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version || null;
+  } catch {
+    return null;
+  }
+}
+
 // Spawn the sessiond daemon detached and wait for it to publish its lock.
-// The daemon self-picks its port/token; the parent only inherits env (incl.
-// BF_SESSIOND_LOCK_PATH / BF_BROWSER_BACKEND) and waits. Throws on fast-fail.
+// The daemon self-picks its port/token; the parent resolves the requested
+// backend from CLI flags/env via the canonical resolveRequestedBackend() and
+// forwards it as BF_BROWSER_BACKEND so `--real`/`--managed`/`--headless`/
+// `--backend` actually drive negotiation (and `--real` fails loud at startup).
+// Throws on fast-fail or conflicting/unknown backend flags.
 async function startSessiondDaemon() {
   const { readSessiondLock } = await import('./cli/session-client.js');
+  const { resolveRequestedBackend } = await import('./mcp/src/backend-selection.js');
   const { spawn } = await import('node:child_process');
   const sessiondPath = fileURLToPath(new URL('./cli/sessiond.js', import.meta.url));
+
+  // Throws on conflicting flags (`--real --managed`) or an unknown `--backend`
+  // value — surfaced by the top-level dispatch as a clean `Error:` + exit 1.
+  const backend = resolveRequestedBackend({ argv: values, env: process.env });
 
   const child = spawn(process.execPath, [sessiondPath], {
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe'],
-    env: { ...process.env },
+    env: { ...process.env, BF_BROWSER_BACKEND: backend },
   });
 
   // Capture early stderr so a fast-fail startup error is surfaced (agent-browser lesson).
@@ -825,56 +851,156 @@ async function startSessiondDaemon() {
   return lock;
 }
 
+// Should an already-live daemon be restarted to honor THIS invocation? Two
+// triggers: (1) the live daemon is an older install (version mismatch), so verbs
+// would run on stale code; or (2) an EXPLICIT backend flag (--real/--managed/
+// --headless) whose effective backend differs from what's live — `--real` must
+// never silently reuse a managed daemon (a silent fallback). `auto` (no flag)
+// reuses whatever is live. The comparison is against the daemon's EFFECTIVE
+// backend (`/status.backend`), so an auto→managed daemon is still reused by an
+// explicit `--managed` without needless churn. Both the verb auto-start path
+// (ensureSessiondRunning) and `session start` route through this ONE predicate
+// so the backend guarantee can't drift between them.
+async function sessiondMustRestart({ status, requested, sessiondCommand }) {
+  const expected = await getCliPkgVersion();
+  if (expected && status.version && status.version !== expected) return true;
+  if (requested === 'real' || requested === 'managed' || requested === 'headless') {
+    let live = null;
+    try { live = (await sessiondCommand({ method: 'GET', path: '/status' })).body; }
+    catch { /* unknown → restart to be safe */ }
+    if (!live || live.backend !== requested) return true;
+  }
+  return false;
+}
+
+// Gracefully stop a live daemon and clear its sidecars before a fresh spawn.
+// Uses the authenticated /stop self-shutdown (never a raw PID kill) so a reused
+// PID can't be signalled; the daemon may close the socket mid-response, so a
+// failed request is non-fatal.
+async function stopAndClearSessiond({ sessiondCommand, clearSessiondLock, clearSessiondUrl }) {
+  try { await sessiondCommand({ method: 'POST', path: '/stop' }); } catch { /* may close mid-response */ }
+  await clearSessiondLock();
+  await clearSessiondUrl();
+}
+
 // Return a live sessiond lock, auto-starting the daemon if none is running.
+// Liveness is daemon-aware (probes /health, not just the lock PID) so a stale
+// lock left by a crashed daemon — or a PID since reused by an unrelated process
+// — is cleared and replaced rather than trusted. A live daemon predating a
+// package upgrade (version mismatch) or running a different backend than an
+// explicit flag requests is gracefully stopped and restarted so verbs always
+// run on the current code and the requested backend.
 async function ensureSessiondRunning() {
-  const { readSessiondLock } = await import('./cli/session-client.js');
-  const existing = await readSessiondLock();
-  if (existing) return existing;
+  const {
+    getLiveSessiondStatus,
+    clearSessiondLock,
+    clearSessiondUrl,
+    sessiondCommand,
+  } = await import('./cli/session-client.js');
+  const { resolveRequestedBackend } = await import('./mcp/src/backend-selection.js');
+
+  // Resolve the requested backend up front (throws loud on conflicting flags).
+  const requested = resolveRequestedBackend({ argv: values, env: process.env });
+  const status = await getLiveSessiondStatus();
+  if (status.running) {
+    if (await sessiondMustRestart({ status, requested, sessiondCommand })) {
+      await stopAndClearSessiond({ sessiondCommand, clearSessiondLock, clearSessiondUrl });
+      return startSessiondDaemon();
+    }
+    return status.lock;
+  }
+  if (status.stale) {
+    await clearSessiondLock();
+    await clearSessiondUrl();
+  }
   return startSessiondDaemon();
 }
 
 async function cmdSession() {
   const sub = positionals[1] || 'status';
   const {
-    readSessiondLock,
+    getLiveSessiondStatus,
     clearSessiondLock,
     clearSessiondUrl,
+    sessiondCommand,
   } = await import('./cli/session-client.js');
 
+  // Best-effort authenticated /status read (backend + fallback warning). Never
+  // throws — observability must not break start/status/stop.
+  const readBackendStatus = async () => {
+    try { return (await sessiondCommand({ method: 'GET', path: '/status' })).body; }
+    catch { return null; }
+  };
+  const surfaceWarning = (st) => {
+    if (st?.warning && !values.json) process.stderr.write(`⚠  ${st.warning}\n`);
+  };
+
   if (sub === 'start') {
-    const existing = await readSessiondLock();
-    if (existing) {
-      output({ running: true, started: false, pid: existing.pid, port: existing.port }, values.json);
+    const { resolveRequestedBackend } = await import('./mcp/src/backend-selection.js');
+    // Throws loud on conflicting flags (`--real --managed`) / unknown `--backend`.
+    const requested = resolveRequestedBackend({ argv: values, env: process.env });
+    const status = await getLiveSessiondStatus();
+    // Reuse a live daemon ONLY when it honors this invocation. An explicit
+    // `--real`/`--headless` against a different-backend daemon must restart, not
+    // silently report the wrong-backend daemon as "running" (same no-silent-
+    // fallback guarantee the verb path enforces — one shared predicate).
+    if (status.running && !(await sessiondMustRestart({ status, requested, sessiondCommand }))) {
+      const st = await readBackendStatus();
+      surfaceWarning(st);
+      output({ running: true, started: false, pid: status.lock.pid, port: status.lock.port, backend: st?.backend ?? null }, values.json);
       return;
     }
+    // No live daemon, a stale lock, or a version/backend mismatch that must
+    // restart to honor this invocation. Stop a live (mismatched) daemon via the
+    // authenticated /stop; otherwise just clear a stale lock before spawning.
+    if (status.running) {
+      await stopAndClearSessiond({ sessiondCommand, clearSessiondLock, clearSessiondUrl });
+    } else if (status.stale) {
+      await clearSessiondLock();
+      await clearSessiondUrl();
+    }
     const lock = await startSessiondDaemon();
-    output({ running: true, started: true, pid: lock.pid, port: lock.port }, values.json);
+    const st = await readBackendStatus();
+    surfaceWarning(st);
+    output({ running: true, started: true, pid: lock.pid, port: lock.port, backend: st?.backend ?? null }, values.json);
     return;
   }
 
   if (sub === 'status') {
-    const lock = await readSessiondLock();
-    if (!lock) {
+    const status = await getLiveSessiondStatus();
+    if (!status.running) {
       output({ running: false }, values.json);
       return;
     }
-    output({ running: true, pid: lock.pid, port: lock.port, version: lock.version ?? null }, values.json);
+    const st = await readBackendStatus();
+    surfaceWarning(st);
+    output({
+      running: true,
+      pid: status.lock.pid,
+      port: status.lock.port,
+      version: status.lock.version ?? null,
+      backend: st?.backend ?? null,
+      warning: st?.warning ?? null,
+    }, values.json);
     return;
   }
 
   if (sub === 'stop') {
-    const lock = await readSessiondLock();
-    if (!lock) {
-      // Clean up any stale sidecars even when nothing is alive.
+    const status = await getLiveSessiondStatus();
+    if (!status.running) {
+      // No live daemon. NEVER `process.kill` the lock's PID — under PID reuse it
+      // may belong to an unrelated process. Just clear the (possibly stale)
+      // sidecars and report.
       await clearSessiondLock();
       await clearSessiondUrl();
-      output({ stopped: true, running: false }, values.json);
+      output({ stopped: true, running: false, ...(status.stale ? { stale: true, reason: status.reason } : {}) }, values.json);
       return;
     }
-    try { process.kill(lock.pid, 'SIGTERM'); } catch { /* race: already exiting */ }
+    // Verified our daemon is live → graceful, authenticated self-shutdown.
+    try { await sessiondCommand({ method: 'POST', path: '/stop' }); } catch { /* may close the socket mid-response */ }
     await clearSessiondLock();
     await clearSessiondUrl();
-    output({ stopped: true, pid: lock.pid, port: lock.port }, values.json);
+    output({ stopped: true, pid: status.lock.pid, port: status.lock.port }, values.json);
     return;
   }
 

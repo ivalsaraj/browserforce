@@ -77,7 +77,7 @@ export async function clearSessiondUrl({ urlPath, lockPath } = {}) {
 }
 
 /** Low-level authenticated localhost HTTP request to a running sessiond. */
-export function sessiondHttpRequest(method, url, body, token) {
+export function sessiondHttpRequest(method, url, body, token, { timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const payload = body ? JSON.stringify(body) : undefined;
@@ -100,6 +100,9 @@ export function sessiondHttpRequest(method, url, body, token) {
       });
     });
     req.on('error', reject);
+    if (timeoutMs > 0) {
+      req.setTimeout(timeoutMs, () => req.destroy(new Error(`sessiond request timed out after ${timeoutMs}ms`)));
+    }
     if (payload) req.write(payload);
     req.end();
   });
@@ -125,6 +128,45 @@ export async function sessiondCommand({ method = 'POST', path, body = null, lock
   }
   const url = `http://127.0.0.1:${lock.port}${path}`;
   return sessiondHttpRequest(method, url, body, lock.token);
+}
+
+/**
+ * Probe the daemon's unauthenticated `/health` with a short timeout. Returns the
+ * liveness body ({ ok, pid, version }) when a sessiond answers, else null
+ * (connection refused, timeout, non-200, or non-JSON). Never throws.
+ */
+export async function probeSessiondHealth({ port, timeoutMs = 1500 } = {}) {
+  try {
+    const { status, body } = await sessiondHttpRequest(
+      'GET', `http://127.0.0.1:${port}/health`, null, '', { timeoutMs },
+    );
+    if (status === 200 && body && typeof body === 'object' && body.ok === true) return body;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve whether a *BrowserForce* sessiond is actually live behind the lock —
+ * not merely whether some process owns the lock's PID (which is unsafe under PID
+ * reuse: the daemon can die and the OS hand its PID to an unrelated process).
+ * Reads the lock, probes `/health`, and confirms the responding daemon's PID
+ * matches the lock. Returns one of:
+ *   { running: true,  lock, version }            — our daemon is live + verified
+ *   { running: false, lock: null }               — no lock on disk
+ *   { running: false, stale: true, lock, reason } — lock present but no matching
+ *                                                   live daemon (safe to clear,
+ *                                                   never kill the lock's PID)
+ */
+export async function getLiveSessiondStatus({ lockPath } = {}) {
+  const lock = await readSessiondLock({ lockPath });
+  if (!lock) return { running: false, lock: null };
+  const health = await probeSessiondHealth({ port: lock.port });
+  if (!health || health.pid !== lock.pid) {
+    return { running: false, stale: true, lock, reason: health ? 'pid-mismatch' : 'health-unreachable' };
+  }
+  return { running: true, lock, version: health.version ?? lock.version ?? null };
 }
 
 export { isLockAlive, SessiondNotRunningError };

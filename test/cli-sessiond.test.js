@@ -8,7 +8,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { normalizeRef } from '../cli/session-client.js';
+import { normalizeRef, writeSessiondLock } from '../cli/session-client.js';
 
 const exec = promisify(execFile);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -103,10 +103,27 @@ describe('CLI session daemon', () => {
     it('sessiond rejects a command with no/incorrect bearer token (401), accepts the valid token', async () => {
       const noTok = await httpFetch('GET', `${base}/status`, null, '');
       const badTok = await httpFetch('GET', `${base}/status`, null, 'wrong-token');
+      // A token longer than the real one (timingSafeEqual must not throw on
+      // unequal length — the constant-time compare hashes both sides first).
+      const longTok = await httpFetch('GET', `${base}/status`, null, `${lock.token}-extra-suffix`);
       const okTok = await httpFetch('GET', `${base}/status`, null, lock.token);
       assert.equal(noTok.status, 401);
       assert.equal(badTok.status, 401);
+      assert.equal(longTok.status, 401);
       assert.equal(okTok.status, 200);
+    });
+
+    it('rejects a malformed (non-Bearer) Authorization header (401)', async () => {
+      const malformed = await new Promise((resolve, reject) => {
+        const u = new URL(`${base}/status`);
+        const req = http.request({
+          hostname: u.hostname, port: u.port, path: u.pathname, method: 'GET',
+          headers: { Authorization: `Basic ${lock.token}` },
+        }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+        req.on('error', reject);
+        req.end();
+      });
+      assert.equal(malformed, 401);
     });
 
     it('sessiond binds 127.0.0.1 only and writes the lock sidecar 0o600', async () => {
@@ -501,6 +518,259 @@ describe('CLI session daemon', () => {
       assert.equal(first.data, 1, 'first eval initializes shared state');
       assert.equal(second.data, 2, 'second eval sees state persisted by the daemon session');
     });
+  });
+});
+
+describe('sessiond lifecycle hardening (stop / restart / warning / backend flags)', () => {
+  const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+  const cleanups = [];
+
+  async function getDeadPort() {
+    const srv = http.createServer();
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const port = srv.address().port;
+    await new Promise((r) => srv.close(r));
+    return port;
+  }
+
+  function trackLock(lockPath) {
+    cleanups.push(async () => {
+      const lock = await readLockFile(lockPath);
+      if (lock?.pid) { try { process.kill(lock.pid, 'SIGKILL'); } catch { /* gone */ } }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+  }
+
+  after(async () => { for (const fn of cleanups) await fn(); });
+
+  it('session stop on a stale lock (live PID, dead port) clears sidecars WITHOUT killing the unrelated PID', async () => {
+    // Simulate PID reuse: the daemon died and its PID was handed to an unrelated
+    // long-lived process. The lock still points at that PID.
+    const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { stdio: 'ignore' });
+    await sleep(100);
+    const deadPort = await getDeadPort();
+    const lockPath = tmpLockPath();
+    await writeSessiondLock({ pid: victim.pid, port: deadPort, token: 'stale-token', version: '0.0.0', lockPath });
+    try {
+      const { stdout } = await exec('node', ['bin.js', 'session', 'stop', '--json'], {
+        cwd: ROOT, env: { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath },
+      });
+      const data = JSON.parse(stdout);
+      assert.equal(data.stopped, true);
+      assert.equal(data.running, false);
+      assert.equal(data.stale, true, 'a stale lock is reported as stale');
+      // The unrelated process MUST still be alive — stop must never kill an
+      // unverified PID from the lock.
+      assert.doesNotThrow(() => process.kill(victim.pid, 0), 'stop must not kill the reused PID');
+      assert.equal(await readLockFile(lockPath), null, 'stale lock sidecar is cleared');
+    } finally {
+      try { process.kill(victim.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+    }
+  });
+
+  it('the managed-fallback warning is attached to NON-snapshot verb envelopes (not just snapshot)', async () => {
+    const deadPort = await getDeadPort();
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    // auto + a dead bridge → managed fallback (shouldWarn), with the fake browser
+    // injected below buildExecContext so the verb still runs.
+    const env = {
+      ...process.env,
+      BF_SESSIOND_LOCK_PATH: lockPath,
+      BF_BROWSER_BACKEND: 'auto',
+      BF_CDP_URL: `ws://127.0.0.1:${deadPort}/cdp?token=x`,
+      BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+    };
+    const child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+    cleanups.push(async () => { try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } });
+    const lock = await waitForLock(lockPath);
+    assert.ok(lock, 'auto should fall back to managed and start');
+
+    const resp = JSON.parse((await exec('node', ['bin.js', 'get', 'url', '--sessiond', '--json'], { cwd: ROOT, env })).stdout);
+    assert.equal(resp.success, true);
+    assert.equal(resp.data.url, 'https://fake.test/');
+    assert.ok(
+      typeof resp.warning === 'string' && /Real Chrome bridge unavailable/.test(resp.warning),
+      'a non-snapshot verb envelope must carry the managed-fallback warning',
+    );
+  });
+
+  it('session start surfaces the managed-fallback warning on stderr', async () => {
+    const deadPort = await getDeadPort();
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    const env = {
+      ...process.env,
+      BF_SESSIOND_LOCK_PATH: lockPath,
+      BF_BROWSER_BACKEND: 'auto',
+      BF_CDP_URL: `ws://127.0.0.1:${deadPort}/cdp?token=x`,
+      BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+    };
+    // Non-JSON start: the warning goes to stderr.
+    const { stderr } = await exec('node', ['bin.js', 'session', 'start'], { cwd: ROOT, env });
+    assert.match(stderr, /Real Chrome bridge unavailable/, 'session start must warn about the managed fallback');
+  });
+
+  it('CLI backend flags flow to the daemon: --managed / --headless set requestedBackend', async () => {
+    for (const [flag, mode] of [['--managed', 'managed'], ['--headless', 'headless']]) {
+      const lockPath = tmpLockPath();
+      trackLock(lockPath);
+      const env = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER };
+      // Deliberately no BF_BROWSER_BACKEND: if the flag were ignored, the daemon
+      // would default to 'auto' — so requestedBackend === mode proves it flowed.
+      await exec('node', ['bin.js', 'session', 'start', flag, '--json'], { cwd: ROOT, env });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, `session start ${flag} should start`);
+      const res = await httpFetch('GET', `http://127.0.0.1:${lock.port}/status`, null, lock.token);
+      assert.equal(res.body.requestedBackend, mode, `${flag} → requestedBackend "${mode}"`);
+      assert.equal(res.body.backend, mode);
+    }
+  });
+
+  it('conflicting backend flags (--real --managed) fail loud', async () => {
+    const lockPath = tmpLockPath();
+    await assert.rejects(
+      exec('node', ['bin.js', 'session', 'start', '--real', '--managed', '--json'], {
+        cwd: ROOT, env: { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath },
+      }),
+      /mutually exclusive|conflicting/i,
+      'mutually-exclusive backend flags must fail loud',
+    );
+  });
+
+  it('a verb auto-restarts a daemon left running by an older install (version mismatch)', async () => {
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    // Pre-start a daemon pinned to a stale version via the test seam.
+    const staleEnv = {
+      ...process.env,
+      BF_SESSIOND_LOCK_PATH: lockPath,
+      BF_BROWSER_BACKEND: 'managed',
+      BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      BF_SESSIOND_VERSION: '0.0.0-stale',
+    };
+    const stale = spawn('node', [SESSIOND], { cwd: ROOT, env: staleEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    cleanups.push(async () => { try { if (stale?.pid) process.kill(stale.pid, 'SIGKILL'); } catch { /* gone */ } });
+    const lock1 = await waitForLock(lockPath);
+    assert.ok(lock1, 'stale-version daemon should start');
+    assert.equal(lock1.version, '0.0.0-stale');
+
+    // Run a verb WITHOUT the version override → ensureSessiondRunning sees the
+    // running daemon's version != this install's version → restart.
+    const verbEnv = {
+      ...process.env,
+      BF_SESSIOND_LOCK_PATH: lockPath,
+      BF_BROWSER_BACKEND: 'managed',
+      BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+    };
+    const resp = JSON.parse((await exec('node', ['bin.js', 'get', 'url', '--sessiond', '--json'], { cwd: ROOT, env: verbEnv })).stdout);
+    assert.equal(resp.success, true, 'the verb runs against the restarted daemon');
+
+    const lock2 = await readLockFile(lockPath);
+    assert.ok(lock2, 'a fresh lock exists after restart');
+    assert.notEqual(lock2.pid, lock1.pid, 'stale-version daemon was restarted with a new PID');
+    assert.notEqual(lock2.version, '0.0.0-stale', 'the restarted daemon reports the current version');
+  });
+
+  // Start a managed daemon (fake browser) and return its first lock.
+  async function startManagedDaemon(lockPath) {
+    const env = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_BROWSER_BACKEND: 'managed', BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER };
+    const child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+    cleanups.push(async () => { try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } });
+    const lock = await waitForLock(lockPath);
+    assert.ok(lock, 'managed daemon should start');
+    return lock;
+  }
+
+  it('an explicit --real verb against a running MANAGED daemon never silently uses managed (fails loud)', async () => {
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    await startManagedDaemon(lockPath);
+    const deadPort = await getDeadPort();
+    // --real with no bridge: ensureSessiondRunning must restart into real (not
+    // reuse the managed daemon); the real negotiation then fails loud before any
+    // new lock is written.
+    const realEnv = {
+      ...process.env,
+      BF_SESSIOND_LOCK_PATH: lockPath,
+      BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      BF_CDP_URL: `ws://127.0.0.1:${deadPort}/cdp?token=x`,
+    };
+    let failed = false; let detail = '';
+    try {
+      await exec('node', ['bin.js', 'get', 'url', '--real', '--json'], { cwd: ROOT, env: realEnv });
+    } catch (err) {
+      failed = true;
+      detail = `${err.stderr || ''}${err.message || ''}`;
+    }
+    assert.ok(failed, '--real must fail (non-zero exit), never silently reuse the managed daemon');
+    assert.match(detail, /failed to start|real Chrome bridge|extension not connected/i);
+    // The reused-managed result ("https://fake.test/") must NOT have been returned.
+    assert.doesNotMatch(detail, /fake\.test/);
+  });
+
+  it('an explicit --headless verb restarts a running managed daemon into headless', async () => {
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    const lock1 = await startManagedDaemon(lockPath);
+    const verbEnv = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER };
+    const resp = JSON.parse((await exec('node', ['bin.js', 'get', 'url', '--headless', '--json'], { cwd: ROOT, env: verbEnv })).stdout);
+    assert.equal(resp.success, true);
+    const lock2 = await readLockFile(lockPath);
+    assert.ok(lock2);
+    assert.notEqual(lock2.pid, lock1.pid, 'managed daemon was restarted into headless with a new PID');
+    const res = await httpFetch('GET', `http://127.0.0.1:${lock2.port}/status`, null, lock2.token);
+    assert.equal(res.body.backend, 'headless', 'restarted daemon runs the explicitly requested backend');
+  });
+
+  it('an explicit --managed verb REUSES an already-managed daemon (no needless restart)', async () => {
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    const lock1 = await startManagedDaemon(lockPath);
+    const verbEnv = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER };
+    const resp = JSON.parse((await exec('node', ['bin.js', 'get', 'url', '--managed', '--json'], { cwd: ROOT, env: verbEnv })).stdout);
+    assert.equal(resp.success, true);
+    const lock2 = await readLockFile(lockPath);
+    assert.equal(lock2.pid, lock1.pid, 'matching effective backend is reused — no churn');
+  });
+
+  // `session start` shares the SAME backend predicate as the verb path: an
+  // explicit flag against a different-backend daemon must restart, never report
+  // the wrong-backend daemon as "running". (Guard-pair consistency.)
+  it('session start --real against a running MANAGED daemon never reports it running (fails loud)', async () => {
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    await startManagedDaemon(lockPath);
+    const deadPort = await getDeadPort();
+    const realEnv = {
+      ...process.env,
+      BF_SESSIOND_LOCK_PATH: lockPath,
+      BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      BF_CDP_URL: `ws://127.0.0.1:${deadPort}/cdp?token=x`,
+    };
+    let failed = false; let detail = '';
+    try {
+      await exec('node', ['bin.js', 'session', 'start', '--real', '--json'], { cwd: ROOT, env: realEnv });
+    } catch (err) {
+      failed = true;
+      detail = `${err.stderr || ''}${err.stdout || ''}${err.message || ''}`;
+    }
+    assert.ok(failed, 'session start --real must fail loud, not reuse the managed daemon');
+    assert.match(detail, /failed to start|real Chrome bridge|extension not connected/i);
+    assert.doesNotMatch(detail, /"started":\s*false/);
+  });
+
+  it('session start --headless restarts a running managed daemon into headless (started:true, new pid)', async () => {
+    const lockPath = tmpLockPath();
+    trackLock(lockPath);
+    const lock1 = await startManagedDaemon(lockPath);
+    const env = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER };
+    const resp = JSON.parse((await exec('node', ['bin.js', 'session', 'start', '--headless', '--json'], { cwd: ROOT, env })).stdout);
+    assert.equal(resp.started, true, 'mismatched backend forces a fresh start');
+    assert.equal(resp.backend, 'headless');
+    assert.notEqual(resp.pid, lock1.pid, 'a new daemon PID confirms the restart');
   });
 });
 

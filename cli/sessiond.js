@@ -15,7 +15,7 @@
 // (Tasks 8-10) route through the runtime execution boundary, added later.
 
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -115,6 +115,10 @@ export async function negotiateBackend({ runtime, env = process.env } = {}) {
 }
 
 function getSessiondVersion() {
+  // Test/diagnostic seam: pin the reported version so the version-mismatch
+  // restart path (a daemon left running by an older install) can be exercised
+  // deterministically. Falls back to the package version in production.
+  if (process.env.BF_SESSIOND_VERSION) return process.env.BF_SESSIOND_VERSION;
   try {
     const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url));
     return JSON.parse(readFileSync(pkgPath, 'utf8')).version || '0.0.0';
@@ -142,6 +146,17 @@ function getBearerToken(req) {
   const header = req.headers.authorization || '';
   const match = /^Bearer\s+(.+)$/i.exec(header);
   return match ? match[1] : null;
+}
+
+// Constant-time bearer comparison. Hashing both sides to a fixed-length digest
+// keeps timingSafeEqual from throwing on length mismatch AND avoids leaking the
+// token length via an early length check — the comparison cost is identical for
+// a missing, short, long, or near-miss token.
+function tokensMatch(provided, expected) {
+  if (typeof provided !== 'string' || typeof expected !== 'string') return false;
+  const a = createHash('sha256').update(provided).digest();
+  const b = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(a, b);
 }
 
 function readJsonBody(req) {
@@ -239,8 +254,8 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
       return;
     }
 
-    // Every other route requires a valid bearer token.
-    if (getBearerToken(req) !== token) {
+    // Every other route requires a valid bearer token (constant-time compare).
+    if (!tokensMatch(getBearerToken(req), token)) {
       sendJson(res, 401, envelope({ success: false, error: 'unauthorized' }));
       return;
     }
@@ -265,7 +280,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
     }
 
     if (method === 'POST' && path === '/stop') {
-      sendJson(res, 200, { stopped: true });
+      sendJson(res, 200, envelope({ data: { stopped: true } }));
       shutdown('stop-requested');
       return;
     }
@@ -286,6 +301,10 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
   async function handleCommand(verb, body, res) {
     const requested = Number(body?.timeout);
     const timeout = Number.isFinite(requested) && requested > 0 ? requested : 30000;
+    // Attach the managed-fallback warning to EVERY command envelope (not just
+    // snapshot) so the mandatory warning is visible regardless of which verb the
+    // user runs first. It is null when no fallback occurred.
+    const withWarning = (data) => envelope({ data, warning: runtime.getBackendInfo().warning });
     try {
       if (verb === 'snapshot') {
         const args = {
@@ -295,7 +314,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         };
         const code = `return await snapshotData(${JSON.stringify(args)});`;
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data, warning: runtime.getBackendInfo().warning }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -303,7 +322,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         const ref = normalizeRef(body?.ref);
         const code = refLocatorSnippet(ref, `await locator.click();`, `{ clicked: ${JSON.stringify(ref)} }`);
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -312,7 +331,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         const text = String(body?.text ?? '');
         const code = refLocatorSnippet(ref, `await locator.fill(${JSON.stringify(text)});`, `{ filled: ${JSON.stringify(ref)} }`);
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -321,7 +340,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         const text = String(body?.text ?? '');
         const code = refLocatorSnippet(ref, `await locator.pressSequentially(${JSON.stringify(text)});`, `{ typed: ${JSON.stringify(ref)} }`);
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -330,7 +349,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         if (!key) { sendJson(res, 200, envelope({ success: false, error: 'press requires a key' })); return; }
         const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -342,7 +361,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         // Give runCode headroom beyond the inner Playwright waiter so the waiter
         // times out first with a precise message before the hard run abort.
         const data = await runtime.runCommand({ code, timeout: timeout + 5000 });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -358,7 +377,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
           return;
         }
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
@@ -368,7 +387,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         // The user's code IS the snippet — same guarded runCode() boundary as
         // MCP execute / CLI -e. Never eval()/new Function() at the caller.
         const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, envelope({ data }));
+        sendJson(res, 200, withWarning(data));
         return;
       }
 
