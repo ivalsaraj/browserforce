@@ -1118,8 +1118,9 @@ function cmdHelp() {
     browserforce screenshot 0 > page.png
     browserforce navigate https://gmail.com
 
-  Note: -e commands are one-shot. State does not persist between calls.
-  For persistent state, use the MCP server (browserforce mcp).
+  Note: -e commands are one-shot (state does not persist between calls).
+  For a persistent CLI session, use the atomic verbs with --sessiond
+  (snapshot/click/fill/wait/get/eval), or the MCP server (browserforce mcp).
 `);
 }
 

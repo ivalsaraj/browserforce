@@ -379,6 +379,8 @@ browserforce snapshot [n]       # Accessibility tree of tab n
 browserforce screenshot [n]     # Screenshot tab n (PNG to stdout)
 browserforce navigate <url>     # Open URL in a new tab
 browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
+browserforce skills get core    # Print the runtime agent skill (--full for references)
+browserforce doctor [--fix]     # Diagnose relay/extension/sidecars/backend
 browserforce plugin list        # List installed plugins
 browserforce plugin install <n> # Install a plugin from the registry
 browserforce plugin remove <n>  # Remove an installed plugin
@@ -392,7 +394,48 @@ browserforce install-extension  # Copy extension to ~/.browserforce/extension/
 
 Setup flags: `--dry-run` (preview), `--no-autostart` (skip OS login daemon/service registration only), `--json` (machine-readable output).
 
-Each `-e` command is one-shot — state does not persist between calls. For persistent state, use the MCP server.
+#### Persistent CLI session: the atomic verb loop
+
+For step-by-step agent work the CLI runs a small **session daemon** (`sessiond`)
+that holds one browser session, so state and snapshot refs persist across
+separate commands. This is the natural observe → act → observe loop:
+
+```bash
+browserforce snapshot --sessiond            # accessibility tree + @eN refs (shared session)
+browserforce click @e3                        # act on a ref from the snapshot
+browserforce fill @e2 "user@example.com"      # clear + type
+browserforce type @e2 " more"                 # type without clearing
+browserforce press Enter                      # press a key
+browserforce wait --text "Saved"              # or --url <glob> / --load <state> / --fn <expr>
+browserforce get url | title | text @e5       # read page/element data
+echo 'return await snapshot()' | browserforce eval --stdin   # run piped Playwright JS in the session
+browserforce session start | status | stop    # manage the daemon (auto-starts; idles out after 5m)
+```
+
+Refs accept `@e1`, `e1`, or `ref=e1` and go stale the moment the page changes —
+re-snapshot before the next ref interaction. Every verb routes through the same
+guarded `runCode()` boundary as the MCP `execute` tool; add `--json` for a
+`{ success, data, error, warning }` envelope.
+
+One-shot `-e` stays independent (state does not persist between `-e` calls) for
+self-contained scripts. For a persistent session, use `--sessiond` (above) or
+the MCP server.
+
+#### Backend modes (real Chrome first)
+
+The session daemon negotiates a browser backend at startup:
+
+- **`auto`** (default) — connect to the user's **real Chrome** via the relay +
+  extension when the extension is connected.
+- **Managed fallback** — if the real bridge is unavailable, `auto` falls back to
+  a managed headed Chrome and prints a **mandatory warning** (never silent).
+- **`BF_BROWSER_BACKEND=real`** — force the real bridge; **fails loud** (non-zero
+  exit, no daemon) when it is unavailable and **never falls back**.
+- **`BF_BROWSER_BACKEND=managed` / `headless`** — launch a managed Chrome directly.
+
+`browserforce doctor` reports the active backend and flags a stale relay, a
+disconnected extension, a stale `cdp-url` sidecar, or loose secret-file
+permissions; `doctor --fix` removes only stale sidecars (never the auth token).
 
 ### BrowserForce Agent Side Panel
 

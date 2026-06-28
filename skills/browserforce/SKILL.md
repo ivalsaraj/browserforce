@@ -46,10 +46,14 @@ browserforce navigate <url>      # Open URL in new tab
 browserforce -e "<code>"         # Run Playwright JavaScript (one-shot)
 ```
 
-## Important: One-Shot Execution
+## Two execution paths
 
-Each `browserforce -e` call is independent — state does NOT persist between calls.
-Do everything you need (navigate, act, observe) within a single `-e` call.
+- **Persistent session (preferred)** — `browserforce snapshot --sessiond` then
+  atomic verbs (`click`/`fill`/`type`/`press`/`wait`/`get`/`eval`) share one
+  browser session and its `@eN` refs across commands. See
+  `browserforce skills get core`.
+- **One-shot `-e`** — each `browserforce -e` call is independent (state does NOT
+  persist between `-e` calls). Do everything in a single `-e` snippet.
 
 ## Core Workflow: Observe → Act → Observe
 
