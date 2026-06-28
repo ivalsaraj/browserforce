@@ -28,6 +28,8 @@ const { values, positionals } = parseArgs({
     // skills get flags.
     full: { type: 'boolean', default: false },
     all: { type: 'boolean', default: false },
+    // doctor: remove stale sidecars (never secrets).
+    fix: { type: 'boolean', default: false },
   },
   allowPositionals: true,
   strict: false,
@@ -1040,6 +1042,31 @@ async function cmdSkills() {
   process.exit(1);
 }
 
+// Read-only diagnostics (relay, extension, stale cdp-url, secret perms, active
+// backend). `--fix` removes only stale sidecars — never secrets. Exits 1 when
+// any check fails (warnings are allowed).
+async function cmdDoctor() {
+  const { runDoctor } = await import('./mcp/src/doctor.js');
+  const report = await runDoctor({ fix: values.fix });
+
+  if (values.json) {
+    output({ success: report.ok, data: report }, true);
+    if (!report.ok) process.exit(1);
+    return;
+  }
+
+  const icon = { ok: '✓', warn: '⚠', fail: '✗' };
+  console.log('\n  BrowserForce doctor\n');
+  for (const c of report.checks) {
+    console.log(`  ${icon[c.status] || '?'} ${c.label}: ${c.detail}`);
+  }
+  if (report.fixes.length > 0) {
+    console.log(`\n  Removed ${report.fixes.length} stale sidecar(s).`);
+  }
+  console.log(`\n  ${report.ok ? '✓ All critical checks passed.' : '✗ One or more checks failed.'}\n`);
+  if (!report.ok) process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -1066,6 +1093,7 @@ function cmdHelp() {
     browserforce agent <subcmd>     Start/status/stop local BrowserForce Agent daemon
     browserforce session <subcmd>   Start/status/stop the CLI session daemon
     browserforce skills <subcmd>    list / get <name> [--full] / path [name]
+    browserforce doctor [--fix]     Diagnose relay/extension/sidecars/backend
     browserforce setup openclaw     Configure OpenClaw + optional autostart
     browserforce update             Update to the latest version
     browserforce install-extension  Copy extension to ~/.browserforce/extension/
@@ -1103,7 +1131,7 @@ const commands = {
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
   'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
   session: cmdSession, click: cmdClick, fill: cmdFill, type: cmdType, press: cmdPress,
-  wait: cmdWait, get: cmdGet, eval: cmdEval, skills: cmdSkills,
+  wait: cmdWait, get: cmdGet, eval: cmdEval, skills: cmdSkills, doctor: cmdDoctor,
   help: cmdHelp,
 };
 
