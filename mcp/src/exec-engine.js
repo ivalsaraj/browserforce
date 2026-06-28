@@ -24,6 +24,19 @@ const MAX_LABEL_OVERLAY_REFS = 300;
 const EXEC_CONSOLE_MAX_ENTRIES = 200;
 const ATTACHED_PAGE_LOOKUP_TIMEOUT_MS = 5000;
 const ATTACHED_PAGE_LOOKUP_POLL_MS = 50;
+
+// Canonical "is this page handle still usable" predicate: it must exist, expose
+// isClosed(), and not be closed. Wrapped in try/catch so a detached/destroyed
+// handle whose isClosed() throws is treated as unusable rather than crashing the
+// verb. NOTE: browser-session-runtime.js keeps an IDENTICAL local copy on purpose
+// (that module is import-free by design — see its header). Keep the two in sync.
+function isUsablePage(page) {
+  try {
+    return !!page && typeof page.isClosed === 'function' && !page.isClosed();
+  } catch {
+    return false;
+  }
+}
 export const BF_DIR = join(homedir(), '.browserforce');
 export const CDP_URL_FILE = join(BF_DIR, 'cdp-url');
 const RELAY_SCRIPT = fileURLToPath(new URL('../../relay/src/index.js', import.meta.url));
@@ -522,8 +535,8 @@ export function buildExecContext(
   };
 
   const activePage = () => {
-    if (userState.page && !userState.page.isClosed()) return userState.page;
-    if (defaultPage && !defaultPage.isClosed()) return defaultPage;
+    if (isUsablePage(userState.page)) return userState.page;
+    if (isUsablePage(defaultPage)) return defaultPage;
     throw new Error("No active page. Reuse an existing one first: state.page = context.pages()[0]. If there isn't one, create one with: state.page = await context.newPage()");
   };
 

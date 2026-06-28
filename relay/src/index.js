@@ -117,6 +117,12 @@ function getClientMode() {
 // ─── RelayServer ─────────────────────────────────────────────────────────────
 
 const DEFAULT_BROWSER_CONTEXT_ID = 'bf-default-context';
+// Synthetic browser-level session a CDP client opens via Target.attachToBrowserTarget
+// (Playwright's newCDPSession() routes its Target.attachToTarget through this
+// "client root session"). Real Chrome returns a real sessionId here; returning a
+// stable sentinel lets us route commands sent on it to the browser-command handler
+// and echo the sessionId back so the client matches the response to its callback.
+const BF_BROWSER_SESSION_ID = 'bf-browser-session';
 const DEFAULT_AGENT_PREFERENCES = Object.freeze({
   executionMode: 'parallel',
   parallelVisibilityMode: 'foreground-tab',
@@ -267,6 +273,7 @@ class RelayServer {
     this.tabToSession = new Map(); // tabId -> sessionId
     this.childSessions = new Map(); // childSessionId -> { tabId, parentSessionId }
     this.oopifTargets = new Map();  // iframe targetId -> { childSessionId, tabId, targetInfo }
+    this.aliasSessions = new Map(); // aliasSessionId -> { primarySessionId, clientId } (explicit newCDPSession re-attach to an already-attached page)
     this.agentWindowByClientId = new Map(); // clientId -> windowId (agent window affinity)
     this.sessionCounter = 0;
 
@@ -941,6 +948,7 @@ class RelayServer {
     this.tabToSession.clear();
     this.childSessions.clear();
     this.oopifTargets.clear();
+    this.aliasSessions.clear();
   }
 
   _handleExtMessage(msg) {
@@ -1104,6 +1112,17 @@ class RelayServer {
     this._broadcastCdp({ method, params, sessionId: outerSessionId });
   }
 
+  // Drop explicit-attach alias sessions matching a predicate. Aliases are created
+  // by Target.attachToTarget (newCDPSession re-attach) and normally removed by
+  // Target.detachFromTarget; this is the safety net for the paths where the owning
+  // client or the underlying primary target goes away WITHOUT a clean detach, so
+  // the map cannot grow unbounded across a long-lived daemon's many snapshots.
+  _dropAliasSessions(predicate) {
+    for (const [aliasId, entry] of this.aliasSessions) {
+      if (predicate(aliasId, entry)) this.aliasSessions.delete(aliasId);
+    }
+  }
+
   _handleTabDetached({ tabId, reason }) {
     const sessionId = this.tabToSession.get(tabId);
     if (!sessionId) return;
@@ -1120,6 +1139,7 @@ class RelayServer {
 
     this.targets.delete(sessionId);
     this.tabToSession.delete(tabId);
+    this._dropAliasSessions((_id, entry) => entry.primarySessionId === sessionId);
 
     this._broadcastCdp({
       method: 'Target.detachedFromTarget',
@@ -1194,6 +1214,8 @@ class RelayServer {
       if (meta?.id) {
         this.clientById.delete(meta.id);
         this.agentWindowByClientId.delete(meta.id);
+        // Drop any explicit-attach aliases this client never detached.
+        this._dropAliasSessions((_id, entry) => entry.clientId === meta.id);
       }
       this.clients.delete(ws);
       if (this.activeClient?.ws === ws) {
@@ -1217,10 +1239,14 @@ class RelayServer {
 
     try {
       let result;
-      if (sessionId) {
+      if (sessionId && sessionId !== BF_BROWSER_SESSION_ID) {
         result = await this._forwardToTab(sessionId, method, params, id, clientId);
       } else {
-        result = await this._handleBrowserCommand(ws, id, method, params, clientId);
+        // No sessionId (connection root) OR the synthetic browser session that a
+        // CDP client's newCDPSession() opens — both are browser-level. The
+        // response below echoes `sessionId` (when present) so the client routes
+        // it to the browser session's callback, mirroring real Chrome.
+        result = await this._handleBrowserCommand(ws, id, method, params, clientId, sessionId);
       }
       if (result !== undefined) {
         const response = { id, result };
@@ -1247,7 +1273,7 @@ class RelayServer {
     }
   }
 
-  async _handleBrowserCommand(ws, msgId, method, params, clientId) {
+  async _handleBrowserCommand(ws, msgId, method, params, clientId, sessionId) {
     switch (method) {
       case 'Browser.getVersion':
         return {
@@ -1264,20 +1290,29 @@ class RelayServer {
         }
         return {};
 
-      case 'Target.setAutoAttach':
+      case 'Target.setAutoAttach': {
         this.autoAttachEnabled = true;
         this.autoAttachParams = params;
-        // Respond immediately, then attach tabs asynchronously
+        // Respond immediately, then attach tabs asynchronously. Echo the
+        // incoming sessionId (e.g. BF_BROWSER_SESSION_ID, when a CDP client opens
+        // newCDPSession and enables auto-attach on that browser session) so the
+        // reply routes to the SENDING session's callback — matching the shared
+        // response path below and avoiding the root-session
+        // `_CRSession._onMessage` assertion this patch exists to eliminate.
+        // Omitted for the connection root (no sessionId), unchanged from before.
+        const autoAttachResponse = { id: msgId, result: {} };
+        if (sessionId) autoAttachResponse.sessionId = sessionId;
         this._logCdp({
           direction: 'to-playwright',
           clientId,
-          message: { id: msgId, result: {} },
+          message: autoAttachResponse,
         });
-        ws.send(JSON.stringify({ id: msgId, result: {} }));
+        ws.send(JSON.stringify(autoAttachResponse));
         this._autoAttachAllTabs(ws).catch((e) => {
           logErr('[relay] Auto-attach error:', e.message);
         });
         return undefined; // Already sent response
+      }
 
       case 'Target.getTargets':
         return {
@@ -1309,17 +1344,55 @@ class RelayServer {
         };
       }
 
+      case 'Target.attachToBrowserTarget':
+        // Playwright's newCDPSession() first opens a "client root session" via
+        // Target.attachToBrowserTarget, then sends Target.attachToTarget ON that
+        // session. We previously fell through to `default: {}` (no sessionId), so
+        // the client's browser session had sessionId=undefined and sent the
+        // follow-up attachToTarget with NO wire sessionId; our reply (also no
+        // sessionId) routed to the client's ROOT session, which has no callback
+        // for that id, tripping `_CRSession._onMessage`'s `assert(!object.id)`
+        // and closing the socket. Returning a real (sentinel) browser sessionId —
+        // and routing/echoing it (see _handleCdpClientMessage) — makes the client
+        // tag the follow-up with this id and match the reply to its callback,
+        // exactly as real Chrome does.
+        return { sessionId: BF_BROWSER_SESSION_ID };
+
       case 'Target.attachToTarget': {
-        // Find already-attached target by targetId
-        for (const [sessionId, target] of this.targets) {
+        // Sent on the browser session (above) by a CDP client's newCDPSession()/
+        // attachToTarget(); the connect handshake discovers pages via
+        // Target.setAutoAttach, never attachToTarget. Returning the page's PRIMARY
+        // sessionId here would make the client register a SECOND CRSession under
+        // that id, OVERWRITING the page's main session in its routing map — then
+        // the next in-flight response for the (busy) page has no matching callback
+        // and trips the same `assert(!object.id)`. Real Chrome hands out a NEW,
+        // distinct flat session for an already-attached target, so mirror that:
+        // return a fresh alias sessionId mapped to the same tab. Commands route to
+        // the tab and responses are tagged with the alias; tab EVENTS stay on the
+        // primary session (an explicit CDP session only needs command/replies —
+        // e.g. the aria snapshot engine).
+        for (const [primarySessionId, target] of this.targets) {
           if (target.targetId === params.targetId) {
-            return { sessionId };
+            const aliasSessionId = `bf-alias-${++this.sessionCounter}`;
+            // Tag with the owning clientId so the alias is dropped if that client
+            // disconnects before it sends Target.detachFromTarget (see ws 'close').
+            this.aliasSessions.set(aliasSessionId, { primarySessionId, clientId });
+            return { sessionId: aliasSessionId };
           }
         }
         // Cross-origin iframe (OOPIF): resolve to the existing child sessionId.
         const oopif = this.oopifTargets.get(params.targetId);
         if (oopif) return { sessionId: oopif.childSessionId };
         throw new Error(`Target ${params.targetId} not found or not attached`);
+      }
+
+      case 'Target.detachFromTarget': {
+        // A CDP client's CDPSession.detach() sends this on the parent/root
+        // session with the alias in params.sessionId. Drop the alias mapping so
+        // it does not accumulate; the real debugger stays attached for the
+        // primary session. No-op for any non-alias sessionId.
+        if (params?.sessionId) this.aliasSessions.delete(params.sessionId);
+        return {};
       }
 
       case 'Target.createTarget':
@@ -1363,6 +1436,7 @@ class RelayServer {
       ) {
         this.targets.delete(sessionId);
         this.tabToSession.delete(target.tabId);
+        this._dropAliasSessions((_id, entry) => entry.primarySessionId === sessionId);
         this._broadcastCdp({
           method: 'Target.detachedFromTarget',
           params: { sessionId, targetId: target.targetId },
@@ -1581,6 +1655,7 @@ class RelayServer {
 
     this.targets.delete(sessionId);
     this.tabToSession.delete(tabId);
+    this._dropAliasSessions((_id, entry) => entry.primarySessionId === sessionId);
 
     this._broadcastCdp({
       method: 'Target.detachedFromTarget',
@@ -1626,6 +1701,45 @@ class RelayServer {
       });
       return this._sendToExt('cdpCommand', {
         tabId: target.tabId,
+        method,
+        params: params || {},
+      });
+    }
+
+    // Alias session: an explicit newCDPSession() re-attach to an already-attached
+    // page (see Target.attachToTarget). It IS the page's main target, so route to
+    // the primary target's tab with no childSessionId, mirroring the primary
+    // path's lazy-attach + init-only handling. Tab events stay on the primary
+    // session; only command responses (tagged with this alias) come back here.
+    const aliasEntry = this.aliasSessions.get(sessionId);
+    if (aliasEntry) {
+      const aliasPrimarySessionId = aliasEntry.primarySessionId;
+      const primaryTarget = this.targets.get(aliasPrimarySessionId);
+      if (!primaryTarget) {
+        this.aliasSessions.delete(sessionId);
+        throw new Error(`Session '${sessionId}' not found`);
+      }
+      if (!primaryTarget.debuggerAttached) {
+        if (INIT_ONLY_METHODS.has(method)) {
+          return syntheticInitResponse(method, primaryTarget);
+        }
+        primaryTarget._triggerMethod = method;
+        await this._ensureDebuggerAttached(primaryTarget, aliasPrimarySessionId);
+      }
+      this._logCdp({
+        direction: 'to-extension',
+        clientId,
+        message: {
+          id,
+          method,
+          params: params || {},
+          sessionId,
+          tabId: primaryTarget.tabId,
+          aliasOf: aliasPrimarySessionId,
+        },
+      });
+      return this._sendToExt('cdpCommand', {
+        tabId: primaryTarget.tabId,
         method,
         params: params || {},
       });

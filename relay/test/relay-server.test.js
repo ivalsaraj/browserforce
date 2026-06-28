@@ -2999,3 +2999,164 @@ describe('ensureRelay', () => {
     }
   });
 });
+
+// ─── Explicit newCDPSession() Handshake: browser session + alias ─────────────
+// Regression coverage for the real-Chrome `snapshot --sessiond` crash fix.
+// A CDP client's newCDPSession(page) opens Target.attachToBrowserTarget, then
+// sends Target.attachToTarget ON that browser session. The relay must:
+//   1. return a real (sentinel) browser sessionId so the attachToTarget RESPONSE
+//      routes to the client's browser-session callback (not root → avoids the
+//      Playwright `_CRSession._onMessage` `assert(!object.id)` crash), and
+//   2. return a DISTINCT alias for an already-attached page so it never
+//      overwrites the page's primary session in the client routing map,
+// while never leaking alias entries across detach / disconnect / target loss.
+describe('CDP Explicit Session Handshake (newCDPSession alias)', () => {
+  let relay;
+  let port;
+
+  beforeEach(async () => {
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(150);
+    // Seed a primary page target as if discovered + lazily attached, so
+    // Target.attachToTarget resolves it (matched by targetId).
+    relay.targets.set('bf-session-1', { targetId: 'TARGET-PRIMARY', tabId: 4242 });
+    relay.tabToSession.set(4242, 'bf-session-1');
+  });
+
+  afterEach(() => {
+    relay.stop();
+  });
+
+  it('attachToBrowserTarget returns a browser session; attachToTarget echoes it + returns a distinct alias', async () => {
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const rb = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToBrowserTarget' });
+      const browserSession = rb.result.sessionId;
+      assert.ok(browserSession, 'attachToBrowserTarget must return a non-empty sessionId');
+
+      const ra = await sendAndReceive(cdp, {
+        id: 2,
+        method: 'Target.attachToTarget',
+        params: { targetId: 'TARGET-PRIMARY', flatten: true },
+        sessionId: browserSession,
+      });
+      // The reply must be tagged with the browser session so the client matches
+      // it to that session's callback — this is the actual crash fix.
+      assert.equal(ra.sessionId, browserSession, 'attachToTarget reply must echo the browser session');
+      const alias = ra.result.sessionId;
+      assert.ok(alias.startsWith('bf-alias-'), `expected bf-alias-* id, got ${alias}`);
+      assert.notEqual(alias, 'bf-session-1', 'alias must NOT reuse the page primary session id');
+      assert.ok(relay.aliasSessions.has(alias), 'alias must be tracked');
+      assert.equal(relay.aliasSessions.get(alias).primarySessionId, 'bf-session-1');
+    } finally {
+      cdp.close();
+    }
+  });
+
+  it('detachFromTarget drops the alias mapping', async () => {
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const rb = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToBrowserTarget' });
+      const browserSession = rb.result.sessionId;
+      const ra = await sendAndReceive(cdp, {
+        id: 2,
+        method: 'Target.attachToTarget',
+        params: { targetId: 'TARGET-PRIMARY', flatten: true },
+        sessionId: browserSession,
+      });
+      const alias = ra.result.sessionId;
+      assert.ok(relay.aliasSessions.has(alias));
+
+      const rd = await sendAndReceive(cdp, {
+        id: 3,
+        method: 'Target.detachFromTarget',
+        params: { sessionId: alias },
+        sessionId: browserSession,
+      });
+      assert.deepEqual(rd.result, {});
+      assert.ok(!relay.aliasSessions.has(alias), 'detach must drop the alias');
+    } finally {
+      cdp.close();
+    }
+  });
+
+  it('drops aliases when the owning CDP client disconnects without detaching', async () => {
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const rb = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToBrowserTarget' });
+    const ra = await sendAndReceive(cdp, {
+      id: 2,
+      method: 'Target.attachToTarget',
+      params: { targetId: 'TARGET-PRIMARY', flatten: true },
+      sessionId: rb.result.sessionId,
+    });
+    const alias = ra.result.sessionId;
+    assert.ok(relay.aliasSessions.has(alias));
+
+    cdp.close();
+    await sleep(150);
+    assert.ok(!relay.aliasSessions.has(alias), 'client disconnect must drop its un-detached aliases');
+  });
+
+  it('drops aliases when their primary target detaches (_handleTabDetached)', () => {
+    relay.aliasSessions.set('bf-alias-detach', { primarySessionId: 'bf-session-1', clientId: 'cli-x' });
+    relay.aliasSessions.set('bf-alias-other', { primarySessionId: 'bf-session-OTHER', clientId: 'cli-x' });
+    relay._handleTabDetached({ tabId: 4242, reason: 'test' });
+    assert.ok(!relay.aliasSessions.has('bf-alias-detach'), 'alias for detached primary must be dropped');
+    assert.ok(relay.aliasSessions.has('bf-alias-other'), 'unrelated alias must survive');
+  });
+
+  it('_dropAliasSessions removes only entries matching the predicate', () => {
+    relay.aliasSessions.set('a1', { primarySessionId: 's1', clientId: 'c1' });
+    relay.aliasSessions.set('a2', { primarySessionId: 's2', clientId: 'c2' });
+    relay._dropAliasSessions((_id, entry) => entry.clientId === 'c1');
+    assert.ok(!relay.aliasSessions.has('a1'), 'matching alias must be dropped');
+    assert.ok(relay.aliasSessions.has('a2'), 'non-matching alias must survive');
+  });
+
+  it('clears all aliases when the extension disconnects (_cleanupExtension)', () => {
+    relay.aliasSessions.set('a1', { primarySessionId: 's1', clientId: 'c1' });
+    relay.aliasSessions.set('a2', { primarySessionId: 's2', clientId: 'c2' });
+    relay._cleanupExtension();
+    assert.equal(relay.aliasSessions.size, 0, 'extension disconnect must clear all aliases');
+  });
+
+  it('Target.setAutoAttach on the browser session echoes the browser sessionId', async () => {
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const rb = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToBrowserTarget' });
+      const browserSession = rb.result.sessionId;
+      // setAutoAttach sends its OWN response (not via the shared echo path). On the
+      // browser session it MUST still echo the sessionId, or the reply routes to the
+      // client root with no callback → the `_CRSession._onMessage` assertion crash.
+      const ra = await sendAndReceive(cdp, {
+        id: 2,
+        method: 'Target.setAutoAttach',
+        params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+        sessionId: browserSession,
+      });
+      assert.equal(ra.id, 2);
+      assert.equal(ra.sessionId, browserSession, 'setAutoAttach reply must echo the browser session');
+      assert.deepEqual(ra.result, {});
+    } finally {
+      cdp.close();
+    }
+  });
+
+  it('root Target.setAutoAttach (no sessionId) still replies WITHOUT a sessionId', async () => {
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const rr = await sendAndReceive(cdp, {
+        id: 1,
+        method: 'Target.setAutoAttach',
+        params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+      });
+      assert.equal(rr.id, 1);
+      assert.deepEqual(rr.result, {});
+      assert.ok(rr.sessionId === undefined, 'root setAutoAttach must not invent a sessionId');
+    } finally {
+      cdp.close();
+    }
+  });
+});

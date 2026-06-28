@@ -192,3 +192,46 @@ test('reset clears cached preferences/restrictions so the next read refetches', 
   await runtime.getAgentPreferencesForSession();
   assert.equal(calls, 2, 'reset clears the preference cache');
 });
+
+// Page with a controllable isClosed() — `closed: 'throw'` simulates a
+// detached/destroyed handle whose isClosed() raises (the case the defensive
+// predicate must treat as unusable rather than crashing the verb).
+function makeClosablePage(closed = false) {
+  return { isClosed() { if (closed === 'throw') throw new Error('detached'); return closed; } };
+}
+
+test('runCommand targets a usable state.page, drops closed/throwing handles, and re-pins the fallback', async () => {
+  const clock = makeFakeClock();
+  const open = makeClosablePage(false);
+  const firstCtxPage = makeClosablePage(false);
+  const ctxPages = [firstCtxPage];
+  let builtWith = null;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages: ctxPages }),
+    getContext: () => ({ pages: () => ctxPages }),
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    // Capture which page runCommand resolved and hand it straight back.
+    buildExecContext: (page) => { builtWith = page; return { page }; },
+    runCode: async (_code, execCtx) => execCtx.page,
+  });
+
+  // 1) A usable pinned page is targeted as-is.
+  runtime.userState.page = open;
+  const r1 = await runtime.runCommand({ code: 'noop' });
+  assert.equal(r1, open, 'usable state.page is targeted');
+  assert.equal(builtWith, open);
+  assert.equal(runtime.userState.page, open, 'usable pin is preserved');
+
+  // 2) A closed pinned page is dropped → falls back to ctx.pages()[0] and re-pins.
+  runtime.userState.page = makeClosablePage(true);
+  const r2 = await runtime.runCommand({ code: 'noop' });
+  assert.equal(r2, firstCtxPage, 'closed state.page falls back to the first context page');
+  assert.equal(runtime.userState.page, firstCtxPage, 'fallback re-pins state.page');
+
+  // 3) A handle whose isClosed() THROWS is treated as unusable (no crash) → fallback.
+  runtime.userState.page = makeClosablePage('throw');
+  const r3 = await runtime.runCommand({ code: 'noop' });
+  assert.equal(r3, firstCtxPage, 'throwing isClosed() is treated as unusable, not propagated');
+  assert.equal(runtime.userState.page, firstCtxPage);
+});
