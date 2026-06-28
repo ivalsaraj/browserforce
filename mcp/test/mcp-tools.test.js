@@ -362,8 +362,9 @@ describe('Tool Definitions', () => {
   });
 
   it('MCP preferences fetch is cached once per session', () => {
+    // Cached preferences now live in the shared browser session runtime.
     const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
       'utf8'
     );
 
@@ -379,8 +380,9 @@ describe('Tool Definitions', () => {
   });
 
   it('MCP restrictions fetch is cached once per session', () => {
+    // Cached restrictions now live in the shared browser session runtime.
     const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
       'utf8'
     );
 
@@ -436,15 +438,78 @@ describe('Tool Definitions', () => {
     assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
   });
 
-  it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
+  it('execute catches CodeExecutionTimeoutError and omits the reset hint on timeout', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
+    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+
+    assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'execute should detect timeout errors');
+    assert.ok(execHandler.includes("const hint = isTimeout ? ''"), 'timeout errors should produce an empty hint (no reset suggestion)');
+    assert.ok(
+      execHandler.indexOf("isTimeout ? ''") < execHandler.indexOf('[HINT: Call reset only'),
+      'the reset hint must live in the non-timeout branch only'
+    );
+  });
+
+  it('execute routes code through the shared runCode boundary with no extra timeout race', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+
+    assert.ok(execHandler.includes('await runCode(code, execCtx, timeout)'), 'execute should delegate to the shared runCode boundary');
+    assert.ok(!execHandler.includes('Promise.race'), 'execute must not add its own timeout race around runCode');
+  });
+
+  it('runCode owns the single timeout boundary that aborts the run', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/exec-engine.js'),
+      'utf8'
+    );
+
+    assert.ok(source.includes('export async function runCode'), 'runCode should be the exported execution entry point');
+    assert.ok(source.includes('vm.runInContext'), 'runCode should run user code inside the vm timeout boundary');
+    assert.ok(source.includes('run.abort()'), 'runCode should abort the run when the timeout fires');
+  });
+
+  it('CLI one-shot execute shares the runCode boundary without its own timeout race', () => {
+    const source = readFileSync(
+      join(MCP_ROOT, '../bin.js'),
+      'utf8'
+    );
+    const execHandler = source.slice(
+      source.indexOf('async function cmdExecute'),
+      source.indexOf('async function cmdServe'),
+    );
+
+    assert.ok(execHandler.includes('await runCode(code, execCtx, timeoutMs)'), 'CLI execute should delegate to the shared runCode boundary');
+    assert.ok(!execHandler.includes('Promise.race'), 'CLI execute must not add its own timeout race around runCode');
+  });
+
+  it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
+    // ensureBrowser now lives in the shared runtime; the relay+CDP connect is
+    // injected from index.js. Neither path may use the root / health check as
+    // attached-page proof.
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
+      'utf8'
+    );
     const ensureBrowserIdx = source.indexOf('async function ensureBrowser');
-    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('function getContext', ensureBrowserIdx));
+    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('async function getAgentPreferencesForSession', ensureBrowserIdx));
     assert.doesNotMatch(ensureBrowserBlock, /assertExtensionConnected/);
     assert.doesNotMatch(ensureBrowserBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
+
+    const indexSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const connectIdx = indexSource.indexOf('async function connectBrowserOverRelay');
+    const connectBlock = indexSource.slice(connectIdx, indexSource.indexOf('const runtime =', connectIdx));
+    assert.doesNotMatch(connectBlock, /assertExtensionConnected/);
+    assert.doesNotMatch(connectBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
   });
 
   it('execute schema includes an explicit attached-page intent', () => {
@@ -473,21 +538,34 @@ describe('Tool Definitions', () => {
   });
 
   it('reset clears cached preferences', () => {
-    const source = readFileSync(
+    // The MCP reset tool delegates state clearing to runtime.reset(), which is
+    // what clears cached agent preferences/restrictions.
+    const indexSource = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-
-    const resetIdx = source.indexOf("'reset'");
+    const resetIdx = indexSource.indexOf("'reset'");
     assert.ok(resetIdx !== -1, 'reset tool should exist');
-    const resetBlock = source.slice(resetIdx, resetIdx + 2500);
+    const resetBlock = indexSource.slice(resetIdx, resetIdx + 2500);
     assert.ok(
-      resetBlock.includes('cachedAgentPreferences = null'),
-      'reset should clear cached agent preferences'
+      resetBlock.includes('runtime.reset()'),
+      'reset tool should delegate state clearing to runtime.reset()'
+    );
+
+    const runtimeSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
+      'utf8'
+    );
+    const runtimeResetIdx = runtimeSource.indexOf('async function reset');
+    assert.ok(runtimeResetIdx !== -1, 'runtime should define reset()');
+    const runtimeResetBlock = runtimeSource.slice(runtimeResetIdx, runtimeResetIdx + 600);
+    assert.ok(
+      runtimeResetBlock.includes('cachedAgentPreferences = null'),
+      'runtime reset should clear cached agent preferences'
     );
     assert.ok(
-      resetBlock.includes('cachedBrowserforceRestrictions = null'),
-      'reset should clear cached browserforce restrictions'
+      runtimeResetBlock.includes('cachedBrowserforceRestrictions = null'),
+      'runtime reset should clear cached browserforce restrictions'
     );
   });
 
@@ -527,38 +605,49 @@ describe('Tool Definitions', () => {
   });
 
   it('MCP server includes idle disconnect handling for browser connections', () => {
-    const source = readFileSync(
+    // The idle-disconnect timeout is read in index.js (env) and passed to the
+    // runtime, which owns the scheduler/timer/active-operation bookkeeping.
+    const indexSource = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-
     assert.ok(
-      source.includes('BF_MCP_IDLE_DISCONNECT_MS'),
+      indexSource.includes('BF_MCP_IDLE_DISCONNECT_MS'),
       'idle disconnect timeout should be configurable'
     );
     assert.ok(
-      source.includes('scheduleIdleBrowserDisconnect'),
+      indexSource.includes('idleDisconnectMs'),
+      'index should pass the idle disconnect timeout to the runtime'
+    );
+
+    const runtimeSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
+      'utf8'
+    );
+    assert.ok(
+      runtimeSource.includes('scheduleIdleBrowserDisconnect'),
       'should define idle browser disconnect scheduler'
     );
     assert.ok(
-      source.includes('clearIdleBrowserDisconnectTimer'),
+      runtimeSource.includes('clearIdleBrowserDisconnectTimer'),
       'should clear pending idle disconnect timers when activity resumes'
     );
     assert.ok(
-      source.includes('activeBrowserOperations'),
+      runtimeSource.includes('activeBrowserOperations'),
       'should track in-flight browser operations before disconnecting'
     );
   });
 
   it('MCP server waits for initial CDP page discovery before executing code', () => {
+    // ensureBrowser + page-discovery wait now live in the shared runtime.
     const source = readFileSync(
-      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
       'utf8'
     );
 
     const ensureBrowserIdx = source.indexOf('async function ensureBrowser');
     assert.ok(ensureBrowserIdx !== -1, 'ensureBrowser should exist');
-    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('function getContext', ensureBrowserIdx));
+    const ensureBrowserBlock = source.slice(ensureBrowserIdx, source.indexOf('async function getAgentPreferencesForSession', ensureBrowserIdx));
     assert.ok(
       source.includes('waitForInitialPageDiscovery'),
       'should define initial page discovery wait helper'

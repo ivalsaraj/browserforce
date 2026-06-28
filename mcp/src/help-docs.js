@@ -89,7 +89,8 @@ const HELP_SECTIONS = Object.freeze({
 - Element missing: refresh snapshot output and use stable refs, roles, test IDs, or tighter search.
 - Navigation failed: inspect current URL, logs, and snapshot before retrying.
 - BF_NO_ATTACHED_PAGE or BF_NEW_TABS_DISABLED: manual/no-new-tabs mode needs an attached tab or relaxed restrictions.
-- Connection/internal failures: call reset, then reinitialize state.page from context.pages().`,
+- Connection/internal failures: call reset, then reinitialize state.page from context.pages().
+- Execute timeout is a cancellation boundary, not just a late error: it aborts BrowserForce-controlled continuations (run timers, guarded helpers, state) so a timed-out snippet cannot mutate state or issue new guarded calls — re-observe the page (snapshot/url) before retrying. Two limits by design: a continuation resuming after awaiting a raw top-level page/context op can still issue one more Chrome command, and a CPU loop after an await may not be interruptible. Do not call reset for ordinary timeouts.`,
   },
   parallel: {
     title: 'Parallel Work',
@@ -101,6 +102,31 @@ const HELP_SECTIONS = Object.freeze({
 - Never run Promise.all actions against the same Page object.
 - Use one tab/page per task with a small concurrency cap, then aggregate results.
 - Return useful telemetry for swarm runs: peakConcurrentTasks, wallClockMs, sumTaskDurationsMs, failures, and retries.`,
+  },
+  'cli-session': {
+    title: 'CLI Session Daemon',
+    summary: 'Persistent CLI browser session + atomic verbs vs one-shot -e.',
+    text: `# CLI Session Daemon
+
+- The BrowserForce CLI has two execution paths: a persistent session daemon (sessiond) and one-shot \`-e\`.
+- Session daemon: \`browserforce snapshot --sessiond\` then atomic verbs (click / fill / type / press / wait / get / eval) share one browser session and the snapshot refs across separate CLI invocations.
+- Refs (\`@e1\`, \`e1\`, \`ref=e1\` all normalize to \`e1\`) come from the latest \`snapshot --sessiond\`; they go stale on any page change — re-snapshot before the next ref interaction.
+- Every atomic verb routes through the same guarded runCode() boundary as MCP execute. \`eval --stdin\` runs piped Playwright JS in the session with persistent \`state\` (and \`page\`, \`context\`, \`snapshot()\`, \`locatorForRef()\`).
+- One-shot \`-e\` stays independent — no persisted state — for self-contained scripts.
+- Add \`--json\` for a { success, data, error, warning } envelope; verbs exit non-zero on failure.
+- Lifecycle: \`browserforce session start | status | stop\`. The daemon auto-starts on the first verb and idles out after 5 minutes.`,
+  },
+  backends: {
+    title: 'Browser Backends',
+    summary: 'Real-Chrome-first selection, mandatory managed fallback warning, doctor.',
+    text: `# Browser Backends
+
+- Backend selection is real-Chrome-first. \`auto\` (default) connects to the user's real Chrome via relay + extension when the extension is connected.
+- If the real bridge is unavailable, \`auto\` falls back to a managed headed Chrome and emits a MANDATORY warning (never silent).
+- \`BF_BROWSER_BACKEND=real\` forces the real bridge and fails loud (non-zero exit, no daemon) when it is unavailable — it NEVER falls back.
+- \`BF_BROWSER_BACKEND=managed\` or \`headless\` launch a managed Chrome directly.
+- \`browserforce session status --json\` reports { backend, requestedBackend, fallbackReason, warning }.
+- \`browserforce doctor\` diagnoses relay / extension / stale cdp-url / secret perms / active backend; \`--fix\` removes only stale sidecars, never secrets.`,
   },
   examples: {
     title: 'Examples',
@@ -151,6 +177,8 @@ export const HELP_SECTION_NAMES = Object.freeze([
   'plugins',
   'errors',
   'parallel',
+  'cli-session',
+  'backends',
   'examples',
 ]);
 

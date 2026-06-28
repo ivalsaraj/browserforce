@@ -192,6 +192,18 @@ For side-panel chat continuity, BrowserForce session metadata stores Codex provi
 - Emit and consume `run.usage` and `run.provider_session` events.
 - Side-panel hydrates usage from `GET /v1/sessions/:sessionId` and shows `Context: unavailable` when telemetry is missing.
 
+### Execute Timeout Cancellation
+
+`runCode()` is the single execution boundary for `execute` (MCP) and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.
+
+Exposed BrowserForce helpers and the persistent `state` object are wrapped by `guardObject()` / `guardAsyncFunction()`: a guarded call or property access throws once the run has aborted, so a timed-out snippet cannot keep driving Chrome or mutate `state`. `shouldGuardObject()` only guards "behavioral" values (class instances, or POJOs/arrays exposing methods) so plain-data results (`pluginCatalog()`, `getBrowserforceStatus()`) and the `formatResult()` Buffer/labeled-screenshot contract stay raw. `state` is force-guarded and its writes store the **unwrapped** value, so a timed-out run never persists a run-bound proxy onto `state` and poisons the next run that reads it.
+
+- **Rule**: Any new helper exposed inside `buildExecContext()` must either be left for `runCode()` to wrap with the run guard, or explicitly observe `executeSignal` / `throwIfExecutionAborted` while it polls or waits (use the private `abortableDelay(ms, signal)` for internal waits). Never add a raw `Promise.race()` timeout wrapper around `runCode()` at a caller — it leaves losing async work alive.
+- **Rule**: Keep built-in constructors/utilities (`URL`, `URLSearchParams`, `Buffer`, `TextEncoder`, `TextDecoder`, `setTimeout`, `clearTimeout`) in `RAW_CONTEXT_BUILTINS` so they are never proxied — wrapping a constructor breaks `new URL(...)` and drops statics like `Buffer.from`.
+- **Limitation (raw top-level handles)**: Top-level `page` and `context` are intentionally left **raw** (not guarded) because they are identity-sensitive Playwright handles — a proxy breaks `context.pages().includes(page)` and private-field getters. The fence therefore covers run-scoped timers, guarded BrowserForce helpers, the guarded `state`, and guarded stored/returned handles (`state.page`, helper-returned handles). A snippet that resumes after awaiting a **raw top-level `page`/`context`** operation can still issue one further Chrome command by design; the guarantee is scoped to BrowserForce-controlled continuations, not to rolling back an already-issued CDP command. Guard `page`/`context` only if a browser-level repro requires it, and add identity/regression tests first (the Task 7 repro uses a guarded stored handle, so it does not).
+- **Limitation (sync CPU loop after `await`)**: `vm.runInContext(..., { timeout })` bounds only the **synchronous window up to the first `await`** (so `while (true) {}` is interrupted). A CPU-bound synchronous loop scheduled **after** an `await` (e.g. `await Promise.resolve(); while (true) {}`) runs as a microtask the vm `timeout` does not bound and can block the event loop so the outer abort timer never fires. Interrupting that requires worker/isolate execution, a deliberate Non-Goal. Do **not** "fix" it with `vm.createContext(..., { microtaskMode: 'afterEvaluate' })`: that breaks host-promise awaits (every real `await page.*()` would never resume and would time out).
+- **Location**: `mcp/src/exec-engine.js` — `runCode()`, `createRunController()`, `createRunTimers()`, `guardObject()`, `shouldGuardObject()`, `abortableDelay()`.
+
 ## Accessibility Snapshot Engine
 
 - **Rule**: The snapshot tree comes from `mcp/src/aria-snapshot-engine.js` (CDP `Accessibility.getFullAXTree` + `DOM.getFlattenedDocument`, cross-referenced by `backendNodeId`). There is **no DOM-walker fallback** — an empty AX tree throws a descriptive error after one retry. `mcp/src/snapshot.js` keeps only shared constants/helpers + `createSmartDiff`/`parseSearchPattern`.
@@ -202,6 +214,36 @@ For side-panel chat continuity, BrowserForce session metadata stores Codex provi
 - **Rule**: Full-page `snapshot()` (no explicit `frame`/`locator`) **stitches** subframe content: each `<iframe>`/`<frame>` is a leaf in the main tree, every subframe is (re)assembled once into a single shared `refCtx`, then stitched under its owner leaf by `backendNodeId` and finalized once. In-frame refs carry a `frameChain` so `locatorForRef` pierces via `frameLocator`. Explicit `frame`/`locator` keeps single-region behavior (empty `frameChain`).
 - **Rule**: Full-page degradation is **visible, never silent**. A first-level OOPIF that fails to acquire/fetch (relay target-resolution error, detach, enable failure) or is empty after retry is **best-effort skipped** — one flaky/blank cross-origin subframe must not nuke the whole-page snapshot — but recorded in `getAriaSnapshot`'s `frameErrors` and surfaced via `renderFrameErrors` as a `⚠️ N subframe(s) not stitched` block. Callers can then retry, wait, or scope the frame explicitly (explicit `frame` scope still **throws** on failure). **Limitation**: owners are matched only in the page-process DOM, so one level of OOPIF is stitched; iframes nested inside an OOPIF are skipped (their owner is not in the page DOM, so they are not recorded as errors).
 - **Why**: `backendNodeId` anchoring gives stable refs, subtree scoping, and cross-origin iframe reach that the old JS DOM walk could not.
+
+### CLI Session Daemon & Backend Selection
+
+The CLI ships a persistent session daemon (`cli/sessiond.js`, client in
+`cli/session-client.js`) so atomic verbs (`snapshot --sessiond`, `click`,
+`fill`, `type`, `press`, `wait`, `get`, `eval`) share one browser session and
+its snapshot refs across separate CLI invocations. It mirrors the relay's
+security contract: binds `127.0.0.1` only, random 32-byte bearer token in a
+`0o600` lock/url sidecar, `Authorization: Bearer` on every state route, and
+`/health` is the only unauthenticated route (leaks no secret). Every verb routes
+through the shared `runtime.runCommand()` → `runCode()` guarded boundary — the
+exact same vm boundary as MCP `execute` and one-shot `-e`. Never `eval()` /
+`new Function()` user input at the caller; pass it as the snippet.
+
+Backend policy (`mcp/src/backend-selection.js`, negotiated in
+`cli/sessiond.js#negotiateBackend`) is **real-Chrome-first**:
+
+- **Real Chrome remains primary.** `auto` (default) connects to the user's real
+  Chrome via the relay + extension whenever the extension is connected.
+- **The managed fallback warning is mandatory — never silent.** When `auto`
+  falls back to managed/headless Chrome, the daemon records and surfaces a
+  warning (`/status` `warning` field, CLI stderr).
+- **`--real` / `BF_BROWSER_BACKEND=real` never falls back.** It fails loud
+  (non-zero exit, no lock written) when the bridge is unavailable. Negotiation
+  runs BEFORE the lock is published so a failed `real` request leaves no daemon.
+- **The installed BrowserForce skill stub (`skills/browserforce/SKILL.md`) must
+  NOT use `hidden: true`.** Deliberate divergence from agent-browser: OpenCode
+  can filter hidden installed skills out entirely, which would hide the
+  `skills get core` redirect from the model. Runtime skill content lives in
+  `skill-data/` and is served by `browserforce skills get|list|path`.
 
 ## Security Rules
 

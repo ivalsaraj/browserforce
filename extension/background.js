@@ -375,6 +375,16 @@ async function attachTab(tabId, sessionId, options = {}) {
   // Enable Page domain for navigation events
   await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
 
+  // Chrome 144+ pauses a freshly attached target until the debugger resumes it
+  // (agent-browser fix #1133). Resume immediately so the relay/Playwright CDP
+  // commands aren't blocked. Best-effort: it's a no-op (and a benign error) on
+  // Chrome versions/targets that don't pause, so swallow any failure.
+  try {
+    await chrome.debugger.sendCommand({ tabId }, 'Runtime.runIfWaitingForDebugger');
+  } catch (e) {
+    // ignore — target wasn't paused / command unsupported on this version
+  }
+
   // Get real target info from Chrome
   let targetId;
   let targetInfo;

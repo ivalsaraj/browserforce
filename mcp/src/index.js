@@ -12,6 +12,7 @@ import {
   CodeExecutionTimeoutError, buildExecContext, runCode, formatResult,
   BrowserForceMcpError, shouldCreateImplicitStartupPage,
 } from './exec-engine.js';
+import { createBrowserSessionRuntime } from './browser-session-runtime.js';
 import {
   preflightAttachedPageBeforeCdp,
   formatBrowserForceMcpError,
@@ -29,68 +30,15 @@ import {
   HELP_SECTION_NAMES,
 } from './help-docs.js';
 
-// ─── Console Log Capture ─────────────────────────────────────────────────────
+// ─── Browser Session Runtime ─────────────────────────────────────────────────
+// Browser connection, persistent userState, idle-disconnect lifecycle, console
+// capture, and cached agent preferences/restrictions are owned by the shared
+// runtime (./browser-session-runtime.js), which the CLI session daemon also
+// reuses. MCP injects the relay+CDP connect path; the runtime owns the
+// lifecycle (connect coalescing, idle disconnect, console capture) around it.
 
-const MAX_LOGS_PER_PAGE = 5000;
-const consoleLogs = new Map();
-const pagesWithListeners = new WeakSet();
-let contextListenerAttached = false;
-
-function setupConsoleCapture(page) {
-  if (pagesWithListeners.has(page)) return;
-  pagesWithListeners.add(page);
-
-  consoleLogs.set(page, []);
-
-  page.on('console', (msg) => {
-    try {
-      const entry = `[${msg.type()}] ${msg.text()}`;
-      let logs = consoleLogs.get(page);
-      if (!logs) {
-        logs = [];
-        consoleLogs.set(page, logs);
-      }
-      logs.push(entry);
-      if (logs.length > MAX_LOGS_PER_PAGE) {
-        logs.shift();
-      }
-    } catch { /* msg.text() can throw if page navigated */ }
-  });
-
-  page.on('framenavigated', (frame) => {
-    if (frame === page.mainFrame()) {
-      consoleLogs.set(page, []);
-    }
-  });
-
-  page.on('close', () => {
-    consoleLogs.delete(page);
-  });
-}
-
-function ensureAllPagesCapture() {
-  try {
-    const pages = getPages();
-    for (const page of pages) {
-      setupConsoleCapture(page);
-    }
-  } catch { /* not connected yet */ }
-}
-
-// ─── Browser Connection ──────────────────────────────────────────────────────
-
-let browser = null;
 const CONNECT_RETRY_TIMEOUT_MS = 30000;
 const DEFAULT_IDLE_BROWSER_DISCONNECT_MS = 15000;
-const INITIAL_PAGE_DISCOVERY_TIMEOUT_MS = 5000;
-const INITIAL_PAGE_DISCOVERY_POLL_MS = 100;
-const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
-  process.env.BF_MCP_IDLE_DISCONNECT_MS,
-  DEFAULT_IDLE_BROWSER_DISCONNECT_MS,
-);
-let browserConnectPromise = null;
-let idleBrowserDisconnectTimer = null;
-let activeBrowserOperations = 0;
 
 function resolveNonNegativeInt(value, fallback) {
   const parsed = Number(value);
@@ -100,45 +48,10 @@ function resolveNonNegativeInt(value, fallback) {
   return Math.floor(parsed);
 }
 
-function clearIdleBrowserDisconnectTimer() {
-  if (!idleBrowserDisconnectTimer) return;
-  globalThis.clearTimeout(idleBrowserDisconnectTimer);
-  idleBrowserDisconnectTimer = null;
-}
-
-async function disconnectIdleBrowser() {
-  if (!browser?.isConnected() || activeBrowserOperations > 0) return;
-  try {
-    await browser.close();
-  } catch {
-    // The connection may already be gone.
-  }
-}
-
-function scheduleIdleBrowserDisconnect() {
-  clearIdleBrowserDisconnectTimer();
-  if (IDLE_BROWSER_DISCONNECT_MS <= 0) return;
-  if (!browser?.isConnected() || activeBrowserOperations > 0) return;
-
-  idleBrowserDisconnectTimer = globalThis.setTimeout(() => {
-    idleBrowserDisconnectTimer = null;
-    disconnectIdleBrowser().catch(() => {});
-  }, IDLE_BROWSER_DISCONNECT_MS);
-
-  if (typeof idleBrowserDisconnectTimer?.unref === 'function') {
-    idleBrowserDisconnectTimer.unref();
-  }
-}
-
-function beginBrowserOperation() {
-  activeBrowserOperations += 1;
-  clearIdleBrowserDisconnectTimer();
-}
-
-function endBrowserOperation() {
-  activeBrowserOperations = Math.max(0, activeBrowserOperations - 1);
-  scheduleIdleBrowserDisconnect();
-}
+const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
+  process.env.BF_MCP_IDLE_DISCONNECT_MS,
+  DEFAULT_IDLE_BROWSER_DISCONNECT_MS,
+);
 
 function withClientLabel(cdpUrl) {
   try {
@@ -155,150 +68,40 @@ function withClientLabel(cdpUrl) {
   }
 }
 
-async function waitForInitialPageDiscovery(ctx, { timeoutMs = INITIAL_PAGE_DISCOVERY_TIMEOUT_MS } = {}) {
-  const started = Date.now();
-  while (ctx.pages().length === 0 && Date.now() - started < timeoutMs) {
-    await new Promise((resolve) => globalThis.setTimeout(resolve, INITIAL_PAGE_DISCOVERY_POLL_MS));
-  }
+// Injected connect path. Note: extension readiness is asserted by
+// preflightAttachedPageBeforeCdp() (via /extension/status) before this point is
+// reached. This connect must NOT prove readiness via the root / health check —
+// that is not proof an attached page exists.
+async function connectBrowserOverRelay() {
+  await ensureRelay();
+  const cdpUrl = withClientLabel(await getCdpUrl());
+  const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
+  return connectOverCdpWithBusyRetry({
+    connect: (url) => chromium.connectOverCDP(url),
+    cdpUrl,
+    baseUrl,
+    timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
+  });
 }
 
-async function ensureBrowser() {
-  clearIdleBrowserDisconnectTimer();
-  if (browser?.isConnected()) return;
-  if (browserConnectPromise) {
-    await browserConnectPromise;
-    return;
-  }
-
-  browserConnectPromise = (async () => {
-    await ensureRelay();
-    const cdpUrl = withClientLabel(await getCdpUrl());
-    const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
-    // Note: extension readiness is asserted by preflightAttachedPageBeforeCdp()
-    // (via /extension/status) before this point is reached. ensureBrowser itself
-    // must NOT prove readiness via the root / health check — that is not proof
-    // an attached page exists.
-    const nextBrowser = await connectOverCdpWithBusyRetry({
-      connect: (url) => chromium.connectOverCDP(url),
-      cdpUrl,
-      baseUrl,
-      timeoutMs: CONNECT_RETRY_TIMEOUT_MS,
-    });
-    browser = nextBrowser;
-    browser.on('disconnected', () => {
-      clearIdleBrowserDisconnectTimer();
-      browser = null;
-      contextListenerAttached = false;
-      consoleLogs.clear();
-    });
-    process.stderr.write('[bf-mcp] Connected to relay\n');
-
-    try {
-      const ctx = browser.contexts()[0];
-      if (ctx && !contextListenerAttached) {
-        ctx.on('page', (page) => setupConsoleCapture(page));
-        contextListenerAttached = true;
-        await waitForInitialPageDiscovery(ctx);
-        for (const page of ctx.pages()) {
-          setupConsoleCapture(page);
-        }
-      }
-    } catch { /* context not ready yet — capture will attach lazily */ }
-  })();
-
-  try {
-    await browserConnectPromise;
-  } finally {
-    browserConnectPromise = null;
-  }
-}
-
-function getContext() {
-  if (!browser?.isConnected()) throw new Error('Not connected to relay. Is the relay running?');
-  const contexts = browser.contexts();
-  if (contexts.length === 0) throw new Error('No browser context available');
-  return contexts[0];
-}
-
-function getPages() {
-  return getContext().pages();
-}
-
-// ─── Persistent State ────────────────────────────────────────────────────────
-
-let userState = {};
-const DEFAULT_AGENT_PREFERENCES = Object.freeze({
-  executionMode: 'parallel',
-  parallelVisibilityMode: 'foreground-tab',
+const runtime = createBrowserSessionRuntime({
+  connectBrowser: connectBrowserOverRelay,
+  getRelayHttpUrl,
+  idleDisconnectMs: IDLE_BROWSER_DISCONNECT_MS,
+  onConnected: () => process.stderr.write('[bf-mcp] Connected to relay\n'),
 });
-const DEFAULT_BROWSERFORCE_RESTRICTIONS = Object.freeze({
-  mode: 'auto',
-  lockUrl: false,
-  noNewTabs: false,
-  readOnly: false,
-  instructions: '',
-});
-let cachedAgentPreferences = null;
-let cachedBrowserforceRestrictions = null;
 
-function normalizeAgentPreferences(raw) {
-  const executionMode = raw?.executionMode === 'sequential' ? 'sequential' : 'parallel';
-  // Keep behavior locked to visible tabs in the current window.
-  const parallelVisibilityMode = 'foreground-tab';
-  return { executionMode, parallelVisibilityMode };
-}
-
-async function getAgentPreferencesForSession() {
-  if (cachedAgentPreferences) {
-    return cachedAgentPreferences;
-  }
-
-  try {
-    const response = await fetch(`${getRelayHttpUrl()}/agent-preferences`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const raw = await response.json();
-    cachedAgentPreferences = normalizeAgentPreferences(raw);
-    return cachedAgentPreferences;
-  } catch {
-    cachedAgentPreferences = { ...DEFAULT_AGENT_PREFERENCES };
-    return cachedAgentPreferences;
-  }
-}
-
-function normalizeRestrictions(raw) {
-  return {
-    mode: raw?.mode === 'manual' ? 'manual' : 'auto',
-    lockUrl: !!raw?.lockUrl,
-    noNewTabs: !!raw?.noNewTabs,
-    readOnly: !!raw?.readOnly,
-    instructions: typeof raw?.instructions === 'string' ? raw.instructions : '',
-  };
-}
-
-async function getBrowserforceRestrictionsForSession({ forceRefresh = false } = {}) {
-  if (cachedBrowserforceRestrictions && !forceRefresh) {
-    return cachedBrowserforceRestrictions;
-  }
-
-  try {
-    const response = await fetch(`${getRelayHttpUrl()}/restrictions`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const raw = await response.json();
-    cachedBrowserforceRestrictions = normalizeRestrictions(raw);
-    return cachedBrowserforceRestrictions;
-  } catch {
-    cachedBrowserforceRestrictions = { ...DEFAULT_BROWSERFORCE_RESTRICTIONS };
-    return cachedBrowserforceRestrictions;
-  }
-}
+const {
+  ensureBrowser,
+  getContext,
+  getPages,
+  setupConsoleCapture,
+  ensureAllPagesCapture,
+  beginOperation: beginBrowserOperation,
+  endOperation: endBrowserOperation,
+  getAgentPreferencesForSession,
+  getBrowserforceRestrictionsForSession,
+} = runtime;
 
 // ─── Plugin State ────────────────────────────────────────────────────────────
 
@@ -403,12 +206,12 @@ function registerExecuteTool(skillAppendix = '') {
 
         if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
           page = await ctx.newPage();
-          userState.page = page;
+          runtime.userState.page = page;
         }
 
         if (page) setupConsoleCapture(page);
-        const execCtx = buildExecContext(page, ctx, userState, {
-          consoleLogs, setupConsoleCapture,
+        const execCtx = buildExecContext(page, ctx, runtime.userState, {
+          consoleLogs: runtime.consoleLogs, setupConsoleCapture,
         }, pluginHelpers, agentPreferences, browserforceRestrictions, pluginSkillRuntime);
         try {
           const result = await runCode(code, execCtx, timeout);
@@ -447,7 +250,6 @@ server.tool(
   async () => {
     try {
       beginBrowserOperation();
-      clearIdleBrowserDisconnectTimer();
       // Preflight BEFORE the CDP reconnect: reset reconnects to the attached
       // page, so it must fail with BF_NO_ATTACHED_PAGE rather than opening or
       // connecting to CDP when no manual tab is attached.
@@ -455,15 +257,9 @@ server.tool(
         intent: 'inspect',
         fetchBrowserforceRestrictions: getBrowserforceRestrictionsForSession,
       });
-      if (browser) {
-        try { await browser.close(); } catch { /* connection may already be dead */ }
-      }
-      browser = null;
-      userState = {};
-      cachedAgentPreferences = null;
-      cachedBrowserforceRestrictions = null;
-      contextListenerAttached = false;
-      consoleLogs.clear();
+      // runtime.reset() closes the browser and clears userState, cached
+      // preferences/restrictions, and console capture.
+      await runtime.reset();
       await ensureBrowser();
       ensureAllPagesCapture();
       const pages = getPages();
