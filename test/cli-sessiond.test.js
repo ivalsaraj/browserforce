@@ -477,10 +477,10 @@ describe('CLI session daemon', () => {
     });
 
     it('wait --text / --url / --load resolve through the session', async () => {
-      const textRes = JSON.parse((await exec('node', ['bin.js', 'wait', '--text', 'Saved', '--json'], { cwd: ROOT, env })).stdout);
+      const textRes = JSON.parse((await exec('node', ['bin.js', 'wait', '--text', 'saved', '--json'], { cwd: ROOT, env })).stdout);
       assert.equal(textRes.success, true);
       assert.equal(textRes.data.waited, 'text');
-      assert.equal(textRes.data.text, 'Saved');
+      assert.equal(textRes.data.text, 'saved');
 
       const urlRes = JSON.parse((await exec('node', ['bin.js', 'wait', '--url', '**/dashboard', '--json'], { cwd: ROOT, env })).stdout);
       assert.equal(urlRes.success, true);

@@ -196,7 +196,7 @@ function waitSnippet(kind, value, timeout) {
   const t = Number(timeout) || 30000;
   switch (kind) {
     case 'text':
-      return `await page.waitForFunction((s) => !!document.body && document.body.innerText.includes(s), ${v}, { timeout: ${t}, polling: 100 });\nreturn { waited: 'text', text: ${v} };`;
+      return `await page.waitForFunction((s) => !!document.body && document.body.innerText.toLocaleLowerCase().includes(String(s).toLocaleLowerCase()), ${v}, { timeout: ${t}, polling: 100 });\nreturn { waited: 'text', text: ${v} };`;
     case 'url':
       return `await page.waitForURL(${v}, { timeout: ${t} });\nreturn { waited: 'url', url: page.url() };`;
     case 'load': {

@@ -406,7 +406,7 @@ browserforce click @e3                        # act on a ref from the snapshot
 browserforce fill @e2 "user@example.com"      # clear + type
 browserforce type @e2 " more"                 # type without clearing
 browserforce press Enter                      # press a key
-browserforce wait --text "Saved"              # or --url <glob> / --load <state> / --fn <expr>
+browserforce wait --text "saved"              # case-insensitive; or --url <glob> / --load <state> / --fn <expr>
 browserforce get url | title | text @e5       # read page/element data
 echo 'return await snapshot()' | browserforce eval --stdin   # run piped Playwright JS in the session
 browserforce session start | status | stop    # manage the daemon (auto-starts; idles out after 5m)

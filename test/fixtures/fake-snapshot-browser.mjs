@@ -71,7 +71,19 @@ function makeFakePage(ctx) {
     context: () => ctx,
     keyboard: { press: async (key) => record({ action: 'keypress', key }) },
     // Fake waiters resolve immediately (record so tests can assert the call).
-    waitForFunction: async () => { record({ action: 'waitForFunction' }); return true; },
+    waitForFunction: async (fn, arg) => {
+      const source = String(fn);
+      record({ action: 'waitForFunction', source, arg });
+      if (
+        source.includes('innerText') &&
+        arg === 'saved' &&
+        !source.includes('toLocaleLowerCase') &&
+        !source.includes('toLowerCase')
+      ) {
+        throw new Error('fake waitForFunction did not match uppercase page text');
+      }
+      return true;
+    },
     waitForURL: async () => { record({ action: 'waitForURL' }); },
     waitForLoadState: async (state) => { record({ action: 'waitForLoadState', state }); },
     on: () => {},
