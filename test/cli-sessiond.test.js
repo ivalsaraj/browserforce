@@ -8,6 +8,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { normalizeRef } from '../cli/session-client.js';
 
 const exec = promisify(execFile);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -329,5 +330,103 @@ describe('CLI session daemon', () => {
       });
       assert.deepEqual(resp.data.frameErrors, []);
     });
+  });
+
+  describe('atomic interaction verbs (real CLI path → sessiond → runCode → locatorForRef)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let eventsPath;
+    let env;
+
+    const readEvents = async () => {
+      try {
+        const raw = await fs.readFile(eventsPath, 'utf8');
+        return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      } catch { return []; }
+    };
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      eventsPath = join(tmpdir(), `bf-fake-events-${Math.random().toString(36).slice(2)}.jsonl`);
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+        BF_SESSIOND_FAKE_EVENTS: eventsPath,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      // Prime refs: snapshot stores e1 in the daemon's persistent session.
+      await exec('node', ['bin.js', 'snapshot', '--sessiond', '--json'], { cwd: ROOT, env });
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+      try { await fs.unlink(eventsPath); } catch { /* gone */ }
+    });
+
+    it('click resolves the SAME stored ref via @e1, e1, and ref=e1 aliases', async () => {
+      for (const alias of ['@e1', 'e1', 'ref=e1']) {
+        const { stdout } = await exec('node', ['bin.js', 'click', alias, '--json'], { cwd: ROOT, env });
+        const resp = JSON.parse(stdout);
+        assert.equal(resp.success, true, `click ${alias} succeeds`);
+        assert.equal(resp.data.clicked, 'e1', `click ${alias} normalizes to e1`);
+      }
+      const clicks = (await readEvents()).filter((e) => e.action === 'click');
+      assert.equal(clicks.length, 3, 'the fake locator recorded three click() calls');
+      for (const c of clicks) {
+        assert.equal(c.selector, '[data-testid="submit"]', 'stored ref resolved to the CDP-built locator');
+      }
+    });
+
+    it('fill and type write through the stored ref; press sends a key', async () => {
+      const fillRes = JSON.parse((await exec('node', ['bin.js', 'fill', '@e1', 'hello', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(fillRes.success, true);
+      assert.equal(fillRes.data.filled, 'e1');
+
+      const typeRes = JSON.parse((await exec('node', ['bin.js', 'type', '@e1', 'world', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(typeRes.success, true);
+      assert.equal(typeRes.data.typed, 'e1');
+
+      const pressRes = JSON.parse((await exec('node', ['bin.js', 'press', 'Enter', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(pressRes.success, true);
+      assert.equal(pressRes.data.pressed, 'Enter');
+
+      const events = await readEvents();
+      const fill = events.find((e) => e.action === 'fill');
+      assert.ok(fill && fill.value === 'hello' && fill.selector === '[data-testid="submit"]', 'fill recorded with text + selector');
+      const type = events.find((e) => e.action === 'type');
+      assert.ok(type && type.value === 'world', 'type recorded with text');
+      const keypress = events.find((e) => e.action === 'keypress');
+      assert.ok(keypress && keypress.key === 'Enter', 'keyboard press recorded');
+    });
+
+    it('click on an unknown ref returns a helpful error (success:false)', async () => {
+      let out;
+      try {
+        out = (await exec('node', ['bin.js', 'click', '@e999', '--json'], { cwd: ROOT, env })).stdout;
+      } catch (err) {
+        out = err.stdout; // CLI exits non-zero on failure
+      }
+      const resp = JSON.parse(out);
+      assert.equal(resp.success, false);
+      assert.match(resp.error, /Unknown ref/);
+    });
+  });
+});
+
+describe('ref normalization (CLI input aliases)', () => {
+  it('normalizes @e1, e1, and ref=e1 to the same canonical ref', () => {
+    assert.equal(normalizeRef('@e1'), 'e1');
+    assert.equal(normalizeRef('e1'), 'e1');
+    assert.equal(normalizeRef('ref=e1'), 'e1');
+    assert.equal(normalizeRef('REF=e2'), 'e2');
+    assert.equal(normalizeRef('  @e3  '), 'e3');
+    assert.equal(normalizeRef(''), '');
   });
 });

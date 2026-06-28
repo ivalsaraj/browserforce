@@ -21,6 +21,20 @@ export function resolveSessiondLockPath(lockPath) {
   return lockPath || process.env.BF_SESSIOND_LOCK_PATH || DEFAULT_SESSIOND_LOCK_PATH;
 }
 
+/**
+ * Normalize a ref input into its canonical short form. The CLI accepts the
+ * agent-browser-style aliases `@e1`, `ref=e1`, and bare `e1`; all map to `e1`
+ * (snapshot output keeps the `[ref=e1]` contract). Normalizing in both the CLI
+ * and sessiond keeps any client's aliases working.
+ */
+export function normalizeRef(input) {
+  if (input == null) return '';
+  let s = String(input).trim();
+  if (s.startsWith('@')) s = s.slice(1);
+  else if (s.slice(0, 4).toLowerCase() === 'ref=') s = s.slice(4);
+  return s.trim();
+}
+
 // The URL sidecar lives next to the lock so test-isolated lock paths
 // (BF_SESSIOND_LOCK_PATH=/tmp/...) keep their url sidecar isolated too, while an
 // explicit override always wins.

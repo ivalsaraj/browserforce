@@ -871,6 +871,55 @@ async function cmdSession() {
   process.exit(1);
 }
 
+// Send an authed command to the sessiond daemon (auto-starting it if needed)
+// and print the { success, data, error, warning } envelope. Exits non-zero on
+// failure so atomic verbs are scriptable.
+async function runSessiondVerb(path, body) {
+  const { sessiondCommand } = await import('./cli/session-client.js');
+  await ensureSessiondRunning();
+  const { body: resp } = await sessiondCommand({ method: 'POST', path, body });
+  if (values.json) {
+    output(resp, true);
+    if (resp && resp.success === false) process.exit(1);
+    return;
+  }
+  if (!resp || resp.success === false) {
+    console.error(`Error: ${resp?.error || 'command failed'}`);
+    process.exit(1);
+  }
+  if (resp.warning) process.stderr.write(`⚠  ${resp.warning}\n`);
+  output(resp.data, false);
+}
+
+async function cmdClick() {
+  const { normalizeRef } = await import('./cli/session-client.js');
+  const ref = normalizeRef(positionals[1]);
+  if (!ref) { console.error('Usage: browserforce click <@ref>'); process.exit(1); }
+  await runSessiondVerb('/command/click', { ref, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdFill() {
+  const { normalizeRef } = await import('./cli/session-client.js');
+  const ref = normalizeRef(positionals[1]);
+  const text = positionals[2];
+  if (!ref || text === undefined) { console.error('Usage: browserforce fill <@ref> <text>'); process.exit(1); }
+  await runSessiondVerb('/command/fill', { ref, text, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdType() {
+  const { normalizeRef } = await import('./cli/session-client.js');
+  const ref = normalizeRef(positionals[1]);
+  const text = positionals[2];
+  if (!ref || text === undefined) { console.error('Usage: browserforce type <@ref> <text>'); process.exit(1); }
+  await runSessiondVerb('/command/type', { ref, text, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdPress() {
+  const key = positionals[1];
+  if (!key) { console.error('Usage: browserforce press <key>'); process.exit(1); }
+  await runSessiondVerb('/command/press', { key, timeout: parseInt(values.timeout, 10) });
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -882,6 +931,11 @@ function cmdHelp() {
     browserforce tabs               List open browser tabs
     browserforce screenshot [n]     Screenshot tab n (default: 0)
     browserforce snapshot [n]       Accessibility tree of tab n (default: 0)
+    browserforce snapshot --sessiond  Session-backed snapshot (shares state, stores refs)
+    browserforce click <@ref>       Click a ref from the last session snapshot
+    browserforce fill <@ref> <text> Fill a ref with text (clears first)
+    browserforce type <@ref> <text> Type text into a ref (key by key)
+    browserforce press <key>        Press a keyboard key (e.g. Enter)
     browserforce navigate <url>     Open URL in a new tab
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
@@ -924,7 +978,8 @@ const commands = {
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
   'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
-  session: cmdSession, help: cmdHelp,
+  session: cmdSession, click: cmdClick, fill: cmdFill, type: cmdType, press: cmdPress,
+  help: cmdHelp,
 };
 
 const handler = commands[command];

@@ -37,6 +37,7 @@ import {
   clearSessiondLock,
   writeSessiondUrl,
   clearSessiondUrl,
+  normalizeRef,
 } from './session-client.js';
 
 const HOST = '127.0.0.1';
@@ -159,6 +160,20 @@ function envelope({ success = true, data = null, error = null, warning = null } 
   return { success, data, error, warning };
 }
 
+// Build a ref-interaction snippet that resolves a stored ref via locatorForRef()
+// inside runCode(), then runs `actionLine` (already containing JSON-encoded
+// literals) and returns `returnExpr`. Refs/text are passed as JSON literals, so
+// untrusted input is never concatenated as executable code.
+function refLocatorSnippet(ref, actionLine, returnExpr) {
+  const unknown = `Unknown ref: ${ref}. Run \`browserforce snapshot --sessiond\` again to refresh refs.`;
+  return [
+    `const locator = locatorForRef({ ref: ${JSON.stringify(ref)} });`,
+    `if (!locator) throw new Error(${JSON.stringify(unknown)});`,
+    actionLine,
+    `return ${returnExpr};`,
+  ].join('\n');
+}
+
 export async function startSessiond({ lockPath, urlPath } = {}) {
   const token = process.env.BF_SESSIOND_TOKEN || randomBytes(32).toString('base64url');
   const envPort = Number(process.env.BF_SESSIOND_PORT || 0);
@@ -262,6 +277,42 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         sendJson(res, 200, envelope({ data, warning: runtime.getBackendInfo().warning }));
         return;
       }
+
+      if (verb === 'click') {
+        const ref = normalizeRef(body?.ref);
+        const code = refLocatorSnippet(ref, `await locator.click();`, `{ clicked: ${JSON.stringify(ref)} }`);
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
+      if (verb === 'fill') {
+        const ref = normalizeRef(body?.ref);
+        const text = String(body?.text ?? '');
+        const code = refLocatorSnippet(ref, `await locator.fill(${JSON.stringify(text)});`, `{ filled: ${JSON.stringify(ref)} }`);
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
+      if (verb === 'type') {
+        const ref = normalizeRef(body?.ref);
+        const text = String(body?.text ?? '');
+        const code = refLocatorSnippet(ref, `await locator.pressSequentially(${JSON.stringify(text)});`, `{ typed: ${JSON.stringify(ref)} }`);
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
+      if (verb === 'press') {
+        const key = String(body?.key ?? '');
+        if (!key) { sendJson(res, 200, envelope({ success: false, error: 'press requires a key' })); return; }
+        const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
       sendJson(res, 501, envelope({ success: false, error: `command not implemented: ${verb}` }));
     } catch (err) {
       // Request was valid + authed but the command failed: keep the envelope
