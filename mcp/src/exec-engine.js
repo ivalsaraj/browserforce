@@ -604,6 +604,41 @@ export function buildExecContext(
     };
   };
 
+  // Structured snapshot for JSON consumers (the CLI atomic `snapshot` verb).
+  // Same engine path as snapshot()/buildSnapshotData(), but returns a plain
+  // JSON-serializable object (no text/diff) and still calls storeRefs() so
+  // `click @eN` can resolve refs from a prior snapshot in the same session.
+  const snapshotData = async ({ frame, locator, selector, search, interactiveOnly = false } = {}) => {
+    const page = activePage();
+    const scopeRoot = frame || page;
+    const scopeLocator = locator || (selector ? scopeRoot.locator(selector).first() : null);
+    const cdp = await getCDPSession({ page });
+    let result;
+    try {
+      result = await getAriaSnapshot({
+        page, frame, locator: scopeLocator, interactiveOnly,
+        refFilter: searchToRefFilter(search), cdp,
+      });
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+    storeRefs(page, result.refs);
+    const title = await page.title().catch(() => '');
+    return {
+      url: page.url(),
+      title,
+      tree: renderRefLines(result.tree),
+      refs: result.refs.map((r) => ({
+        ref: r.shortRef ?? r.ref,
+        role: r.role,
+        name: r.name ?? null,
+        locator: r.locator ?? null,
+        frameChain: r.frameChain || [],
+      })),
+      frameErrors: result.frameErrors,
+    };
+  };
+
   const refToLocator = ({ ref, page: targetPage } = {}) => {
     const p = targetPage || activePage();
     const entry = lastRefToLocator.get(p)?.get(ref);
@@ -806,6 +841,7 @@ export function buildExecContext(
     'context',
     'state',
     'snapshot',
+    'snapshotData',
     'refToLocator',
     'locatorForRef',
     'waitForPageLoad',
@@ -853,7 +889,7 @@ export function buildExecContext(
     browserforceSettings,
     browserforceRestrictions,
     page: defaultPage, context: ctx, state: userState,
-    snapshot, refToLocator, locatorForRef, waitForPageLoad, getLogs, clearLogs, getCDPSession,
+    snapshot, snapshotData, refToLocator, locatorForRef, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     getBrowserforceStatus, getBrowserforcePageForTab,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,

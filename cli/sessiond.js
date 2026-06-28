@@ -29,6 +29,8 @@ import {
   getCdpUrl,
   getRelayHttpUrlFromCdpUrl,
   assertExtensionConnected,
+  buildExecContext,
+  runCode,
 } from '../mcp/src/exec-engine.js';
 import {
   writeSessiondLock,
@@ -141,6 +143,18 @@ function getBearerToken(req) {
   return match ? match[1] : null;
 }
 
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      if (!raw) { resolve({}); return; }
+      try { resolve(JSON.parse(raw)); } catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
 function envelope({ success = true, data = null, error = null, warning = null } = {}) {
   return { success, data, error, warning };
 }
@@ -154,8 +168,9 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
 
   // Shared runtime; the backend connect is wired by negotiateBackend() below.
   // getRelayHttpUrl lets the runtime fetch agent preferences/restrictions for
-  // the real backend (no-op for managed/headless).
-  const runtime = createBrowserSessionRuntime({ getRelayHttpUrl });
+  // the real backend (no-op for managed/headless). buildExecContext + runCode
+  // give the runtime its guarded execution boundary for atomic verbs.
+  const runtime = createBrowserSessionRuntime({ getRelayHttpUrl, buildExecContext, runCode });
 
   let idleTimer = null;
   let shuttingDown = false;
@@ -219,13 +234,40 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
       return;
     }
 
-    if (path.startsWith('/command/')) {
-      // Atomic verbs are added in Tasks 8-10; the route exists + is auth-gated now.
-      sendJson(res, 501, envelope({ success: false, error: `command not implemented: ${path.slice('/command/'.length)}` }));
+    if (method === 'POST' && path.startsWith('/command/')) {
+      const verb = path.slice('/command/'.length);
+      const body = await readJsonBody(req);
+      await handleCommand(verb, body, res);
       return;
     }
 
     sendJson(res, 404, envelope({ success: false, error: `not found: ${path}` }));
+  }
+
+  // Atomic verbs. Each verb builds a snippet that calls an exec-context helper
+  // and routes it through runtime.runCommand() → runCode() (the guarded
+  // execution boundary). No helper is ever called outside runCode().
+  async function handleCommand(verb, body, res) {
+    const requested = Number(body?.timeout);
+    const timeout = Number.isFinite(requested) && requested > 0 ? requested : 30000;
+    try {
+      if (verb === 'snapshot') {
+        const args = {
+          selector: body?.selector,
+          search: body?.search,
+          interactiveOnly: body?.interactiveOnly === true,
+        };
+        const code = `return await snapshotData(${JSON.stringify(args)});`;
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data, warning: runtime.getBackendInfo().warning }));
+        return;
+      }
+      sendJson(res, 501, envelope({ success: false, error: `command not implemented: ${verb}` }));
+    } catch (err) {
+      // Request was valid + authed but the command failed: keep the envelope
+      // contract (HTTP 200, success:false) so the CLI reads body.success.
+      sendJson(res, 200, envelope({ success: false, error: String(err?.message || err) }));
+    }
   }
 
   async function shutdown(reason) {
@@ -251,6 +293,16 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
   // Negotiate the backend before publishing the lock so a `--real` request with
   // no bridge fails loud (non-zero exit, no lock written). auto never throws.
   await negotiateBackend({ runtime, env: process.env });
+
+  // Test seam: inject a fake browser BELOW buildExecContext so the real CLI →
+  // session-client → sessiond → runCommand → runCode → snapshotData path runs
+  // against a fake page/CDP (the only way to fake a subprocess daemon's
+  // browser). Never set in production.
+  if (process.env.BF_SESSIOND_CONNECT_MODULE) {
+    const mod = await import(process.env.BF_SESSIOND_CONNECT_MODULE);
+    const connect = mod.default || mod.connect;
+    if (typeof connect === 'function') runtime.setConnectBrowser(connect);
+  }
 
   await writeSessiondLock({ pid: process.pid, port, token, version, lockPath });
   await writeSessiondUrl({ port, token, urlPath, lockPath });

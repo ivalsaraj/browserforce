@@ -280,4 +280,54 @@ describe('CLI session daemon', () => {
       assert.equal(lock, null, 'no lock should be written when negotiation fails');
     });
   });
+
+  describe('atomic snapshot verb (real CLI path → sessiond → runCode → snapshotData)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let env;
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      // Managed backend (no relay probe) + a fake browser injected BELOW
+      // buildExecContext, so the snapshot engine and runCode() boundary run for
+      // real without a Chrome/relay. The same env is reused by the CLI so it
+      // resolves THIS daemon's lock.
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('browserforce snapshot --sessiond --json returns the structured envelope', async () => {
+      const { stdout } = await exec('node', ['bin.js', 'snapshot', '--sessiond', '--json'], { cwd: ROOT, env });
+      const resp = JSON.parse(stdout);
+      assert.equal(resp.success, true);
+      assert.equal(resp.error, null);
+      assert.ok(resp.data, 'envelope carries data');
+      assert.equal(resp.data.url, 'https://fake.test/');
+      assert.equal(resp.data.title, 'Fake');
+      assert.match(resp.data.tree, /button "Submit" \[ref=e1\]/, 'tree keeps the [ref=eN] contract');
+      assert.ok(Array.isArray(resp.data.refs) && resp.data.refs.length === 1);
+      assert.deepEqual(resp.data.refs[0], {
+        ref: 'e1',
+        role: 'button',
+        name: 'Submit',
+        locator: '[data-testid="submit"]',
+        frameChain: [],
+      });
+      assert.deepEqual(resp.data.frameErrors, []);
+    });
+  });
 });

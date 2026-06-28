@@ -51,6 +51,11 @@ export function createBrowserSessionRuntime(deps = {}) {
     clearTimeout: clearTimeoutImpl = globalThis.clearTimeout,
     initialPageDiscoveryTimeoutMs = DEFAULT_INITIAL_PAGE_DISCOVERY_TIMEOUT_MS,
     initialPageDiscoveryPollMs = DEFAULT_INITIAL_PAGE_DISCOVERY_POLL_MS,
+    // Execution boundary deps (injected so the runtime stays decoupled from
+    // exec-engine and unit-testable). runCommand is the single place CLI atomic
+    // verbs run user snippets — always through runCode()'s guarded boundary.
+    buildExecContext = null,
+    runCode = null,
   } = deps;
 
   const doFetch = fetchImpl || globalThis.fetch;
@@ -261,6 +266,28 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
   }
 
+  /**
+   * Run a user snippet against the live session through the guarded runCode()
+   * boundary. Ensures the browser is connected, builds the exec context from the
+   * first context/page, and counts the work as an active operation so the idle
+   * disconnect timer never fires mid-command. Returns runCode()'s raw result.
+   */
+  async function runCommand({ code, timeout = 30000 } = {}) {
+    if (typeof buildExecContext !== 'function' || typeof runCode !== 'function') {
+      throw new Error('browser session runtime: buildExecContext and runCode deps are required for runCommand');
+    }
+    await ensureBrowser();
+    beginOperation();
+    try {
+      const ctx = getContext();
+      const page = getPages()[0] || null;
+      const execCtx = buildExecContext(page, ctx, userState, { consoleLogs, setupConsoleCapture });
+      return await runCode(code, execCtx, timeout);
+    } finally {
+      endOperation();
+    }
+  }
+
   async function reset() {
     clearIdleBrowserDisconnectTimer();
     if (browser) {
@@ -300,6 +327,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     ensureBrowser,
     getContext,
     getPages,
+    runCommand,
     getAgentPreferencesForSession,
     getBrowserforceRestrictionsForSession,
     reset,

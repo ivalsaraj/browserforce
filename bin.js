@@ -14,6 +14,11 @@ const { values, positionals } = parseArgs({
     'no-autostart': { type: 'boolean', default: false },
     json: { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
+    // Atomic session-backed verbs (route through the sessiond daemon).
+    sessiond: { type: 'boolean', default: false },
+    selector: { type: 'string' },
+    search: { type: 'string' },
+    'interactive-only': { type: 'boolean', default: false },
   },
   allowPositionals: true,
   strict: false,
@@ -169,7 +174,41 @@ async function cmdScreenshot() {
   }
 }
 
+async function cmdSnapshotViaSessiond() {
+  const { sessiondCommand } = await import('./cli/session-client.js');
+  await ensureSessiondRunning();
+
+  const timeoutMs = parseInt(values.timeout, 10);
+  const body = { timeout: timeoutMs };
+  if (values.selector) body.selector = values.selector;
+  if (values.search) body.search = values.search;
+  if (values['interactive-only']) body.interactiveOnly = true;
+
+  const { body: resp } = await sessiondCommand({ method: 'POST', path: '/command/snapshot', body });
+
+  if (values.json) {
+    output(resp, true);
+    if (resp && resp.success === false) process.exit(1);
+    return;
+  }
+
+  if (!resp || resp.success === false) {
+    console.error(`Error: ${resp?.error || 'snapshot failed'}`);
+    process.exit(1);
+  }
+  const data = resp.data || {};
+  const refTable = Array.isArray(data.refs) && data.refs.length > 0
+    ? '\n\n--- Ref → Locator ---\n' + data.refs.map((r) => `${r.ref} (${r.role}${r.name ? ` "${r.name}"` : ''}): ${r.locator ?? '(frame-scoped; use locatorForRef)'}`).join('\n')
+    : '';
+  if (resp.warning) process.stderr.write(`⚠  ${resp.warning}\n`);
+  output(`Page: ${data.title} (${data.url})\nRefs: ${Array.isArray(data.refs) ? data.refs.length : 0} interactive elements\n\n${data.tree || ''}${refTable}`, false);
+}
+
 async function cmdSnapshot() {
+  if (values.sessiond) {
+    await cmdSnapshotViaSessiond();
+    return;
+  }
   const index = parseInt(positionals[1] || '0', 10);
   const { getAriaSnapshot, renderRefLines, renderFrameErrors } = await import('./mcp/src/aria-snapshot-engine.js');
   const browser = await connectBrowser();
@@ -738,6 +777,51 @@ async function cmdAgent() {
   process.exit(1);
 }
 
+// Spawn the sessiond daemon detached and wait for it to publish its lock.
+// The daemon self-picks its port/token; the parent only inherits env (incl.
+// BF_SESSIOND_LOCK_PATH / BF_BROWSER_BACKEND) and waits. Throws on fast-fail.
+async function startSessiondDaemon() {
+  const { readSessiondLock } = await import('./cli/session-client.js');
+  const { spawn } = await import('node:child_process');
+  const sessiondPath = fileURLToPath(new URL('./cli/sessiond.js', import.meta.url));
+
+  const child = spawn(process.execPath, [sessiondPath], {
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: { ...process.env },
+  });
+
+  // Capture early stderr so a fast-fail startup error is surfaced (agent-browser lesson).
+  let startupStderr = '';
+  const onStderr = (chunk) => { startupStderr += chunk.toString(); };
+  child.stderr?.on('data', onStderr);
+
+  let lock = null;
+  for (let i = 0; i < 50 && !lock; i += 1) {
+    lock = await readSessiondLock();
+    if (!lock) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  child.stderr?.off('data', onStderr);
+  // Release the child's stderr pipe so this CLI process can exit (an open pipe
+  // fd would otherwise keep the event loop alive); the daemon swallows EPIPE.
+  child.stderr?.destroy();
+  if (!lock) {
+    try { if (child.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    const detail = startupStderr.trim();
+    throw new Error(`session daemon failed to start${detail ? `:\n${detail}` : '.'}`);
+  }
+  child.unref();
+  return lock;
+}
+
+// Return a live sessiond lock, auto-starting the daemon if none is running.
+async function ensureSessiondRunning() {
+  const { readSessiondLock } = await import('./cli/session-client.js');
+  const existing = await readSessiondLock();
+  if (existing) return existing;
+  return startSessiondDaemon();
+}
+
 async function cmdSession() {
   const sub = positionals[1] || 'status';
   const {
@@ -745,18 +829,6 @@ async function cmdSession() {
     clearSessiondLock,
     clearSessiondUrl,
   } = await import('./cli/session-client.js');
-  const { spawn } = await import('node:child_process');
-
-  const sessiondPath = fileURLToPath(new URL('./cli/sessiond.js', import.meta.url));
-
-  const waitForSessiondLock = async (attempts = 50, delayMs = 100) => {
-    for (let i = 0; i < attempts; i += 1) {
-      const lock = await readSessiondLock();
-      if (lock) return lock;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-    return null;
-  };
 
   if (sub === 'start') {
     const existing = await readSessiondLock();
@@ -764,33 +836,7 @@ async function cmdSession() {
       output({ running: true, started: false, pid: existing.pid, port: existing.port }, values.json);
       return;
     }
-
-    // The daemon self-picks its port/token and writes the lock once listening;
-    // the parent only inherits env (incl. BF_SESSIOND_LOCK_PATH) and waits.
-    const child = spawn(process.execPath, [sessiondPath], {
-      detached: true,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...process.env },
-    });
-
-    // Capture early stderr so a fast-fail startup error is surfaced (agent-browser lesson).
-    let startupStderr = '';
-    const onStderr = (chunk) => { startupStderr += chunk.toString(); };
-    child.stderr?.on('data', onStderr);
-
-    const lock = await waitForSessiondLock();
-    child.stderr?.off('data', onStderr);
-    // Release the child's stderr pipe so this CLI process can exit (an open
-    // pipe fd would otherwise keep the event loop alive); the daemon swallows
-    // the resulting EPIPE.
-    child.stderr?.destroy();
-    if (!lock) {
-      try { if (child.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* already gone */ }
-      const detail = startupStderr.trim();
-      console.error(`Error: session daemon failed to start${detail ? `:\n${detail}` : '.'}`);
-      process.exit(1);
-    }
-    child.unref();
+    const lock = await startSessiondDaemon();
     output({ running: true, started: true, pid: lock.pid, port: lock.port }, values.json);
     return;
   }

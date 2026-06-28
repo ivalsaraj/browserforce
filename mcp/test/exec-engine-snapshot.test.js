@@ -76,6 +76,38 @@ test('snapshot() wires the engine: text, refs, locatorForRef, CDP order + detach
   assert.equal(cdp.detached, true, 'snapshot detaches the CDP session it created');
 });
 
+test('snapshotData() returns the structured JSON shape (url/title/tree/refs/frameErrors)', async () => {
+  const cdp = makeFakeCdp(domNodes, axNodes);
+  const page = makeFakePage(cdp);
+  const exec = buildExecContext(page, {}, {});
+
+  assert.equal(typeof exec.snapshotData, 'function', 'buildExecContext exposes snapshotData');
+
+  const data = await exec.snapshotData();
+  assert.equal(data.url, 'https://fake.test/');
+  assert.equal(data.title, 'Fake');
+  assert.match(data.tree, /button "Submit" \[ref=e1\]/, 'tree keeps the [ref=eN] contract');
+  assert.ok(Array.isArray(data.refs) && data.refs.length === 1, 'one interactive ref');
+  assert.deepEqual(data.refs[0], {
+    ref: 'e1',
+    role: 'button',
+    name: 'Submit',
+    locator: '[data-testid="submit"]',
+    frameChain: [],
+  });
+  assert.deepEqual(data.frameErrors, [], 'no subframe errors in this fixture');
+
+  // storeRefs ran: a later locatorForRef('e1') resolves the same CDP-built locator.
+  assert.equal(exec.refToLocator({ ref: 'e1' }), '[data-testid="submit"]');
+
+  // Structured data is JSON-serializable (no functions/handles leak through).
+  assert.doesNotThrow(() => JSON.stringify(data));
+
+  // Same engine contract as snapshot(): AX enabled before DOM + session detached.
+  assert.ok(cdp.calls.indexOf('Accessibility.enable') < cdp.calls.indexOf('DOM.enable'), 'AX enabled before DOM');
+  assert.equal(cdp.detached, true, 'snapshotData detaches the CDP session it created');
+});
+
 test('snapshot() throws (no silent fallback) on an empty AX tree', async () => {
   const cdp = makeFakeCdp(domNodes, [{ nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, backendDOMNodeId: 1, childIds: [] }]);
   const exec = buildExecContext(makeFakePage(cdp), {}, {});
