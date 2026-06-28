@@ -738,6 +738,93 @@ async function cmdAgent() {
   process.exit(1);
 }
 
+async function cmdSession() {
+  const sub = positionals[1] || 'status';
+  const {
+    readSessiondLock,
+    clearSessiondLock,
+    clearSessiondUrl,
+  } = await import('./cli/session-client.js');
+  const { spawn } = await import('node:child_process');
+
+  const sessiondPath = fileURLToPath(new URL('./cli/sessiond.js', import.meta.url));
+
+  const waitForSessiondLock = async (attempts = 50, delayMs = 100) => {
+    for (let i = 0; i < attempts; i += 1) {
+      const lock = await readSessiondLock();
+      if (lock) return lock;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    return null;
+  };
+
+  if (sub === 'start') {
+    const existing = await readSessiondLock();
+    if (existing) {
+      output({ running: true, started: false, pid: existing.pid, port: existing.port }, values.json);
+      return;
+    }
+
+    // The daemon self-picks its port/token and writes the lock once listening;
+    // the parent only inherits env (incl. BF_SESSIOND_LOCK_PATH) and waits.
+    const child = spawn(process.execPath, [sessiondPath], {
+      detached: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env },
+    });
+
+    // Capture early stderr so a fast-fail startup error is surfaced (agent-browser lesson).
+    let startupStderr = '';
+    const onStderr = (chunk) => { startupStderr += chunk.toString(); };
+    child.stderr?.on('data', onStderr);
+
+    const lock = await waitForSessiondLock();
+    child.stderr?.off('data', onStderr);
+    // Release the child's stderr pipe so this CLI process can exit (an open
+    // pipe fd would otherwise keep the event loop alive); the daemon swallows
+    // the resulting EPIPE.
+    child.stderr?.destroy();
+    if (!lock) {
+      try { if (child.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* already gone */ }
+      const detail = startupStderr.trim();
+      console.error(`Error: session daemon failed to start${detail ? `:\n${detail}` : '.'}`);
+      process.exit(1);
+    }
+    child.unref();
+    output({ running: true, started: true, pid: lock.pid, port: lock.port }, values.json);
+    return;
+  }
+
+  if (sub === 'status') {
+    const lock = await readSessiondLock();
+    if (!lock) {
+      output({ running: false }, values.json);
+      return;
+    }
+    output({ running: true, pid: lock.pid, port: lock.port, version: lock.version ?? null }, values.json);
+    return;
+  }
+
+  if (sub === 'stop') {
+    const lock = await readSessiondLock();
+    if (!lock) {
+      // Clean up any stale sidecars even when nothing is alive.
+      await clearSessiondLock();
+      await clearSessiondUrl();
+      output({ stopped: true, running: false }, values.json);
+      return;
+    }
+    try { process.kill(lock.pid, 'SIGTERM'); } catch { /* race: already exiting */ }
+    await clearSessiondLock();
+    await clearSessiondUrl();
+    output({ stopped: true, pid: lock.pid, port: lock.port }, values.json);
+    return;
+  }
+
+  console.error('Usage: browserforce session start|status|stop');
+  process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -754,6 +841,7 @@ function cmdHelp() {
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
     browserforce agent <subcmd>     Start/status/stop local BrowserForce Agent daemon
+    browserforce session <subcmd>   Start/status/stop the CLI session daemon
     browserforce setup openclaw     Configure OpenClaw + optional autostart
     browserforce update             Update to the latest version
     browserforce install-extension  Copy extension to ~/.browserforce/extension/
@@ -789,7 +877,8 @@ const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
-  'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent, help: cmdHelp,
+  'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
+  session: cmdSession, help: cmdHelp,
 };
 
 const handler = commands[command];

@@ -18,7 +18,7 @@ export async function isLockAlive({ lock } = {}) {
   }
 }
 
-export async function writeLock({ pid, port, token, lockPath } = {}) {
+export async function writeLock({ pid, port, token, version, lockPath } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error('writeLock requires a positive integer pid');
   if (!Number.isInteger(port) || port <= 0) throw new Error('writeLock requires a positive integer port');
   if (!token || typeof token !== 'string') throw new Error('writeLock requires token');
@@ -26,6 +26,9 @@ export async function writeLock({ pid, port, token, lockPath } = {}) {
   const finalPath = resolveLockPath(lockPath);
   await fs.mkdir(dirname(finalPath), { recursive: true });
   const payload = { pid, port, token };
+  // `version` is additive — only present when a caller (e.g. sessiond) supplies
+  // it, so existing { pid, port, token } consumers (chatd) are unchanged.
+  if (version !== undefined && version !== null) payload.version = version;
   await fs.writeFile(finalPath, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
   return payload;
 }
