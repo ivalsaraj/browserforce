@@ -16,6 +16,17 @@ allowed-tools: Bash(browserforce:*)
 BrowserForce gives you the user's actual Chrome browser — all their logins,
 cookies, and extensions already active. No headless browser, no fresh profiles.
 
+## Load the full runtime skill first
+
+This file is a quick-start stub. For the complete, up-to-date guide — the
+persistent session daemon, atomic verbs (`click`/`fill`/`wait`/`get`/`eval`),
+the snapshot-and-ref workflow, and troubleshooting — load the runtime skill:
+
+```bash
+browserforce skills get core          # the full core guide
+browserforce skills get core --full   # plus the complete command reference
+```
+
 ## Prerequisites
 
 The user must have:
