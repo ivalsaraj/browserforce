@@ -215,6 +215,36 @@ Exposed BrowserForce helpers and the persistent `state` object are wrapped by `g
 - **Rule**: Full-page degradation is **visible, never silent**. A first-level OOPIF that fails to acquire/fetch (relay target-resolution error, detach, enable failure) or is empty after retry is **best-effort skipped** — one flaky/blank cross-origin subframe must not nuke the whole-page snapshot — but recorded in `getAriaSnapshot`'s `frameErrors` and surfaced via `renderFrameErrors` as a `⚠️ N subframe(s) not stitched` block. Callers can then retry, wait, or scope the frame explicitly (explicit `frame` scope still **throws** on failure). **Limitation**: owners are matched only in the page-process DOM, so one level of OOPIF is stitched; iframes nested inside an OOPIF are skipped (their owner is not in the page DOM, so they are not recorded as errors).
 - **Why**: `backendNodeId` anchoring gives stable refs, subtree scoping, and cross-origin iframe reach that the old JS DOM walk could not.
 
+### CLI Session Daemon & Backend Selection
+
+The CLI ships a persistent session daemon (`cli/sessiond.js`, client in
+`cli/session-client.js`) so atomic verbs (`snapshot --sessiond`, `click`,
+`fill`, `type`, `press`, `wait`, `get`, `eval`) share one browser session and
+its snapshot refs across separate CLI invocations. It mirrors the relay's
+security contract: binds `127.0.0.1` only, random 32-byte bearer token in a
+`0o600` lock/url sidecar, `Authorization: Bearer` on every state route, and
+`/health` is the only unauthenticated route (leaks no secret). Every verb routes
+through the shared `runtime.runCommand()` → `runCode()` guarded boundary — the
+exact same vm boundary as MCP `execute` and one-shot `-e`. Never `eval()` /
+`new Function()` user input at the caller; pass it as the snippet.
+
+Backend policy (`mcp/src/backend-selection.js`, negotiated in
+`cli/sessiond.js#negotiateBackend`) is **real-Chrome-first**:
+
+- **Real Chrome remains primary.** `auto` (default) connects to the user's real
+  Chrome via the relay + extension whenever the extension is connected.
+- **The managed fallback warning is mandatory — never silent.** When `auto`
+  falls back to managed/headless Chrome, the daemon records and surfaces a
+  warning (`/status` `warning` field, CLI stderr).
+- **`--real` / `BF_BROWSER_BACKEND=real` never falls back.** It fails loud
+  (non-zero exit, no lock written) when the bridge is unavailable. Negotiation
+  runs BEFORE the lock is published so a failed `real` request leaves no daemon.
+- **The installed BrowserForce skill stub (`skills/browserforce/SKILL.md`) must
+  NOT use `hidden: true`.** Deliberate divergence from agent-browser: OpenCode
+  can filter hidden installed skills out entirely, which would hide the
+  `skills get core` redirect from the model. Runtime skill content lives in
+  `skill-data/` and is served by `browserforce skills get|list|path`.
+
 ## Security Rules
 
 - Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.

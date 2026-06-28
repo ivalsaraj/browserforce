@@ -16,6 +16,17 @@ allowed-tools: Bash(browserforce:*)
 BrowserForce gives you the user's actual Chrome browser — all their logins,
 cookies, and extensions already active. No headless browser, no fresh profiles.
 
+## Load the full runtime skill first
+
+This file is a quick-start stub. For the complete, up-to-date guide — the
+persistent session daemon, atomic verbs (`click`/`fill`/`wait`/`get`/`eval`),
+the snapshot-and-ref workflow, and troubleshooting — load the runtime skill:
+
+```bash
+browserforce skills get core          # the full core guide
+browserforce skills get core --full   # plus the complete command reference
+```
+
 ## Prerequisites
 
 The user must have:
@@ -35,10 +46,14 @@ browserforce navigate <url>      # Open URL in new tab
 browserforce -e "<code>"         # Run Playwright JavaScript (one-shot)
 ```
 
-## Important: One-Shot Execution
+## Two execution paths
 
-Each `browserforce -e` call is independent — state does NOT persist between calls.
-Do everything you need (navigate, act, observe) within a single `-e` call.
+- **Persistent session (preferred)** — `browserforce snapshot --sessiond` then
+  atomic verbs (`click`/`fill`/`type`/`press`/`wait`/`get`/`eval`) share one
+  browser session and its `@eN` refs across commands. See
+  `browserforce skills get core`.
+- **One-shot `-e`** — each `browserforce -e` call is independent (state does NOT
+  persist between `-e` calls). Do everything in a single `-e` snippet.
 
 ## Core Workflow: Observe → Act → Observe
 

@@ -14,6 +14,27 @@ const { values, positionals } = parseArgs({
     'no-autostart': { type: 'boolean', default: false },
     json: { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
+    // Atomic session-backed verbs (route through the sessiond daemon).
+    sessiond: { type: 'boolean', default: false },
+    // Backend selection (parsed by the canonical resolveRequestedBackend()).
+    real: { type: 'boolean', default: false },
+    managed: { type: 'boolean', default: false },
+    headless: { type: 'boolean', default: false },
+    backend: { type: 'string' },
+    selector: { type: 'string' },
+    search: { type: 'string' },
+    'interactive-only': { type: 'boolean', default: false },
+    // wait <kind> selectors and eval input source.
+    text: { type: 'string' },
+    url: { type: 'string' },
+    load: { type: 'string' },
+    fn: { type: 'string' },
+    stdin: { type: 'boolean', default: false },
+    // skills get flags.
+    full: { type: 'boolean', default: false },
+    all: { type: 'boolean', default: false },
+    // doctor: remove stale sidecars (never secrets).
+    fix: { type: 'boolean', default: false },
   },
   allowPositionals: true,
   strict: false,
@@ -169,7 +190,41 @@ async function cmdScreenshot() {
   }
 }
 
+async function cmdSnapshotViaSessiond() {
+  const { sessiondCommand } = await import('./cli/session-client.js');
+  await ensureSessiondRunning();
+
+  const timeoutMs = parseInt(values.timeout, 10);
+  const body = { timeout: timeoutMs };
+  if (values.selector) body.selector = values.selector;
+  if (values.search) body.search = values.search;
+  if (values['interactive-only']) body.interactiveOnly = true;
+
+  const { body: resp } = await sessiondCommand({ method: 'POST', path: '/command/snapshot', body });
+
+  if (values.json) {
+    output(resp, true);
+    if (resp && resp.success === false) process.exit(1);
+    return;
+  }
+
+  if (!resp || resp.success === false) {
+    console.error(`Error: ${resp?.error || 'snapshot failed'}`);
+    process.exit(1);
+  }
+  const data = resp.data || {};
+  const refTable = Array.isArray(data.refs) && data.refs.length > 0
+    ? '\n\n--- Ref → Locator ---\n' + data.refs.map((r) => `${r.ref} (${r.role}${r.name ? ` "${r.name}"` : ''}): ${r.locator ?? '(frame-scoped; use locatorForRef)'}`).join('\n')
+    : '';
+  if (resp.warning) process.stderr.write(`⚠  ${resp.warning}\n`);
+  output(`Page: ${data.title} (${data.url})\nRefs: ${Array.isArray(data.refs) ? data.refs.length : 0} interactive elements\n\n${data.tree || ''}${refTable}`, false);
+}
+
 async function cmdSnapshot() {
+  if (values.sessiond) {
+    await cmdSnapshotViaSessiond();
+    return;
+  }
   const index = parseInt(positionals[1] || '0', 10);
   const { getAriaSnapshot, renderRefLines, renderFrameErrors } = await import('./mcp/src/aria-snapshot-engine.js');
   const browser = await connectBrowser();
@@ -738,6 +793,406 @@ async function cmdAgent() {
   process.exit(1);
 }
 
+// Read this CLI package's version (the version a freshly-spawned daemon will
+// report). Used to restart a daemon left running by a previous, older install.
+async function getCliPkgVersion() {
+  try {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const pkgDir = dirname(fileURLToPath(import.meta.url));
+    return JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version || null;
+  } catch {
+    return null;
+  }
+}
+
+// Spawn the sessiond daemon detached and wait for it to publish its lock.
+// The daemon self-picks its port/token; the parent resolves the requested
+// backend from CLI flags/env via the canonical resolveRequestedBackend() and
+// forwards it as BF_BROWSER_BACKEND so `--real`/`--managed`/`--headless`/
+// `--backend` actually drive negotiation (and `--real` fails loud at startup).
+// Throws on fast-fail or conflicting/unknown backend flags.
+async function startSessiondDaemon() {
+  const { readSessiondLock } = await import('./cli/session-client.js');
+  const { resolveRequestedBackend } = await import('./mcp/src/backend-selection.js');
+  const { spawn } = await import('node:child_process');
+  const sessiondPath = fileURLToPath(new URL('./cli/sessiond.js', import.meta.url));
+
+  // Throws on conflicting flags (`--real --managed`) or an unknown `--backend`
+  // value — surfaced by the top-level dispatch as a clean `Error:` + exit 1.
+  const backend = resolveRequestedBackend({ argv: values, env: process.env });
+
+  const child = spawn(process.execPath, [sessiondPath], {
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: { ...process.env, BF_BROWSER_BACKEND: backend },
+  });
+
+  // Capture early stderr so a fast-fail startup error is surfaced (agent-browser lesson).
+  let startupStderr = '';
+  const onStderr = (chunk) => { startupStderr += chunk.toString(); };
+  child.stderr?.on('data', onStderr);
+
+  let lock = null;
+  for (let i = 0; i < 50 && !lock; i += 1) {
+    lock = await readSessiondLock();
+    if (!lock) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  child.stderr?.off('data', onStderr);
+  // Release the child's stderr pipe so this CLI process can exit (an open pipe
+  // fd would otherwise keep the event loop alive); the daemon swallows EPIPE.
+  child.stderr?.destroy();
+  if (!lock) {
+    try { if (child.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    const detail = startupStderr.trim();
+    throw new Error(`session daemon failed to start${detail ? `:\n${detail}` : '.'}`);
+  }
+  child.unref();
+  return lock;
+}
+
+// Should an already-live daemon be restarted to honor THIS invocation? Two
+// triggers: (1) the live daemon is an older install (version mismatch), so verbs
+// would run on stale code; or (2) an EXPLICIT backend flag (--real/--managed/
+// --headless) whose effective backend differs from what's live — `--real` must
+// never silently reuse a managed daemon (a silent fallback). `auto` (no flag)
+// reuses whatever is live. The comparison is against the daemon's EFFECTIVE
+// backend (`/status.backend`), so an auto→managed daemon is still reused by an
+// explicit `--managed` without needless churn. Both the verb auto-start path
+// (ensureSessiondRunning) and `session start` route through this ONE predicate
+// so the backend guarantee can't drift between them.
+async function sessiondMustRestart({ status, requested, sessiondCommand }) {
+  const expected = await getCliPkgVersion();
+  if (expected && status.version && status.version !== expected) return true;
+  if (requested === 'real' || requested === 'managed' || requested === 'headless') {
+    let live = null;
+    try { live = (await sessiondCommand({ method: 'GET', path: '/status' })).body; }
+    catch { /* unknown → restart to be safe */ }
+    if (!live || live.backend !== requested) return true;
+  }
+  return false;
+}
+
+// Gracefully stop a live daemon and clear its sidecars before a fresh spawn.
+// Uses the authenticated /stop self-shutdown (never a raw PID kill) so a reused
+// PID can't be signalled; the daemon may close the socket mid-response, so a
+// failed request is non-fatal.
+async function stopAndClearSessiond({ sessiondCommand, clearSessiondLock, clearSessiondUrl }) {
+  try { await sessiondCommand({ method: 'POST', path: '/stop' }); } catch { /* may close mid-response */ }
+  await clearSessiondLock();
+  await clearSessiondUrl();
+}
+
+// Return a live sessiond lock, auto-starting the daemon if none is running.
+// Liveness is daemon-aware (probes /health, not just the lock PID) so a stale
+// lock left by a crashed daemon — or a PID since reused by an unrelated process
+// — is cleared and replaced rather than trusted. A live daemon predating a
+// package upgrade (version mismatch) or running a different backend than an
+// explicit flag requests is gracefully stopped and restarted so verbs always
+// run on the current code and the requested backend.
+async function ensureSessiondRunning() {
+  const {
+    getLiveSessiondStatus,
+    clearSessiondLock,
+    clearSessiondUrl,
+    sessiondCommand,
+  } = await import('./cli/session-client.js');
+  const { resolveRequestedBackend } = await import('./mcp/src/backend-selection.js');
+
+  // Resolve the requested backend up front (throws loud on conflicting flags).
+  const requested = resolveRequestedBackend({ argv: values, env: process.env });
+  const status = await getLiveSessiondStatus();
+  if (status.running) {
+    if (await sessiondMustRestart({ status, requested, sessiondCommand })) {
+      await stopAndClearSessiond({ sessiondCommand, clearSessiondLock, clearSessiondUrl });
+      return startSessiondDaemon();
+    }
+    return status.lock;
+  }
+  if (status.stale) {
+    await clearSessiondLock();
+    await clearSessiondUrl();
+  }
+  return startSessiondDaemon();
+}
+
+async function cmdSession() {
+  const sub = positionals[1] || 'status';
+  const {
+    getLiveSessiondStatus,
+    clearSessiondLock,
+    clearSessiondUrl,
+    sessiondCommand,
+  } = await import('./cli/session-client.js');
+
+  // Best-effort authenticated /status read (backend + fallback warning). Never
+  // throws — observability must not break start/status/stop.
+  const readBackendStatus = async () => {
+    try { return (await sessiondCommand({ method: 'GET', path: '/status' })).body; }
+    catch { return null; }
+  };
+  const surfaceWarning = (st) => {
+    if (st?.warning && !values.json) process.stderr.write(`⚠  ${st.warning}\n`);
+  };
+
+  if (sub === 'start') {
+    const { resolveRequestedBackend } = await import('./mcp/src/backend-selection.js');
+    // Throws loud on conflicting flags (`--real --managed`) / unknown `--backend`.
+    const requested = resolveRequestedBackend({ argv: values, env: process.env });
+    const status = await getLiveSessiondStatus();
+    // Reuse a live daemon ONLY when it honors this invocation. An explicit
+    // `--real`/`--headless` against a different-backend daemon must restart, not
+    // silently report the wrong-backend daemon as "running" (same no-silent-
+    // fallback guarantee the verb path enforces — one shared predicate).
+    if (status.running && !(await sessiondMustRestart({ status, requested, sessiondCommand }))) {
+      const st = await readBackendStatus();
+      surfaceWarning(st);
+      output({ running: true, started: false, pid: status.lock.pid, port: status.lock.port, backend: st?.backend ?? null }, values.json);
+      return;
+    }
+    // No live daemon, a stale lock, or a version/backend mismatch that must
+    // restart to honor this invocation. Stop a live (mismatched) daemon via the
+    // authenticated /stop; otherwise just clear a stale lock before spawning.
+    if (status.running) {
+      await stopAndClearSessiond({ sessiondCommand, clearSessiondLock, clearSessiondUrl });
+    } else if (status.stale) {
+      await clearSessiondLock();
+      await clearSessiondUrl();
+    }
+    const lock = await startSessiondDaemon();
+    const st = await readBackendStatus();
+    surfaceWarning(st);
+    output({ running: true, started: true, pid: lock.pid, port: lock.port, backend: st?.backend ?? null }, values.json);
+    return;
+  }
+
+  if (sub === 'status') {
+    const status = await getLiveSessiondStatus();
+    if (!status.running) {
+      output({ running: false }, values.json);
+      return;
+    }
+    const st = await readBackendStatus();
+    surfaceWarning(st);
+    output({
+      running: true,
+      pid: status.lock.pid,
+      port: status.lock.port,
+      version: status.lock.version ?? null,
+      backend: st?.backend ?? null,
+      warning: st?.warning ?? null,
+    }, values.json);
+    return;
+  }
+
+  if (sub === 'stop') {
+    const status = await getLiveSessiondStatus();
+    if (!status.running) {
+      // No live daemon. NEVER `process.kill` the lock's PID — under PID reuse it
+      // may belong to an unrelated process. Just clear the (possibly stale)
+      // sidecars and report.
+      await clearSessiondLock();
+      await clearSessiondUrl();
+      output({ stopped: true, running: false, ...(status.stale ? { stale: true, reason: status.reason } : {}) }, values.json);
+      return;
+    }
+    // Verified our daemon is live → graceful, authenticated self-shutdown.
+    try { await sessiondCommand({ method: 'POST', path: '/stop' }); } catch { /* may close the socket mid-response */ }
+    await clearSessiondLock();
+    await clearSessiondUrl();
+    output({ stopped: true, pid: status.lock.pid, port: status.lock.port }, values.json);
+    return;
+  }
+
+  console.error('Usage: browserforce session start|status|stop');
+  process.exit(1);
+}
+
+// Send an authed command to the sessiond daemon (auto-starting it if needed)
+// and print the { success, data, error, warning } envelope. Exits non-zero on
+// failure so atomic verbs are scriptable.
+async function runSessiondVerb(path, body) {
+  const { sessiondCommand } = await import('./cli/session-client.js');
+  await ensureSessiondRunning();
+  const { body: resp } = await sessiondCommand({ method: 'POST', path, body });
+  if (values.json) {
+    output(resp, true);
+    if (resp && resp.success === false) process.exit(1);
+    return;
+  }
+  if (!resp || resp.success === false) {
+    console.error(`Error: ${resp?.error || 'command failed'}`);
+    process.exit(1);
+  }
+  if (resp.warning) process.stderr.write(`⚠  ${resp.warning}\n`);
+  output(resp.data, false);
+}
+
+async function cmdClick() {
+  const { normalizeRef } = await import('./cli/session-client.js');
+  const ref = normalizeRef(positionals[1]);
+  if (!ref) { console.error('Usage: browserforce click <@ref>'); process.exit(1); }
+  await runSessiondVerb('/command/click', { ref, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdFill() {
+  const { normalizeRef } = await import('./cli/session-client.js');
+  const ref = normalizeRef(positionals[1]);
+  const text = positionals[2];
+  if (!ref || text === undefined) { console.error('Usage: browserforce fill <@ref> <text>'); process.exit(1); }
+  await runSessiondVerb('/command/fill', { ref, text, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdType() {
+  const { normalizeRef } = await import('./cli/session-client.js');
+  const ref = normalizeRef(positionals[1]);
+  const text = positionals[2];
+  if (!ref || text === undefined) { console.error('Usage: browserforce type <@ref> <text>'); process.exit(1); }
+  await runSessiondVerb('/command/type', { ref, text, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdPress() {
+  const key = positionals[1];
+  if (!key) { console.error('Usage: browserforce press <key>'); process.exit(1); }
+  await runSessiondVerb('/command/press', { key, timeout: parseInt(values.timeout, 10) });
+}
+
+async function cmdWait() {
+  const timeout = parseInt(values.timeout, 10);
+  let kind;
+  let value;
+  if (values.text !== undefined) { kind = 'text'; value = values.text; }
+  else if (values.url !== undefined) { kind = 'url'; value = values.url; }
+  else if (values.load !== undefined) { kind = 'load'; value = values.load || 'load'; }
+  else if (values.fn !== undefined) { kind = 'fn'; value = values.fn; }
+  else {
+    console.error('Usage: browserforce wait --text <s> | --url <glob> | --load <state> | --fn <expr>');
+    process.exit(1);
+  }
+  await runSessiondVerb('/command/wait', { kind, value, timeout });
+}
+
+async function cmdGet() {
+  const what = positionals[1];
+  const timeout = parseInt(values.timeout, 10);
+  if (what === 'url' || what === 'title') {
+    await runSessiondVerb('/command/get', { what, timeout });
+    return;
+  }
+  if (what === 'text') {
+    const { normalizeRef } = await import('./cli/session-client.js');
+    const ref = normalizeRef(positionals[2]);
+    if (!ref) { console.error('Usage: browserforce get text <@ref>'); process.exit(1); }
+    await runSessiondVerb('/command/get', { what: 'text', ref, timeout });
+    return;
+  }
+  console.error('Usage: browserforce get <url|title|text @ref>');
+  process.exit(1);
+}
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.on('error', reject);
+  });
+}
+
+async function cmdEval() {
+  const timeout = parseInt(values.timeout, 10);
+  const code = values.stdin ? await readStdin() : positionals[1];
+  if (!code || !code.trim()) {
+    console.error('Usage: browserforce eval --stdin   (pipe code) | browserforce eval "<code>"');
+    process.exit(1);
+  }
+  await runSessiondVerb('/command/eval', { code, timeout });
+}
+
+// Serve the BrowserForce skills bundled with the package (mirrors agent-browser
+// `skills list|get|path`). Pure discovery/parse logic lives in skills-cmd.js;
+// this function only resolves the search dirs and renders text/JSON output.
+async function cmdSkills() {
+  const { findSkillsDirs, skillsList, skillsGet, skillsPath, truncateDescription } =
+    await import('./mcp/src/skills-cmd.js');
+
+  const dirs = findSkillsDirs();
+  if (dirs.length === 0) {
+    const error = 'Skills directory not found. Reinstall via npm or set BF_SKILLS_DIR.';
+    if (values.json) output({ success: false, error }, true);
+    else console.error(`✗ ${error}`);
+    process.exit(1);
+  }
+
+  const sub = positionals[1] || 'list';
+
+  if (sub === 'list') {
+    const result = skillsList(dirs);
+    if (values.json) { output(result, true); return; }
+    if (result.data.length === 0) { console.log('No skills found'); return; }
+    const maxName = Math.max(...result.data.map((s) => s.name.length));
+    for (const s of result.data) {
+      console.log(`  ${s.name.padEnd(maxName)}  ${truncateDescription(s.description, 70)}`);
+    }
+    return;
+  }
+
+  if (sub === 'get') {
+    const names = positionals.slice(2);
+    const result = skillsGet(dirs, names, { all: values.all, full: values.full });
+    if (values.json) { output(result, true); if (!result.success) process.exit(1); return; }
+    if (!result.success) { console.error(`✗ ${result.error}`); process.exit(1); }
+    result.data.forEach((s, i) => {
+      if (i > 0) console.log('\n---\n');
+      process.stdout.write(s.content.endsWith('\n') ? s.content : `${s.content}\n`);
+      for (const f of s.files || []) {
+        console.log(`\n--- ${f.path} ---\n`);
+        process.stdout.write(f.content.endsWith('\n') ? f.content : `${f.content}\n`);
+      }
+    });
+    return;
+  }
+
+  if (sub === 'path') {
+    const result = skillsPath(dirs, positionals[2]);
+    if (values.json) { output(result, true); if (!result.success) process.exit(1); return; }
+    if (!result.success) { console.error(`✗ ${result.error}`); process.exit(1); }
+    if (result.data.paths) for (const p of result.data.paths) console.log(p);
+    else console.log(result.data.path);
+    return;
+  }
+
+  const error = `Unknown skills subcommand: ${sub}`;
+  if (values.json) output({ success: false, error }, true);
+  else console.error(`✗ ${error}`);
+  process.exit(1);
+}
+
+// Read-only diagnostics (relay, extension, stale cdp-url, secret perms, active
+// backend). `--fix` removes only stale sidecars — never secrets. Exits 1 when
+// any check fails (warnings are allowed).
+async function cmdDoctor() {
+  const { runDoctor } = await import('./mcp/src/doctor.js');
+  const report = await runDoctor({ fix: values.fix });
+
+  if (values.json) {
+    output({ success: report.ok, data: report }, true);
+    if (!report.ok) process.exit(1);
+    return;
+  }
+
+  const icon = { ok: '✓', warn: '⚠', fail: '✗' };
+  console.log('\n  BrowserForce doctor\n');
+  for (const c of report.checks) {
+    console.log(`  ${icon[c.status] || '?'} ${c.label}: ${c.detail}`);
+  }
+  if (report.fixes.length > 0) {
+    console.log(`\n  Removed ${report.fixes.length} stale sidecar(s).`);
+  }
+  console.log(`\n  ${report.ok ? '✓ All critical checks passed.' : '✗ One or more checks failed.'}\n`);
+  if (!report.ok) process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -749,11 +1204,22 @@ function cmdHelp() {
     browserforce tabs               List open browser tabs
     browserforce screenshot [n]     Screenshot tab n (default: 0)
     browserforce snapshot [n]       Accessibility tree of tab n (default: 0)
+    browserforce snapshot --sessiond  Session-backed snapshot (shares state, stores refs)
+    browserforce click <@ref>       Click a ref from the last session snapshot
+    browserforce fill <@ref> <text> Fill a ref with text (clears first)
+    browserforce type <@ref> <text> Type text into a ref (key by key)
+    browserforce press <key>        Press a keyboard key (e.g. Enter)
+    browserforce wait --text <s>    Wait for text / --url <glob> / --load <state> / --fn <expr>
+    browserforce get <url|title>    Read url/title, or: get text <@ref>
+    browserforce eval --stdin       Run piped Playwright JS in the session (or: eval "<code>")
     browserforce navigate <url>     Open URL in a new tab
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
     browserforce agent <subcmd>     Start/status/stop local BrowserForce Agent daemon
+    browserforce session <subcmd>   Start/status/stop the CLI session daemon
+    browserforce skills <subcmd>    list / get <name> [--full] / path [name]
+    browserforce doctor [--fix]     Diagnose relay/extension/sidecars/backend
     browserforce setup openclaw     Configure OpenClaw + optional autostart
     browserforce update             Update to the latest version
     browserforce install-extension  Copy extension to ~/.browserforce/extension/
@@ -778,8 +1244,9 @@ function cmdHelp() {
     browserforce screenshot 0 > page.png
     browserforce navigate https://gmail.com
 
-  Note: -e commands are one-shot. State does not persist between calls.
-  For persistent state, use the MCP server (browserforce mcp).
+  Note: -e commands are one-shot (state does not persist between calls).
+  For a persistent CLI session, use the atomic verbs with --sessiond
+  (snapshot/click/fill/wait/get/eval), or the MCP server (browserforce mcp).
 `);
 }
 
@@ -789,7 +1256,10 @@ const commands = {
   serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
   screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
-  'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent, help: cmdHelp,
+  'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
+  session: cmdSession, click: cmdClick, fill: cmdFill, type: cmdType, press: cmdPress,
+  wait: cmdWait, get: cmdGet, eval: cmdEval, skills: cmdSkills, doctor: cmdDoctor,
+  help: cmdHelp,
 };
 
 const handler = commands[command];
