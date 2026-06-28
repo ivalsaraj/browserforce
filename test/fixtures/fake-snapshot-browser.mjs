@@ -70,6 +70,10 @@ function makeFakePage(ctx) {
     frameLocator: (sel) => ({ locator: (s) => makeFakeLocator(s, [sel]) }),
     context: () => ctx,
     keyboard: { press: async (key) => record({ action: 'keypress', key }) },
+    // Fake waiters resolve immediately (record so tests can assert the call).
+    waitForFunction: async () => { record({ action: 'waitForFunction' }); return true; },
+    waitForURL: async () => { record({ action: 'waitForURL' }); },
+    waitForLoadState: async (state) => { record({ action: 'waitForLoadState', state }); },
     on: () => {},
     off: () => {},
   };

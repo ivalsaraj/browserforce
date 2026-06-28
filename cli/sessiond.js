@@ -174,6 +174,27 @@ function refLocatorSnippet(ref, actionLine, returnExpr) {
   ].join('\n');
 }
 
+// Build a `wait` snippet using Playwright's own waiters (their internal polling
+// + the passed timeout keep it abort-safe). The value is always a JSON literal.
+function waitSnippet(kind, value, timeout) {
+  const v = JSON.stringify(value ?? '');
+  const t = Number(timeout) || 30000;
+  switch (kind) {
+    case 'text':
+      return `await page.waitForFunction((s) => !!document.body && document.body.innerText.includes(s), ${v}, { timeout: ${t}, polling: 100 });\nreturn { waited: 'text', text: ${v} };`;
+    case 'url':
+      return `await page.waitForURL(${v}, { timeout: ${t} });\nreturn { waited: 'url', url: page.url() };`;
+    case 'load': {
+      const state = value || 'load';
+      return `await page.waitForLoadState(${JSON.stringify(state)}, { timeout: ${t} });\nreturn { waited: 'load', state: ${JSON.stringify(state)} };`;
+    }
+    case 'fn':
+      return `await page.waitForFunction(${v}, undefined, { timeout: ${t}, polling: 100 });\nreturn { waited: 'fn' };`;
+    default:
+      return null;
+  }
+}
+
 export async function startSessiond({ lockPath, urlPath } = {}) {
   const token = process.env.BF_SESSIOND_TOKEN || randomBytes(32).toString('base64url');
   const envPort = Number(process.env.BF_SESSIOND_PORT || 0);
@@ -308,6 +329,44 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         const key = String(body?.key ?? '');
         if (!key) { sendJson(res, 200, envelope({ success: false, error: 'press requires a key' })); return; }
         const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
+      if (verb === 'wait') {
+        const kind = String(body?.kind ?? '');
+        const value = body?.value;
+        const code = waitSnippet(kind, value, timeout);
+        if (!code) { sendJson(res, 200, envelope({ success: false, error: `unknown wait kind: ${kind}` })); return; }
+        // Give runCode headroom beyond the inner Playwright waiter so the waiter
+        // times out first with a precise message before the hard run abort.
+        const data = await runtime.runCommand({ code, timeout: timeout + 5000 });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
+      if (verb === 'get') {
+        const what = String(body?.what ?? '');
+        let code;
+        if (what === 'url') code = `return { url: page.url() };`;
+        else if (what === 'title') code = `return { title: await page.title() };`;
+        else if (what === 'text') {
+          code = refLocatorSnippet(normalizeRef(body?.ref), '', `{ text: await locator.textContent() }`);
+        } else {
+          sendJson(res, 200, envelope({ success: false, error: `unknown get target: ${what}` }));
+          return;
+        }
+        const data = await runtime.runCommand({ code, timeout });
+        sendJson(res, 200, envelope({ data }));
+        return;
+      }
+
+      if (verb === 'eval') {
+        const code = String(body?.code ?? '');
+        if (!code.trim()) { sendJson(res, 200, envelope({ success: false, error: 'eval requires code' })); return; }
+        // The user's code IS the snippet — same guarded runCode() boundary as
+        // MCP execute / CLI -e. Never eval()/new Function() at the caller.
         const data = await runtime.runCommand({ code, timeout });
         sendJson(res, 200, envelope({ data }));
         return;

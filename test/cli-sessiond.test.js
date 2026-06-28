@@ -418,6 +418,90 @@ describe('CLI session daemon', () => {
       assert.match(resp.error, /Unknown ref/);
     });
   });
+
+  describe('wait/get/eval verbs (real CLI path → sessiond → runCode)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let env;
+
+    // eval --stdin needs piped stdin, which execFile can't supply.
+    function evalViaStdin(input, args = ['eval', '--stdin', '--json']) {
+      return new Promise((resolve, reject) => {
+        const proc = spawn('node', ['bin.js', ...args], { cwd: ROOT, env });
+        let stdout = '';
+        let stderr = '';
+        proc.stdout.on('data', (d) => { stdout += d; });
+        proc.stderr.on('data', (d) => { stderr += d; });
+        proc.on('error', reject);
+        proc.on('close', (code) => resolve({ code, stdout, stderr }));
+        proc.stdin.end(input);
+      });
+    }
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      await exec('node', ['bin.js', 'snapshot', '--sessiond', '--json'], { cwd: ROOT, env });
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('wait --text / --url / --load resolve through the session', async () => {
+      const textRes = JSON.parse((await exec('node', ['bin.js', 'wait', '--text', 'Saved', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(textRes.success, true);
+      assert.equal(textRes.data.waited, 'text');
+      assert.equal(textRes.data.text, 'Saved');
+
+      const urlRes = JSON.parse((await exec('node', ['bin.js', 'wait', '--url', '**/dashboard', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(urlRes.success, true);
+      assert.equal(urlRes.data.waited, 'url');
+
+      const loadRes = JSON.parse((await exec('node', ['bin.js', 'wait', '--load', 'domcontentloaded', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(loadRes.success, true);
+      assert.equal(loadRes.data.waited, 'load');
+      assert.equal(loadRes.data.state, 'domcontentloaded');
+    });
+
+    it('get url / title / text @ref read from the session', async () => {
+      const urlRes = JSON.parse((await exec('node', ['bin.js', 'get', 'url', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(urlRes.data.url, 'https://fake.test/');
+
+      const titleRes = JSON.parse((await exec('node', ['bin.js', 'get', 'title', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(titleRes.data.title, 'Fake');
+
+      const textRes = JSON.parse((await exec('node', ['bin.js', 'get', 'text', '@e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(textRes.success, true);
+      assert.equal(textRes.data.text, 'Submit');
+    });
+
+    it('eval --stdin runs piped code through the guarded runCode boundary and round-trips a value', async () => {
+      const { stdout, code } = await evalViaStdin('return 6 * 7;');
+      assert.equal(code, 0);
+      const resp = JSON.parse(stdout);
+      assert.equal(resp.success, true);
+      assert.equal(resp.data, 42);
+    });
+
+    it('eval --stdin shares persistent session state across calls', async () => {
+      const first = JSON.parse((await evalViaStdin('state.counter = (state.counter || 0) + 1; return state.counter;')).stdout);
+      const second = JSON.parse((await evalViaStdin('state.counter = (state.counter || 0) + 1; return state.counter;')).stdout);
+      assert.equal(first.data, 1, 'first eval initializes shared state');
+      assert.equal(second.data, 2, 'second eval sees state persisted by the daemon session');
+    });
+  });
 });
 
 describe('ref normalization (CLI input aliases)', () => {

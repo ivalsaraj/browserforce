@@ -19,6 +19,12 @@ const { values, positionals } = parseArgs({
     selector: { type: 'string' },
     search: { type: 'string' },
     'interactive-only': { type: 'boolean', default: false },
+    // wait <kind> selectors and eval input source.
+    text: { type: 'string' },
+    url: { type: 'string' },
+    load: { type: 'string' },
+    fn: { type: 'string' },
+    stdin: { type: 'boolean', default: false },
   },
   allowPositionals: true,
   strict: false,
@@ -920,6 +926,58 @@ async function cmdPress() {
   await runSessiondVerb('/command/press', { key, timeout: parseInt(values.timeout, 10) });
 }
 
+async function cmdWait() {
+  const timeout = parseInt(values.timeout, 10);
+  let kind;
+  let value;
+  if (values.text !== undefined) { kind = 'text'; value = values.text; }
+  else if (values.url !== undefined) { kind = 'url'; value = values.url; }
+  else if (values.load !== undefined) { kind = 'load'; value = values.load || 'load'; }
+  else if (values.fn !== undefined) { kind = 'fn'; value = values.fn; }
+  else {
+    console.error('Usage: browserforce wait --text <s> | --url <glob> | --load <state> | --fn <expr>');
+    process.exit(1);
+  }
+  await runSessiondVerb('/command/wait', { kind, value, timeout });
+}
+
+async function cmdGet() {
+  const what = positionals[1];
+  const timeout = parseInt(values.timeout, 10);
+  if (what === 'url' || what === 'title') {
+    await runSessiondVerb('/command/get', { what, timeout });
+    return;
+  }
+  if (what === 'text') {
+    const { normalizeRef } = await import('./cli/session-client.js');
+    const ref = normalizeRef(positionals[2]);
+    if (!ref) { console.error('Usage: browserforce get text <@ref>'); process.exit(1); }
+    await runSessiondVerb('/command/get', { what: 'text', ref, timeout });
+    return;
+  }
+  console.error('Usage: browserforce get <url|title|text @ref>');
+  process.exit(1);
+}
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.on('error', reject);
+  });
+}
+
+async function cmdEval() {
+  const timeout = parseInt(values.timeout, 10);
+  const code = values.stdin ? await readStdin() : positionals[1];
+  if (!code || !code.trim()) {
+    console.error('Usage: browserforce eval --stdin   (pipe code) | browserforce eval "<code>"');
+    process.exit(1);
+  }
+  await runSessiondVerb('/command/eval', { code, timeout });
+}
+
 function cmdHelp() {
   console.log(`
   BrowserForce — Give AI agents your real Chrome browser
@@ -936,6 +994,9 @@ function cmdHelp() {
     browserforce fill <@ref> <text> Fill a ref with text (clears first)
     browserforce type <@ref> <text> Type text into a ref (key by key)
     browserforce press <key>        Press a keyboard key (e.g. Enter)
+    browserforce wait --text <s>    Wait for text / --url <glob> / --load <state> / --fn <expr>
+    browserforce get <url|title>    Read url/title, or: get text <@ref>
+    browserforce eval --stdin       Run piped Playwright JS in the session (or: eval "<code>")
     browserforce navigate <url>     Open URL in a new tab
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
@@ -979,6 +1040,7 @@ const commands = {
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
   'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
   session: cmdSession, click: cmdClick, fill: cmdFill, type: cmdType, press: cmdPress,
+  wait: cmdWait, get: cmdGet, eval: cmdEval,
   help: cmdHelp,
 };
 
