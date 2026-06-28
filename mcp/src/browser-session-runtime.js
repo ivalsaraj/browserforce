@@ -40,6 +40,19 @@ function normalizeRestrictions(raw) {
   };
 }
 
+// Canonical "is this page handle still usable" predicate — IDENTICAL to
+// exec-engine.js isUsablePage(). Kept as a local copy on purpose: this runtime is
+// import-free by design (see header) and exec-engine.js pulls a heavy module
+// graph, so importing the helper would couple the transport-agnostic runtime to
+// it. Keep the two predicates in sync.
+function isUsablePage(page) {
+  try {
+    return !!page && typeof page.isClosed === 'function' && !page.isClosed();
+  } catch {
+    return false;
+  }
+}
+
 export function createBrowserSessionRuntime(deps = {}) {
   const {
     connectBrowser = null,
@@ -266,11 +279,32 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
   }
 
+  // Resolve the page atomic verbs operate on. The shared runtime OWNS the
+  // persistent active page as `userState.page` (=== `state.page` in snippets):
+  // once a verb (or an `eval` doing `state.page = ...`) establishes it, every
+  // later verb targets the SAME tab — including the canned snippets that
+  // reference the raw top-level `page` (get url/title, press, wait). Without this
+  // those snippets fell back to `getPages()[0]`, which in real Chrome is an
+  // arbitrary one of dozens of open tabs (the documented `snapshot → click`
+  // flow then acted on the wrong tab). A closed/stale handle is dropped and
+  // re-seeded from the first context page so it never sticks. Pinning keeps
+  // `buildExecContext`'s `activePage()` (userState.page first) and the raw
+  // top-level `page` in agreement.
+  function resolveActivePage(ctx) {
+    const current = userState.page;
+    if (isUsablePage(current)) return current;
+    if (current) userState.page = null;
+    const first = ctx.pages()[0] || null;
+    if (first) userState.page = first;
+    return first;
+  }
+
   /**
    * Run a user snippet against the live session through the guarded runCode()
-   * boundary. Ensures the browser is connected, builds the exec context from the
-   * first context/page, and counts the work as an active operation so the idle
-   * disconnect timer never fires mid-command. Returns runCode()'s raw result.
+   * boundary. Ensures the browser is connected, resolves the persistent active
+   * page (state.page) so every verb targets the same tab, and counts the work as
+   * an active operation so the idle disconnect timer never fires mid-command.
+   * Returns runCode()'s raw result.
    */
   async function runCommand({ code, timeout = 30000 } = {}) {
     if (typeof buildExecContext !== 'function' || typeof runCode !== 'function') {
@@ -280,7 +314,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     beginOperation();
     try {
       const ctx = getContext();
-      const page = getPages()[0] || null;
+      const page = resolveActivePage(ctx);
       const execCtx = buildExecContext(page, ctx, userState, { consoleLogs, setupConsoleCapture });
       return await runCode(code, execCtx, timeout);
     } finally {
