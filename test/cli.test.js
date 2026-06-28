@@ -166,6 +166,15 @@ describe('CLI', () => {
       assert.match(err.stderr, /timed out after 300ms/);
     }
   });
+
+  it('legacy -e still executes through the existing one-shot path', async () => {
+    const { stdout } = await exec('node', ['bin.js', '-e', 'return "legacy-ok"', '--timeout', '5000'], {
+      env: { ...process.env, BF_CDP_URL: cdpUrl },
+      timeout: 15000,
+    });
+
+    assert.match(stdout, /legacy-ok/);
+  });
 });
 
 describe('CLI plugin commands', () => {
