@@ -55,6 +55,10 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   const doFetch = fetchImpl || globalThis.fetch;
 
+  // The connect source is swappable so the CLI sessiond can wire a negotiated
+  // backend (real relay+CDP vs managed launch) after construction.
+  let connectBrowserFn = connectBrowser;
+
   let userState = {};
   let browser = null;
   let browserConnectPromise = null;
@@ -177,10 +181,10 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
 
     browserConnectPromise = (async () => {
-      if (typeof connectBrowser !== 'function') {
+      if (typeof connectBrowserFn !== 'function') {
         throw new Error('browser session runtime: a connectBrowser dependency is required to connect');
       }
-      const nextBrowser = await connectBrowser();
+      const nextBrowser = await connectBrowserFn();
       browser = nextBrowser;
       browser.on('disconnected', () => {
         clearIdleBrowserDisconnectTimer();
@@ -273,6 +277,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     get activeBrowserOperations() { return activeBrowserOperations; },
     isConnected() { return !!browser?.isConnected?.(); },
     hasPendingIdleDisconnect() { return idleBrowserDisconnectTimer !== null; },
+    setConnectBrowser(fn) { connectBrowserFn = fn; },
     setupConsoleCapture,
     ensureAllPagesCapture,
     beginOperation,
