@@ -81,9 +81,12 @@ describe('CLI session daemon', () => {
 
     before(async () => {
       lockPath = tmpLockPath();
+      // Force the managed backend so startup negotiation is hermetic (no
+      // dependency on a live relay/extension and no real Chrome launch — the
+      // managed connect stays lazy until a command runs).
       child = spawn('node', [SESSIOND], {
         cwd: ROOT,
-        env: { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath },
+        env: { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_BROWSER_BACKEND: 'managed' },
         stdio: ['ignore', 'ignore', 'pipe'],
       });
       lock = await waitForLock(lockPath);
@@ -142,7 +145,7 @@ describe('CLI session daemon', () => {
     });
 
     it('starts the daemon, reports it running, then stops it', async () => {
-      const startEnv = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath };
+      const startEnv = { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, BF_BROWSER_BACKEND: 'managed' };
 
       const start = await exec('node', ['bin.js', 'session', 'start', '--json'], { cwd: ROOT, env: startEnv });
       const startData = JSON.parse(start.stdout);
@@ -158,6 +161,123 @@ describe('CLI session daemon', () => {
       // After stop, status reports not running.
       const statusAfter = await exec('node', ['bin.js', 'session', 'status', '--json'], { cwd: ROOT, env: startEnv });
       assert.equal(JSON.parse(statusAfter.stdout).running, false);
+    });
+  });
+
+  describe('backend negotiation (/status)', () => {
+    const spawned = [];
+
+    function spawnSessiond(extraEnv) {
+      const lockPath = tmpLockPath();
+      const child = spawn('node', [SESSIOND], {
+        cwd: ROOT,
+        env: { ...process.env, BF_SESSIOND_LOCK_PATH: lockPath, ...extraEnv },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.on('data', (d) => { stderr += d.toString(); });
+      const rec = { child, lockPath, getStderr: () => stderr };
+      spawned.push(rec);
+      return rec;
+    }
+
+    // A localhost port with nothing listening (acquire-then-release).
+    async function getDeadPort() {
+      const srv = http.createServer();
+      await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+      const port = srv.address().port;
+      await new Promise((r) => srv.close(r));
+      return port;
+    }
+
+    async function statusOf(lock) {
+      return httpFetch('GET', `http://127.0.0.1:${lock.port}/status`, null, lock.token);
+    }
+
+    after(async () => {
+      for (const { child, lockPath } of spawned) {
+        try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+        try { await fs.unlink(lockPath); } catch { /* gone */ }
+        try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+      }
+    });
+
+    it('explicit managed backend reports backend "managed" with no warning (no bridge needed)', async () => {
+      const { lockPath } = spawnSessiond({ BF_BROWSER_BACKEND: 'managed' });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'managed sessiond should start without a relay/extension');
+      const res = await statusOf(lock);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.backend, 'managed');
+      assert.equal(res.body.requestedBackend, 'managed');
+      assert.equal(res.body.fallbackReason, null);
+      assert.equal(res.body.warning, null);
+    });
+
+    it('explicit headless backend reports backend "headless"', async () => {
+      const { lockPath } = spawnSessiond({ BF_BROWSER_BACKEND: 'headless' });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock);
+      const res = await statusOf(lock);
+      assert.equal(res.body.backend, 'headless');
+      assert.equal(res.body.requestedBackend, 'headless');
+      assert.equal(res.body.fallbackReason, null);
+    });
+
+    it('auto falls back to managed (with a warning) when the real bridge is unavailable', async () => {
+      const deadPort = await getDeadPort();
+      const { lockPath } = spawnSessiond({
+        BF_BROWSER_BACKEND: 'auto',
+        BF_CDP_URL: `ws://127.0.0.1:${deadPort}/cdp?token=x`,
+      });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'auto should still start by falling back to managed');
+      const res = await statusOf(lock);
+      assert.equal(res.body.backend, 'managed');
+      assert.equal(res.body.requestedBackend, 'auto');
+      assert.equal(res.body.fallbackReason, 'real-chrome-bridge-unavailable');
+      assert.ok(typeof res.body.warning === 'string' && res.body.warning.length > 0, 'managed fallback must warn');
+    });
+
+    it('auto selects "real" when the bridge reports the extension connected', async () => {
+      const fake = http.createServer((req, res) => {
+        if (req.url && req.url.startsWith('/extension/status')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ connected: true, activeTargets: 1 }));
+          return;
+        }
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('{}');
+      });
+      await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+      const fakePort = fake.address().port;
+      try {
+        const { lockPath } = spawnSessiond({
+          BF_BROWSER_BACKEND: 'auto',
+          BF_CDP_URL: `ws://127.0.0.1:${fakePort}/cdp?token=x`,
+        });
+        const lock = await waitForLock(lockPath);
+        assert.ok(lock);
+        const res = await statusOf(lock);
+        assert.equal(res.body.backend, 'real');
+        assert.equal(res.body.requestedBackend, 'auto');
+        assert.equal(res.body.fallbackReason, null);
+        assert.equal(res.body.warning, null);
+      } finally {
+        await new Promise((r) => fake.close(r));
+      }
+    });
+
+    it('explicit real backend fails loud (non-zero exit, no lock) when the bridge is unavailable', async () => {
+      const deadPort = await getDeadPort();
+      const { child, lockPath } = spawnSessiond({
+        BF_BROWSER_BACKEND: 'real',
+        BF_CDP_URL: `ws://127.0.0.1:${deadPort}/cdp?token=x`,
+      });
+      const code = await new Promise((resolve) => child.on('exit', (c) => resolve(c)));
+      assert.notEqual(code, 0, 'real backend without a bridge must exit non-zero');
+      const lock = await readLockFile(lockPath);
+      assert.equal(lock, null, 'no lock should be written when negotiation fails');
     });
   });
 });

@@ -9,16 +9,27 @@
 //     (/status, /reset, /stop, /command/*); /health stays unauthenticated and
 //     leaks no token/secret
 //
-// The daemon is the single writer of its lock sidecar: it writes the lock once
-// it is listening (with its own pid) and clears it on shutdown. Backend
-// negotiation (Task 7) and atomic verbs (Tasks 8-10) are layered on later.
+// The daemon is the single writer of its lock sidecar: it negotiates a browser
+// backend (real Chrome bridge vs managed/headless), then writes the lock once
+// it is listening (with its own pid) and clears it on shutdown. Atomic verbs
+// (Tasks 8-10) route through the runtime execution boundary, added later.
 
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pickChatdPort } from '../agent/src/port-resolver.js';
 import { createBrowserSessionRuntime } from '../mcp/src/browser-session-runtime.js';
+import { resolveRequestedBackend, selectBrowserBackend } from '../mcp/src/backend-selection.js';
+import {
+  ensureRelay,
+  getExtensionStatus,
+  getRelayHttpUrl,
+  getCdpUrl,
+  getRelayHttpUrlFromCdpUrl,
+  assertExtensionConnected,
+} from '../mcp/src/exec-engine.js';
 import {
   writeSessiondLock,
   clearSessiondLock,
@@ -29,6 +40,76 @@ import {
 const HOST = '127.0.0.1';
 const SESSIOND_PORT_RANGE = { rangeStart: 19340, rangeEnd: 19380 };
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
+
+// ─── Backend connect factories (lazy: the browser is launched/connected only on
+// the first command, never during startup negotiation) ──────────────────────
+
+async function connectRealBrowser() {
+  // Mirror bin.js connectBrowser: relay is already ensured by negotiation.
+  const cReq = createRequire(fileURLToPath(new URL('../mcp/src/exec-engine.js', import.meta.url)));
+  const pwPath = cReq.resolve('playwright-core');
+  const { default: pw } = await import(pwPath);
+  const { chromium } = pw;
+  const cdpUrl = await getCdpUrl();
+  const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
+  await assertExtensionConnected({ baseUrl });
+  return chromium.connectOverCDP(cdpUrl);
+}
+
+async function connectManagedBrowser({ headless }) {
+  // Defer loading managed-browser (and thus playwright-core) until first use.
+  const { launchManagedBrowser } = await import('../mcp/src/managed-browser.js');
+  const { browser } = await launchManagedBrowser({ headless });
+  if (!browser) {
+    throw new Error('Managed browser launch did not expose a Browser handle (persistent context only).');
+  }
+  return browser;
+}
+
+/**
+ * Negotiate the browser backend for this daemon: resolve the requested mode,
+ * probe the real Chrome bridge (relay + extension) for auto/real, pick the
+ * backend via the shared policy, wire a lazy connect into the runtime, and
+ * record { backend, requestedBackend, fallbackReason, warning } on the runtime.
+ * Throws when `real` is requested but the bridge is unavailable (fail loud).
+ */
+export async function negotiateBackend({ runtime, env = process.env } = {}) {
+  const requested = resolveRequestedBackend({ argv: {}, env });
+
+  let extensionConnected = false;
+  if (requested === 'auto' || requested === 'real') {
+    try {
+      await ensureRelay();
+      const status = await getExtensionStatus();
+      extensionConnected = !!status?.connected;
+    } catch {
+      extensionConnected = false;
+    }
+  }
+
+  const selection = selectBrowserBackend({ requested, extensionConnected });
+
+  if (selection.backend === 'real') {
+    runtime.setConnectBrowser(connectRealBrowser);
+  } else if (selection.backend === 'headless') {
+    runtime.setConnectBrowser(() => connectManagedBrowser({ headless: true }));
+  } else {
+    runtime.setConnectBrowser(() => connectManagedBrowser({ headless: false }));
+  }
+
+  const warning = selection.shouldWarn
+    ? `Real Chrome bridge unavailable; using managed ${selection.backend === 'headless' ? 'headless ' : ''}Chrome (${selection.reason}).`
+    : null;
+
+  runtime.setBackendInfo({
+    backend: selection.backend,
+    requestedBackend: requested,
+    fallbackReason: selection.shouldWarn ? selection.reason : null,
+    warning,
+  });
+
+  return { ...selection, requestedBackend: requested, warning };
+}
 
 function getSessiondVersion() {
   try {
@@ -71,8 +152,10 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
   const version = getSessiondVersion();
   const idleMs = resolveIdleMs();
 
-  // The runtime is constructed now; the backend connect is wired in Task 7.
-  const runtime = createBrowserSessionRuntime({});
+  // Shared runtime; the backend connect is wired by negotiateBackend() below.
+  // getRelayHttpUrl lets the runtime fetch agent preferences/restrictions for
+  // the real backend (no-op for managed/headless).
+  const runtime = createBrowserSessionRuntime({ getRelayHttpUrl });
 
   let idleTimer = null;
   let shuttingDown = false;
@@ -119,10 +202,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
         pid: process.pid,
         port,
         version,
-        backend: null,
-        requestedBackend: null,
-        fallbackReason: null,
-        warning: null,
+        ...runtime.getBackendInfo(),
       });
       return;
     }
@@ -167,6 +247,10 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
     server.once('error', reject);
     server.listen(port, HOST, resolve);
   });
+
+  // Negotiate the backend before publishing the lock so a `--real` request with
+  // no bridge fails loud (non-zero exit, no lock written). auto never throws.
+  await negotiateBackend({ runtime, env: process.env });
 
   await writeSessiondLock({ pid: process.pid, port, token, version, lockPath });
   await writeSessiondUrl({ port, token, urlPath, lockPath });

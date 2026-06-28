@@ -65,6 +65,11 @@ export function createBrowserSessionRuntime(deps = {}) {
   let idleBrowserDisconnectTimer = null;
   let activeBrowserOperations = 0;
 
+  // Negotiated backend metadata (set by the CLI sessiond after backend
+  // selection). Kept in the shared runtime so any protocol surface can report a
+  // consistent { backend, requestedBackend, fallbackReason, warning }.
+  let backendInfo = { backend: null, requestedBackend: null, fallbackReason: null, warning: null };
+
   // ─── Console Log Capture ───────────────────────────────────────────────────
   const consoleLogs = new Map();
   const pagesWithListeners = new WeakSet();
@@ -278,6 +283,16 @@ export function createBrowserSessionRuntime(deps = {}) {
     isConnected() { return !!browser?.isConnected?.(); },
     hasPendingIdleDisconnect() { return idleBrowserDisconnectTimer !== null; },
     setConnectBrowser(fn) { connectBrowserFn = fn; },
+    setBackendInfo(info = {}) {
+      backendInfo = {
+        backend: info.backend ?? null,
+        requestedBackend: info.requestedBackend ?? null,
+        fallbackReason: info.fallbackReason ?? null,
+        warning: info.warning ?? null,
+      };
+      return backendInfo;
+    },
+    getBackendInfo() { return { ...backendInfo }; },
     setupConsoleCapture,
     ensureAllPagesCapture,
     beginOperation,
