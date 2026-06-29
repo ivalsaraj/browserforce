@@ -177,11 +177,20 @@ Steps are tracked via `trackRunStep(run, evt)` which maps events to step kinds:
   model,
   reasoningEffort,
   providerState: { codex: { sessionId, latestUsage } },
-  enabledPlugins,
+  enabledPlugins, // user-selected plugins merged with agent defaults in API responses
   createdAt,
   updatedAt,
 }
 ```
+
+### Default Agent Plugins
+
+BrowserForce Agent defaults `google-sheets` into each session's effective plugin
+list. Session create/list/get/patch responses and run prompts merge this default
+with user-selected `enabledPlugins`, so a fresh side-panel chat can use Sheets
+helpers without manual plugin selection. The plugin picker keeps the current UI
+contract: there is no restored `requiredPlugins` API, required badge, or disabled
+plugin row.
 
 ### Messages
 

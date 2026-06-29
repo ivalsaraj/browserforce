@@ -573,7 +573,7 @@ test('PATCH /v1/sessions rejects invalid reasoning effort values', async () => {
   }
 });
 
-test('PATCH /v1/sessions persists selected enabled plugins', async () => {
+test('PATCH /v1/sessions merges selected plugins with default google-sheets plugin', async () => {
   const daemon = await startChatd({ port: 0, writeChatdUrl: false });
   try {
     const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
@@ -595,7 +595,7 @@ test('PATCH /v1/sessions persists selected enabled plugins', async () => {
     });
     assert.equal(patched.status, 200);
     const body = await patched.json();
-    assert.deepEqual(body.enabledPlugins, ['highlight']);
+    assert.deepEqual(body.enabledPlugins, ['highlight', 'google-sheets']);
   } finally {
     await daemon.stop();
   }
@@ -629,7 +629,7 @@ test('PATCH /v1/sessions rejects invalid enabled plugin ids', async () => {
   }
 });
 
-test('POST /v1/runs does not inject plugin context when no plugins are enabled', async () => {
+test('POST /v1/runs injects default google-sheets plugin context for unpatched sessions', async () => {
   const seenRuns = [];
   const daemon = await startChatd({
     port: 0,
@@ -663,7 +663,15 @@ test('POST /v1/runs does not inject plugin context when no plugins are enabled',
     await new Promise((resolve) => setTimeout(resolve, 60));
 
     const prompt = seenRuns.at(-1)?.message || '';
-    assert.doesNotMatch(prompt, /Enabled BrowserForce plugins:/);
+    assert.match(prompt, /Enabled BrowserForce plugins:/);
+    assert.match(prompt, /google-sheets/);
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.deepEqual(sessionBody.enabledPlugins, ['google-sheets']);
   } finally {
     await daemon.stop();
   }

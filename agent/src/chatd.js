@@ -43,6 +43,7 @@ const CHATD_URL_PATH = join(BF_DIR, 'chatd-url.json');
 const CODEX_CONFIG_PATH = join(homedir(), '.codex', 'config.toml');
 const MODEL_LIST_TIMEOUT_MS = 5000;
 const DEFAULT_REASONING_EFFORT = 'medium';
+const DEFAULT_AGENT_PLUGINS = Object.freeze(['google-sheets']);
 const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
 const PLUGIN_SKILL_META_KEYS = new Set(['name', 'helpers', 'helper_prefix', 'helper_aliases']);
 const PLUGIN_SKILL_LIST_KEYS = new Set(['helpers', 'helper_aliases']);
@@ -520,8 +521,28 @@ function hasInvalidEnabledPluginIds(input) {
   return false;
 }
 
+function mergeDefaultAgentPlugins(enabledPlugins) {
+  const merged = normalizeEnabledPluginsList(enabledPlugins);
+  const seen = new Set(merged);
+  for (const rawDefault of DEFAULT_AGENT_PLUGINS) {
+    const pluginName = normalizePluginId(rawDefault);
+    if (!pluginName || seen.has(pluginName)) continue;
+    merged.push(pluginName);
+    seen.add(pluginName);
+  }
+  return merged;
+}
+
+function applySessionPluginDefaults(session) {
+  if (!session || typeof session !== 'object') return session;
+  return {
+    ...session,
+    enabledPlugins: mergeDefaultAgentPlugins(session.enabledPlugins),
+  };
+}
+
 function buildPluginPromptContext(enabledPlugins) {
-  const normalized = normalizeEnabledPluginsList(enabledPlugins);
+  const normalized = mergeDefaultAgentPlugins(enabledPlugins);
   if (!normalized.length) return '';
   const lines = [
     'Enabled BrowserForce plugins:',
@@ -1627,7 +1648,7 @@ export async function startChatd(opts = {}) {
       }
 
       if (url.pathname === '/v1/sessions' && req.method === 'GET') {
-        const sessions = await listSessions({ storageRoot });
+        const sessions = (await listSessions({ storageRoot })).map(applySessionPluginDefaults);
         json(res, 200, { sessions });
         return;
       }
@@ -1659,7 +1680,7 @@ export async function startChatd(opts = {}) {
             reasoningEffort: body.reasoningEffort ?? null,
             storageRoot,
           });
-          json(res, 201, session);
+          json(res, 201, applySessionPluginDefaults(session));
         } catch (error) {
           json(res, 400, { error: error?.message || 'Invalid session body' });
         }
@@ -1678,7 +1699,7 @@ export async function startChatd(opts = {}) {
           json(res, 404, { error: 'Session not found' });
           return;
         }
-        json(res, 200, session);
+        json(res, 200, applySessionPluginDefaults(session));
         return;
       }
 
@@ -1710,7 +1731,7 @@ export async function startChatd(opts = {}) {
             ...(Object.prototype.hasOwnProperty.call(body, 'model') ? { model: body.model } : {}),
             ...(Object.prototype.hasOwnProperty.call(body, 'reasoningEffort') ? { reasoningEffort: body.reasoningEffort } : {}),
             ...(Object.prototype.hasOwnProperty.call(body, 'enabledPlugins')
-              ? { enabledPlugins: normalizeEnabledPluginsList(body.enabledPlugins) }
+              ? { enabledPlugins: mergeDefaultAgentPlugins(body.enabledPlugins) }
               : {}),
           };
           const updated = await updateSession({
@@ -1722,7 +1743,7 @@ export async function startChatd(opts = {}) {
             json(res, 404, { error: 'Session not found' });
             return;
           }
-          json(res, 200, updated);
+          json(res, 200, applySessionPluginDefaults(updated));
         } catch (error) {
           json(res, 400, { error: error?.message || 'Invalid session patch' });
         }
@@ -1835,7 +1856,7 @@ export async function startChatd(opts = {}) {
             // best-effort metadata only
           }
         }
-        const enabledPlugins = normalizeEnabledPluginsList(session.enabledPlugins);
+        const enabledPlugins = mergeDefaultAgentPlugins(session.enabledPlugins);
         const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
           ? session.providerState.codex.sessionId
           : null;
