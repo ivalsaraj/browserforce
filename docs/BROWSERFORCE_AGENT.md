@@ -135,6 +135,7 @@ Optional external config:
   - `agent start` syncs a managed BrowserForce `AGENTS.md` into this directory (unless a custom unmanaged `AGENTS.md` is already present).
 - `BF_CHATD_CODEX_COMMAND`
   - Codex binary/command used by chatd (default `codex`).
+  - chatd launches Codex with `approval_policy="never"` and `sandbox_mode="danger-full-access"` config overrides so BrowserForce MCP calls can run without an interactive approval UI.
 - `BF_CHATD_MODEL_LIST_TIMEOUT_MS`
   - Timeout when querying model catalog from Codex app-server.
 - `BF_CHATD_DEFAULT_MODEL`
@@ -159,6 +160,10 @@ Optional external config:
   - Plugin helpers are runtime-loaded, not side-panel-only. MCP, `browserforce -e`, and CLI `sessiond` all use `mcp/src/plugin-runtime.js`, so `pluginCatalog()`, `pluginHelp()`, and helpers such as `gs__summarizeSheet()` come from the same installed plugin directory.
   - No BrowserForce skill is required for the help gate.
   - `execute` timeout is a cancellation boundary, not merely a late error response: when a snippet exceeds its timeout, BrowserForce aborts the run's timers and fences its guarded helper/`state` continuations so the timed-out code stops issuing BrowserForce-controlled work and cannot mutate `state` afterward. `waitForPageLoad()` stays a page-readiness heuristic; cancellation is handled at the execution boundary. A browser action already delivered to Chrome before the timeout may still take effect, so retry code should observe the page (snapshot/url) before issuing more mutations. Two limits are by design: (1) a continuation that resumes after awaiting a **raw top-level `page`/`context`** operation can still issue one further Chrome command — those handles are kept raw to preserve Playwright identity, so prefer guarded helpers / `state`-stored handles when you need the fence; (2) a CPU-bound loop placed after an `await` (e.g. `await something; while (true) {}`) runs past the synchronous vm-timeout window and may not be interruptible — avoid unbounded loops. A continuation left pending on a cancelled wait may stay in memory until process cleanup, but it no longer has a BrowserForce-controlled path to mutate `state` or call guarded helpers. Timeout errors do not suggest `reset`.
+- `user cancelled MCP tool call` from BrowserForce tools in the side panel:
+  - This is Codex rejecting the MCP call before BrowserForce executes it, not a relay error by itself.
+  - Ensure chatd is running a build that passes `approval_policy="never"` and `sandbox_mode="danger-full-access"` to `codex exec`.
+  - Check `activeManualTargets` separately before restarting relay `19222`.
 - `agent_not_running` in side panel:
   - Run `browserforce agent start`.
 - `extension_not_connected` from `/chatd-url`:

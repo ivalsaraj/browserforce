@@ -89,17 +89,29 @@ Codex runs as a subprocess. The runner builds args and spawns:
 
 ```javascript
 // Fresh run
-['exec', '--json', '--skip-git-repo-check', '--model', model, prompt]
+['exec', '--json', '--skip-git-repo-check',
+  '-c', 'approval_policy="never"',
+  '-c', 'sandbox_mode="danger-full-access"',
+  '--model', model, prompt]
 
 // Resume existing session
-['exec', 'resume', resumeSessionId, '--json', '--skip-git-repo-check', prompt]
+['exec', 'resume', resumeSessionId, '--json', '--skip-git-repo-check',
+  '-c', 'approval_policy="never"',
+  '-c', 'sandbox_mode="danger-full-access"',
+  prompt]
 ```
 
 Key parameters:
 - `--json` — emit JSONL events on stdout
 - `--skip-git-repo-check` — agent CWD is not a git repo
+- `-c approval_policy="never"` — non-interactive BrowserForce Agent runs must not wait for tool approval UI
+- `-c sandbox_mode="danger-full-access"` — matches the trusted local BrowserForce Agent automation surface and prevents Codex from cancelling MCP calls
 - `--model` — model selection per session
 - `-c model_reasoning_effort="..."` — reasoning effort (low/medium/high/xhigh)
+
+If these config overrides are missing, Codex can start a BrowserForce MCP tool
+call and then fail it with `user cancelled MCP tool call` before BrowserForce
+receives the request.
 
 ### Provider State
 

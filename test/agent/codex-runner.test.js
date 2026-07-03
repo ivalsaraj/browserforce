@@ -52,12 +52,34 @@ test('maps codex item.completed agent_message final_answer to chat.final', () =>
 
 test('buildCodexExecArgs includes --model when session model is set', () => {
   const args = buildCodexExecArgs({ prompt: 'hi', model: 'gpt-5' });
-  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', '--model', 'gpt-5', 'hi']);
+  assert.deepEqual(args, [
+    'exec',
+    '--json',
+    '--skip-git-repo-check',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
+    '--model',
+    'gpt-5',
+    'hi',
+  ]);
 });
 
 test('buildCodexExecArgs includes reasoning effort override when set', () => {
   const args = buildCodexExecArgs({ prompt: 'hi', reasoningEffort: 'medium' });
-  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', '-c', 'model_reasoning_effort="medium"', 'hi']);
+  assert.deepEqual(args, [
+    'exec',
+    '--json',
+    '--skip-git-repo-check',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
+    '-c',
+    'model_reasoning_effort="medium"',
+    'hi',
+  ]);
 });
 
 test('buildCodexExecArgs emits resume invocation when codex session id is provided', () => {
@@ -72,6 +94,10 @@ test('buildCodexExecArgs emits resume invocation when codex session id is provid
     '019caa6f-8c63-7c81-a542-3dbcf922d065',
     '--json',
     '--skip-git-repo-check',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
     '--model',
     'gpt-5',
     'hi',
@@ -80,7 +106,34 @@ test('buildCodexExecArgs emits resume invocation when codex session id is provid
 
 test('buildCodexExecArgs omits --model when model is empty', () => {
   const args = buildCodexExecArgs({ prompt: 'hi', model: '' });
-  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', 'hi']);
+  assert.deepEqual(args, [
+    'exec',
+    '--json',
+    '--skip-git-repo-check',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
+    'hi',
+  ]);
+});
+
+test('buildCodexExecArgs puts non-interactive config on resumed runs', () => {
+  const args = buildCodexExecArgs({
+    prompt: 'hi',
+    resumeSessionId: '019caa6f-8c63-7c81-a542-3dbcf922d065',
+  });
+  assert.deepEqual(args.slice(0, 9), [
+    'exec',
+    'resume',
+    '019caa6f-8c63-7c81-a542-3dbcf922d065',
+    '--json',
+    '--skip-git-repo-check',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
+  ]);
 });
 
 test('maps transient codex error line to non-fatal tool event', () => {
@@ -132,6 +185,22 @@ test('does not suppress non-auth stderr lines', () => {
       state,
     ),
     false,
+  );
+});
+
+test('suppresses noisy codex automation stderr lines', () => {
+  assert.equal(shouldSuppressCodexStderrLine('Reading additional input from stdin...'), true);
+  assert.equal(
+    shouldSuppressCodexStderrLine(
+      '2026-07-03T14:13:26.420653Z  WARN codex_core_plugins::manifest: ignoring interface.defaultPrompt: maximum of 3 prompts is supported path=/tmp/plugin.json',
+    ),
+    true,
+  );
+  assert.equal(
+    shouldSuppressCodexStderrLine(
+      '2026-07-03T14:13:27.138460Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with .. must resolve under plugin assets/',
+    ),
+    true,
   );
 });
 

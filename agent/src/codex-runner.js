@@ -45,6 +45,15 @@ export function shouldSuppressCodexStderrLine(line, state = {}) {
   }
 
   const lower = text.toLowerCase();
+  if (lower === 'reading additional input from stdin...') return true;
+  if (
+    lower.includes('warn codex_core_plugins::manifest: ignoring interface.defaultprompt')
+    || lower.includes('warn codex_core_skills::loader: ignoring interface.icon_')
+    || lower.includes('warn codex_otel::events::session_telemetry:')
+  ) {
+    return true;
+  }
+
   const isAuthRefreshLine = lower.includes('codex_core::auth: failed to refresh token');
   if (!isAuthRefreshLine) return false;
 
@@ -551,6 +560,8 @@ export function buildCodexExecArgs({ prompt, model, reasoningEffort, args, resum
     ? ['exec', 'resume', resumeId, '--json']
     : ['exec', '--json'];
   resolved.push('--skip-git-repo-check');
+  resolved.push('-c', 'approval_policy="never"');
+  resolved.push('-c', 'sandbox_mode="danger-full-access"');
   if (typeof model === 'string' && model.trim()) {
     resolved.push('--model', model.trim());
   }
