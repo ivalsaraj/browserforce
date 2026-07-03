@@ -541,7 +541,11 @@ function applySessionPluginDefaults(session) {
   };
 }
 
-function buildPluginPromptContext(enabledPlugins) {
+function isGoogleSheetsUrl(value) {
+  return /^https:\/\/docs\.google\.com\/spreadsheets\//.test(String(value || '').trim());
+}
+
+function buildPluginPromptContext(enabledPlugins, browserContext = null) {
   const normalized = mergeDefaultAgentPlugins(enabledPlugins);
   if (!normalized.length) return '';
   const lines = [
@@ -549,6 +553,13 @@ function buildPluginPromptContext(enabledPlugins) {
     ...normalized.map((pluginName) => `- ${pluginName}`),
     'If this request appears to match one of these plugins, call pluginHelp(name, section?) for that plugin before using its helpers.',
   ];
+  if (normalized.includes('google-sheets') && isGoogleSheetsUrl(browserContext?.url)) {
+    lines.push('');
+    lines.push('Active tab matches the google-sheets plugin.');
+    lines.push("For Google Sheets summary/read/edit requests, use BrowserForce:execute and call pluginHelp('google-sheets') before helper calls.");
+    lines.push('For sheet summaries, prefer gs__summarizeSheet() first; for specific ranges or cells, prefer the relevant gs__* helper.');
+    lines.push('Do not silently fall back to Drive, export, CSV, or web search when a Sheets helper fails; report the exact BrowserForce/helper error and one recovery action.');
+  }
   return lines.join('\n');
 }
 
@@ -1295,7 +1306,7 @@ function buildPromptWithAgents({
 }) {
   const prompt = buildRunPrompt({ message, browserContext, predictSessionTitle });
   const agents = String(agentsInstructions || '').trim();
-  const pluginContext = buildPluginPromptContext(enabledPlugins);
+  const pluginContext = buildPluginPromptContext(enabledPlugins, browserContext);
   if (!agents && !pluginContext) return prompt;
   if (!agents) {
     return [
@@ -1339,7 +1350,7 @@ function buildPromptWithAgentsReminder({
   predictSessionTitle = false,
 }) {
   const prompt = buildRunPrompt({ message, browserContext, predictSessionTitle });
-  const pluginContext = buildPluginPromptContext(enabledPlugins);
+  const pluginContext = buildPluginPromptContext(enabledPlugins, browserContext);
   if (!pluginContext) {
     return [
       'System reminder: follow the previously established system instructions for this thread.',

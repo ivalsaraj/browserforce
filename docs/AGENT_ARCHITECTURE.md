@@ -192,6 +192,12 @@ helpers without manual plugin selection. The plugin picker keeps the current UI
 contract: there is no restored `requiredPlugins` API, required badge, or disabled
 plugin row.
 
+When the active tab URL is a Google Sheets document and `google-sheets` is
+enabled, run prompts add a sheet-specific routing hint. Summary/read/edit
+requests should use BrowserForce `execute`, call `pluginHelp('google-sheets')`,
+and prefer `gs__summarizeSheet()` or the relevant `gs__*` helper before Drive,
+CSV/export, web search, or other fallback paths.
+
 ### Messages
 
 ```javascript

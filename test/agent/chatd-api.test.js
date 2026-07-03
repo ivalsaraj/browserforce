@@ -1118,6 +1118,58 @@ test('POST /v1/runs includes active tab context in runExecutor prompt', async ()
   }
 });
 
+test('POST /v1/runs routes active Google Sheets tabs to Sheets plugin helpers first', async () => {
+  const seenRuns = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, message, onExit }) => {
+      seenRuns.push({ runId, sessionId, message });
+      setTimeout(() => onExit({ code: 0 }), 5);
+      return { abort() {} };
+    },
+  });
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'sheet context' }),
+    }).then((res) => res.json());
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        sessionId: created.sessionId,
+        message: 'summarise this sheet',
+        browserContext: {
+          tabId: 42,
+          title: 'Career Ladder // Product Team [HELIXO] - Google Sheets',
+          url: 'https://docs.google.com/spreadsheets/d/example/edit?gid=123#gid=123',
+        },
+      }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const prompt = seenRuns.at(-1)?.message || '';
+    assert.match(prompt, /Enabled BrowserForce plugins:/);
+    assert.match(prompt, /google-sheets/);
+    assert.match(prompt, /Active tab matches the google-sheets plugin/i);
+    assert.match(prompt, /BrowserForce:execute/i);
+    assert.match(prompt, /pluginHelp\('google-sheets'\)/);
+    assert.match(prompt, /gs__summarizeSheet\(\)/);
+    assert.match(prompt, /do not silently fall back to Drive, export, CSV, or web search/i);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test('POST /v1/runs injects hidden first-turn title prompt and persists first-message tab metadata', async () => {
   const seenRuns = [];
   const daemon = await startChatd({
