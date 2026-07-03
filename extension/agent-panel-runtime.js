@@ -677,13 +677,15 @@ export function formatMessageTimestampForHover(value, { now = Date.now(), locale
   return timestamp.toLocaleString(locale || undefined, formatOptions);
 }
 
-export function formatContextUsage({ totalTokens, modelContextWindow } = {}) {
+export function formatContextUsage({ totalTokens, cachedInputTokens, modelContextWindow } = {}) {
   const total = normalizeUsageValue(totalTokens);
   if (total == null) return null;
+  const cached = normalizeUsageValue(cachedInputTokens) || 0;
+  const effectiveTotal = Math.max(0, total - cached);
   const windowSize = normalizeUsageValue(modelContextWindow);
-  if (windowSize == null || total > windowSize) return { label: 'Tokens', text: `${total.toLocaleString()} tokens` };
-  const percent = ((total / windowSize) * 100).toFixed(1);
-  return { label: 'Context', text: `${total.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)` };
+  if (windowSize == null || effectiveTotal > windowSize) return { label: 'Tokens', text: `${effectiveTotal.toLocaleString()} tokens` };
+  const percent = ((effectiveTotal / windowSize) * 100).toFixed(1);
+  return { label: 'Context', text: `${effectiveTotal.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)` };
 }
 
 function slugifyFilePart(value, fallback = 'browserforce-response') {

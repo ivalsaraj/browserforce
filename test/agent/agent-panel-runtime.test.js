@@ -311,6 +311,16 @@ test('formats context usage with percentage when total fits within context windo
   assert.equal(result.text, '12,345 / 258,400 (4.8%)');
 });
 
+test('formats context usage using effective tokens when cached input is present', () => {
+  const result = formatContextUsage({
+    totalTokens: 186778,
+    cachedInputTokens: 150272,
+    modelContextWindow: 272000,
+  });
+  assert.equal(result.label, 'Context');
+  assert.equal(result.text, '36,506 / 272,000 (13.4%)');
+});
+
 test('shows token count without percentage when context window is missing', () => {
   const result = formatContextUsage({ totalTokens: 12345 });
   assert.equal(result.label, 'Tokens');

@@ -802,6 +802,13 @@ function normalizeUsagePayload(payload) {
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
+function getEffectiveContextTokens(usage = {}) {
+  const totalTokens = normalizeUsageNumber(usage.totalTokens);
+  if (totalTokens == null) return null;
+  const cachedInputTokens = normalizeUsageNumber(usage.cachedInputTokens) || 0;
+  return Math.max(0, totalTokens - cachedInputTokens);
+}
+
 function shouldResumeCodexSession(session) {
   const resumeSessionId = session?.providerState?.codex?.sessionId || '';
   if (!isValidSessionId(resumeSessionId)) return false;
@@ -809,7 +816,7 @@ function shouldResumeCodexSession(session) {
   const usage = session?.providerState?.codex?.latestUsage;
   if (!usage || typeof usage !== 'object') return true;
 
-  const totalTokens = normalizeUsageNumber(usage.totalTokens);
+  const totalTokens = getEffectiveContextTokens(usage);
   let modelContextWindow = normalizePositiveUsageNumber(usage.modelContextWindow);
   if (!modelContextWindow && session?.model) {
     modelContextWindow = getDefaultModelContextWindow(session.model);
