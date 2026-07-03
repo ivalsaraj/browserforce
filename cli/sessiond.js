@@ -39,6 +39,7 @@ import {
   clearSessiondUrl,
   normalizeRef,
 } from './session-client.js';
+import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
 
 const HOST = '127.0.0.1';
 const SESSIOND_PORT_RANGE = { rangeStart: 19340, rangeEnd: 19380 };
@@ -221,7 +222,14 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
   // getRelayHttpUrl lets the runtime fetch agent preferences/restrictions for
   // the real backend (no-op for managed/headless). buildExecContext + runCode
   // give the runtime its guarded execution boundary for atomic verbs.
-  const runtime = createBrowserSessionRuntime({ getRelayHttpUrl, buildExecContext, runCode });
+  const pluginRuntime = await loadPluginRuntime({ logPrefix: '[bf-sessiond]' });
+  const runtime = createBrowserSessionRuntime({
+    getRelayHttpUrl,
+    buildExecContext,
+    runCode,
+    pluginHelpers: pluginRuntime.helpers,
+    pluginSkillRuntime: pluginRuntime.skillRuntime,
+  });
 
   let idleTimer = null;
   let shuttingDown = false;

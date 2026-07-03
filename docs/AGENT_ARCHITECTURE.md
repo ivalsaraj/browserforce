@@ -198,6 +198,13 @@ requests should use BrowserForce `execute`, call `pluginHelp('google-sheets')`,
 and prefer `gs__summarizeSheet()` or the relevant `gs__*` helper before Drive,
 CSV/export, web search, or other fallback paths.
 
+The UI/session plugin list is prompt context only. Actual callable helpers are
+loaded by the execute runtime. Keep `mcp/src/plugin-runtime.js` as the shared
+initialization path for MCP, one-shot `browserforce -e`, and CLI `sessiond` so
+`pluginCatalog()`, `pluginHelp()`, and plugin helpers expose the same installed
+plugin set everywhere. `BF_PLUGINS_DIR` overrides the plugin directory for tests
+and local debugging; otherwise `~/.browserforce/plugins` is used.
+
 ### Messages
 
 ```javascript

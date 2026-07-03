@@ -275,6 +275,8 @@ async function cmdExecute() {
   if (!code) { console.error('Usage: browserforce -e "<playwright code>"'); process.exit(1); }
   const timeoutMs = parseInt(values.timeout, 10);
   const { buildExecContext, runCode, formatResult } = await import('./mcp/src/exec-engine.js');
+  const { loadPluginRuntime } = await import('./mcp/src/plugin-runtime.js');
+  const pluginRuntime = await loadPluginRuntime({ logPrefix: '[bf-cli]' });
   const browser = await connectBrowser();
   try {
     const ctx = getFirstContext(browser);
@@ -282,7 +284,16 @@ async function cmdExecute() {
     const page = pages[0] || null;
     // One-shot state: fresh per invocation, not persistent across CLI calls
     const userState = {};
-    const execCtx = buildExecContext(page, ctx, userState);
+    const execCtx = buildExecContext(
+      page,
+      ctx,
+      userState,
+      {},
+      pluginRuntime.helpers,
+      {},
+      {},
+      pluginRuntime.skillRuntime,
+    );
     const result = await runCode(code, execCtx, timeoutMs);
     const formatted = formatResult(result);
     if (formatted.type === 'image') {

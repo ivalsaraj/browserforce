@@ -69,6 +69,8 @@ export function createBrowserSessionRuntime(deps = {}) {
     // verbs run user snippets — always through runCode()'s guarded boundary.
     buildExecContext = null,
     runCode = null,
+    pluginHelpers = {},
+    pluginSkillRuntime = {},
   } = deps;
 
   const doFetch = fetchImpl || globalThis.fetch;
@@ -315,7 +317,16 @@ export function createBrowserSessionRuntime(deps = {}) {
     try {
       const ctx = getContext();
       const page = resolveActivePage(ctx);
-      const execCtx = buildExecContext(page, ctx, userState, { consoleLogs, setupConsoleCapture });
+      const execCtx = buildExecContext(
+        page,
+        ctx,
+        userState,
+        { consoleLogs, setupConsoleCapture },
+        pluginHelpers,
+        await getAgentPreferencesForSession(),
+        await getBrowserforceRestrictionsForSession(),
+        pluginSkillRuntime,
+      );
       return await runCode(code, execCtx, timeout);
     } finally {
       endOperation();

@@ -17,12 +17,7 @@ import {
   preflightAttachedPageBeforeCdp,
   formatBrowserForceMcpError,
 } from './startup.js';
-import {
-  loadPlugins,
-  buildPluginHelpers,
-  buildPluginSkillAppendix,
-  buildPluginSkillRuntime,
-} from './plugin-loader.js';
+import { emptyPluginRuntime, loadPluginRuntime } from './plugin-runtime.js';
 import { checkForUpdate } from './update-check.js';
 import {
   getHelpSection,
@@ -105,9 +100,7 @@ const {
 
 // ─── Plugin State ────────────────────────────────────────────────────────────
 
-let plugins = [];
-let pluginHelpers = {};
-let pluginSkillRuntime = { catalog: [], byName: {} };
+let pluginRuntime = emptyPluginRuntime();
 
 // ─── Update State ────────────────────────────────────────────────────────────
 // Checked once at startup; notice injected into first execute response only.
@@ -212,7 +205,7 @@ function registerExecuteTool(skillAppendix = '') {
         if (page) setupConsoleCapture(page);
         const execCtx = buildExecContext(page, ctx, runtime.userState, {
           consoleLogs: runtime.consoleLogs, setupConsoleCapture,
-        }, pluginHelpers, agentPreferences, browserforceRestrictions, pluginSkillRuntime);
+        }, pluginRuntime.helpers, agentPreferences, browserforceRestrictions, pluginRuntime.skillRuntime);
         try {
           const result = await runCode(code, execCtx, timeout);
           const formatted = formatResult(result);
@@ -283,23 +276,14 @@ server.tool(
 // ─── Plugin Init ─────────────────────────────────────────────────────────────
 
 async function initPlugins() {
-  try {
-    plugins = await loadPlugins();
-    pluginHelpers = buildPluginHelpers(plugins);
-    pluginSkillRuntime = buildPluginSkillRuntime(plugins);
-    if (plugins.length > 0) {
-      process.stderr.write(`[bf-mcp] Loaded ${plugins.length} plugin(s): ${plugins.map(p => p.name).join(', ')}\n`);
-    }
-  } catch (err) {
-    process.stderr.write(`[bf-mcp] Plugin load error: ${err.message}\n`);
-  }
+  pluginRuntime = await loadPluginRuntime({ logPrefix: '[bf-mcp]' });
 }
 
 // ─── Start Server ────────────────────────────────────────────────────────────
 
 async function main() {
   await initPlugins();
-  registerExecuteTool(buildPluginSkillAppendix(plugins));
+  registerExecuteTool(pluginRuntime.appendix);
   await ensureRelay();
 
   // Fire update check in background — result stored in pendingUpdate for execute handler

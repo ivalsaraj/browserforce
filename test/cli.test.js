@@ -175,6 +175,38 @@ describe('CLI', () => {
 
     assert.match(stdout, /legacy-ok/);
   });
+
+  it('legacy -e loads plugin metadata from BF_PLUGINS_DIR', async () => {
+    const dir = join(tmpdir(), `bf-cli-exec-plugin-${Math.random().toString(36).slice(2)}`);
+    const pluginDir = join(dir, 'tagger');
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(join(pluginDir, 'index.js'), `
+      export default {
+        name: 'tagger',
+        helpers: { tagger: () => 'ok' },
+      };
+    `);
+    writeFileSync(join(pluginDir, 'SKILL.md'), `---
+name: tagger
+description: Tags pages.
+---
+Use tagger().`);
+
+    try {
+      const { stdout } = await exec(
+        'node',
+        ['bin.js', '-e', 'return { names: pluginCatalog().map(p => p.name), help: pluginHelp("tagger") }', '--timeout', '5000'],
+        {
+          env: { ...process.env, BF_CDP_URL: cdpUrl, BF_PLUGINS_DIR: dir },
+          timeout: 15000,
+        },
+      );
+      assert.match(stdout, /"tagger"/);
+      assert.match(stdout, /Use tagger/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('CLI plugin commands', () => {
