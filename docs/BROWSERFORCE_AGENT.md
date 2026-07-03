@@ -80,6 +80,9 @@ All `/v1/*` endpoints require `Authorization: Bearer <token>`.
   - List sessions.
 - `POST /v1/sessions`
   - Create session (`title`, optional `model`, optional `reasoningEffort`).
+  - Side-panel-created sessions inherit the active session's selected model and
+    reasoning effort so the new-chat button preserves the user's current model
+    choice.
 - `GET /v1/sessions/:sessionId`
   - Fetch session metadata (includes `providerState` when present).
 - `PATCH /v1/sessions/:sessionId`

@@ -3024,10 +3024,20 @@ async function selectSession(sessionId) {
   syncUploadSelectionRow();
 }
 
+function buildNewSessionPayload() {
+  const activeSession = getActiveSession();
+  const payload = { title: 'New Session' };
+  const model = String(activeSession?.model || '').trim();
+  const reasoningEffort = normalizeReasoningEffort(activeSession?.reasoningEffort);
+  if (model) payload.model = model;
+  if (reasoningEffort) payload.reasoningEffort = reasoningEffort;
+  return payload;
+}
+
 async function createSession() {
   const res = await api('/v1/sessions', {
     method: 'POST',
-    body: JSON.stringify({ title: 'New Session' }),
+    body: JSON.stringify(buildNewSessionPayload()),
   });
   await ensureOk(res, 'Failed to create session');
   const created = await readJsonOrEmpty(res);

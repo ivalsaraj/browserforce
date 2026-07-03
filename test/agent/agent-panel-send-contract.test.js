@@ -220,6 +220,17 @@ test('popup open-agent request can force a fresh session on panel init', () => {
   assert.match(js, /if \(shouldStartFreshSession \|\| !state\.value\.activeSessionId\)\s*\{\s*await createSession\(\);/);
 });
 
+test('new sessions inherit active model and reasoning effort', () => {
+  assert.match(js, /function buildNewSessionPayload\(\)/);
+  assert.match(js, /const activeSession = getActiveSession\(\);/);
+  assert.match(js, /const payload = \{\s*title:\s*'New Session'\s*\};/);
+  assert.match(js, /const model = String\(activeSession\?\.model \|\| ''\)\.trim\(\);/);
+  assert.match(js, /const reasoningEffort = normalizeReasoningEffort\(activeSession\?\.reasoningEffort\);/);
+  assert.match(js, /if \(model\) payload\.model = model;/);
+  assert.match(js, /if \(reasoningEffort\) payload\.reasoningEffort = reasoningEffort;/);
+  assert.match(js, /body:\s*JSON\.stringify\(buildNewSessionPayload\(\)\)/);
+});
+
 test('panel watches open-agent request changes and starts a fresh session when already open', () => {
   assert.match(js, /function bindAgentOpenRequestWatcher\(/);
   assert.match(js, /chrome\.storage\.onChanged\.addListener/);
