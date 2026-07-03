@@ -27,7 +27,7 @@ test('sidepanel auto-attaches current tab on open and still sends browserContext
   assert.match(js, /attachCurrentTabBtn\.addEventListener\('click'/);
   assert.match(js, /function startInitialTabAttach\(\)/);
   assert.match(js, /async function initializePanel\(\)[\s\S]*startInitialTabAttach\(\);/);
-  assert.doesNotMatch(sendMessageBlock, /await ensureCurrentTabAttached\(\);/);
+  assert.match(sendMessageBlock, /await ensureCurrentTabAttached\(\);/);
   assert.match(js, /const browserContext = await getActiveTabContext\(\);/);
   assert.match(js, /const favIconUrl = String\(tab\.favIconUrl \|\| ''\)\.trim\(\)/);
   assert.match(js, /JSON\.stringify\(\{\s*sessionId,\s*message:\s*text,\s*browserContext\s*\}\)/);

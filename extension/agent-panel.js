@@ -3286,6 +3286,7 @@ async function sendMessage(text) {
     messages: optimisticMessages,
   });
 
+  await ensureCurrentTabAttached();
   scheduleTabAttachRefresh(0);
   await pollSheetSelection();
   const browserContext = await getActiveTabContext();

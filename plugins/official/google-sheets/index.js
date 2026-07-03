@@ -1456,6 +1456,58 @@ function buildSummaryResult(sheet, columns, scanResult, options = {}) {
   };
 }
 
+function normalizeVisibleTextLines(text, options = {}) {
+  const maxLines = Number.isInteger(options.maxVisibleLines) && options.maxVisibleLines > 0
+    ? options.maxVisibleLines
+    : 80;
+  return String(text || '')
+    .split(/\n+/)
+    .map((line) => compactWhitespace(line))
+    .filter(Boolean)
+    .filter((line) => !/^(File|Edit|View|Insert|Format|Data|Tools|Extensions|Help|Accessibility)$/i.test(line))
+    .filter((line) => !/^(Share|Banner hidden)$/i.test(line))
+    .slice(0, maxLines);
+}
+
+async function readVisibleSheetSummary(page, options = {}) {
+  const maxChars = Number.isInteger(options.maxVisibleChars) && options.maxVisibleChars > 0
+    ? options.maxVisibleChars
+    : 6000;
+  const result = await page.evaluate((limit) => ({
+    title: document.title || '',
+    text: String(document.body?.innerText || '').slice(0, limit),
+  }), maxChars);
+  const lines = normalizeVisibleTextLines(result?.text, options);
+  if (lines.length === 0) return null;
+  return {
+    title: String(result?.title || ''),
+    text: lines.join('\n'),
+    lines,
+    truncated: String(result?.text || '').length >= maxChars,
+  };
+}
+
+function buildVisibleSummaryResult(sheet, visible, options = {}) {
+  const previewRows = Number.isInteger(options.previewRows) && options.previewRows > 0 ? options.previewRows : 8;
+  const rows = visible.lines.map((line, index) => ({ row: index + 1, cells: { text: line } }));
+  const preview = rows.slice(0, previewRows);
+  return {
+    sheet: { ...sheet, title: visible.title || sheet.title || '' },
+    columns: ['text'],
+    scan: {
+      scannedRows: visible.lines.length,
+      usedRowCount: visible.lines.length,
+      stopReason: visible.truncated ? 'visible_text_truncated' : 'visible_text_snapshot',
+      strategy: 'visible-text',
+    },
+    firstDataRow: rows[0] || null,
+    headerCandidate: rows[0] || null,
+    preview,
+    visibleText: visible.text,
+    ...(options.includeRows === true ? { rows } : {}),
+  };
+}
+
 const helpers = {
     gsGetMeta: async (page) => {
       assertGoogleSheet(page, 'gsGetMeta');
@@ -1570,6 +1622,15 @@ const helpers = {
       const sheetMeta = parseSheetMeta(page.url());
       const sheet = { ...sheetMeta, title: '' };
       const explicitColumns = options.columns ? normalizeColumns(options.columns) : null;
+      const strategy = String(options.strategy || '').trim().toLowerCase();
+      if (strategy !== 'editor') {
+        try {
+          const visible = await readVisibleSheetSummary(page, options);
+          if (visible) return buildVisibleSummaryResult(sheet, visible, options);
+        } catch {
+          // Fall back to precise editor scanning below.
+        }
+      }
       const forceRefresh = options.forceRefresh === true;
       const useCache = options.useCache !== false;
       const cacheTtlMs = Number.isInteger(options.cacheTtlMs) && options.cacheTtlMs >= 0

@@ -720,7 +720,8 @@ export function buildExecContext(
 
     const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
     do {
-      const page = ctx.pages().find((candidate) => candidate.url() === requestedTab.url);
+      const matches = ctx.pages().filter((candidate) => candidate.url() === requestedTab.url);
+      const page = requestedTab.origin === 'manual' ? matches.at(-1) : matches[0];
       if (page) return page;
       await abortableDelay(ATTACHED_PAGE_LOOKUP_POLL_MS, signal);
     } while (Date.now() < deadline);

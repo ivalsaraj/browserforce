@@ -178,6 +178,10 @@ const INIT_ONLY_METHODS = new Set([
   'Emulation.setUserAgentOverride', 'Emulation.setGeolocationOverride',
 ]);
 
+const ALWAYS_SYNTHETIC_INIT_METHODS = new Set([
+  'Page.createIsolatedWorld',
+]);
+
 // Return a well-shaped synthetic response for init commands that need more than {}.
 function syntheticInitResponse(method, target) {
   switch (method) {
@@ -1016,7 +1020,9 @@ class RelayServer {
       if (!existingSessionId) {
         for (const client of this.clients) {
           if (client.readyState === 1) { // WebSocket.OPEN
-            this._sendAttachedEvent(client, relaySessionId, this.targets.get(relaySessionId));
+            const target = this.targets.get(relaySessionId);
+            this._sendTargetCreatedEvent(client, target);
+            this._sendAttachedEvent(client, relaySessionId, target);
           }
         }
       }
@@ -1671,6 +1677,9 @@ class RelayServer {
     // Main session
     const target = this.targets.get(sessionId);
     if (target) {
+      if (ALWAYS_SYNTHETIC_INIT_METHODS.has(method)) {
+        return syntheticInitResponse(method, target);
+      }
       if (!target.debuggerAttached) {
         // Playwright sends init-only commands to every page it learns about.
         // Return synthetic {} so we never attach the debugger until the AI
@@ -1718,6 +1727,9 @@ class RelayServer {
       if (!primaryTarget) {
         this.aliasSessions.delete(sessionId);
         throw new Error(`Session '${sessionId}' not found`);
+      }
+      if (ALWAYS_SYNTHETIC_INIT_METHODS.has(method)) {
+        return syntheticInitResponse(method, primaryTarget);
       }
       if (!primaryTarget.debuggerAttached) {
         if (INIT_ONLY_METHODS.has(method)) {

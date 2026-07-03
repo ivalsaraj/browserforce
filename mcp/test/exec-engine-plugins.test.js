@@ -1187,6 +1187,7 @@ test('gsSummarizeSheet reuses cached rows on repeated calls with same options', 
     maxRows: 6,
     emptyStreakStop: 1,
     previewRows: 2,
+    strategy: 'editor',
   };
 
   const first = await summarize(page, null, state, options);
@@ -1198,6 +1199,27 @@ test('gsSummarizeSheet reuses cached rows on repeated calls with same options', 
   const readsAfterSecond = getEditorReadCount();
   assert.equal(second.scan.usedRowCount, 2);
   assert.equal(readsAfterSecond, readsAfterFirst);
+});
+
+test('gsSummarizeSheet uses visible text snapshot by default', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const page = {
+    isClosed: () => false,
+    url: () => 'https://docs.google.com/spreadsheets/d/test-sheet-id/edit#gid=1',
+    evaluate: async (_fn, limit) => ({
+      title: 'Visible Sheet',
+      text: 'File\nEdit\nCareer Ladder\nMilestone 1 — App Owner\nAI-AUTO: AI can complete the task end-to-end'.slice(0, limit),
+    }),
+  };
+
+  const result = await summarize(page, null, {}, { previewRows: 3 });
+
+  assert.equal(result.sheet.title, 'Visible Sheet');
+  assert.equal(result.scan.strategy, 'visible-text');
+  assert.equal(result.columns[0], 'text');
+  assert.equal(result.preview[0].cells.text, 'Career Ladder');
+  assert.match(result.visibleText, /Milestone 1/);
 });
 
 test('gsSummarizeSheet does not block on page title metadata', async () => {
@@ -1245,6 +1267,7 @@ test('gsSummarizeSheet forceRefresh bypasses cache', async () => {
     maxRows: 6,
     emptyStreakStop: 1,
     previewRows: 2,
+    strategy: 'editor',
   };
 
   await summarize(page, null, state, options);
@@ -1273,6 +1296,7 @@ test('gsSummarizeSheet useCache false bypasses cache reads and writes', async ()
     emptyStreakStop: 1,
     previewRows: 2,
     useCache: false,
+    strategy: 'editor',
   };
 
   await summarize(page, null, state, options);
@@ -1526,6 +1550,41 @@ test('getBrowserforcePageForTab waits for the manual tab to appear in context.pa
 
     assert.equal(result, manualUrl);
     assert.ok(pageReads >= 3);
+  } finally {
+    restore();
+  }
+});
+
+test('getBrowserforcePageForTab prefers the newest matching page for manual duplicate URLs', async () => {
+  const manualUrl = 'https://docs.google.com/spreadsheets/d/duplicate/edit#gid=1';
+  const relayDiscoveredPage = { isClosed: () => false, url: () => manualUrl, marker: 'relay-discovered' };
+  const manualPage = { isClosed: () => false, url: () => manualUrl, marker: 'manual' };
+  const restore = mockFetch({
+    'http://127.0.0.1:19222/extension/status': {
+      connected: true,
+      activeTargets: 2,
+      activeManualTargets: 1,
+      attachedTabs: [
+        { tabId: 1, title: 'Sheet', url: manualUrl, origin: 'manual' },
+        { tabId: 2, title: 'Sheet', url: manualUrl, origin: 'relay-discovered' },
+      ],
+      manualAttachedTabs: [
+        { tabId: 1, title: 'Sheet', url: manualUrl, origin: 'manual' },
+      ],
+    },
+  });
+  try {
+    const ctx = buildExecContext(null, {
+      pages: () => [relayDiscoveredPage, manualPage],
+    }, {}, {}, {});
+
+    const result = await runCode(
+      'state.page = await getBrowserforcePageForTab({ timeoutMs: 1000 }); return state.page.marker;',
+      ctx,
+      2000,
+    );
+
+    assert.equal(result, 'manual');
   } finally {
     restore();
   }

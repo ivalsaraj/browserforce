@@ -2553,9 +2553,15 @@ describe('manualTabAttached handler', () => {
 
     await sleep(200);
 
-    // CDP client should have received Target.attachedToTarget
+    // CDP client should have received Target.targetCreated before attachedToTarget.
+    const created = events.find((m) => m.method === 'Target.targetCreated');
+    assert.ok(created, 'Should receive Target.targetCreated event');
     const attached = events.find((m) => m.method === 'Target.attachedToTarget');
     assert.ok(attached, 'Should receive Target.attachedToTarget event');
+    assert.ok(
+      events.indexOf(created) < events.indexOf(attached),
+      'Target.targetCreated should be emitted before Target.attachedToTarget',
+    );
 
     // sessionId should be in bf-session-N format
     assert.ok(
@@ -2623,6 +2629,67 @@ describe('manualTabAttached handler', () => {
     cdp.close();
     ext.close();
     await sleep(100);
+  });
+
+  it('answers Page.createIsolatedWorld synthetically for already-attached manual tabs', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const extensionCommands = [];
+      ext.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+        extensionCommands.push(msg);
+      });
+
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      await sleep(50);
+
+      ext.send(JSON.stringify({
+        method: 'manualTabAttached',
+        params: {
+          tabId: 777,
+          sessionId: 'manual-777-456',
+          targetId: 'bf-target-777',
+          targetInfo: { url: 'https://sheet.example', title: 'Sheet' },
+          origin: 'manual',
+        },
+      }));
+
+      await sleep(200);
+
+      const attached = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attached, 'Should receive Target.attachedToTarget event');
+
+      cdp.send(JSON.stringify({
+        id: 20,
+        method: 'Page.createIsolatedWorld',
+        params: {
+          frameId: 'bf-target-777',
+          worldName: '__playwright_utility_world_page@test',
+          grantUniveralAccess: true,
+        },
+        sessionId: attached.params.sessionId,
+      }));
+
+      await sleep(100);
+
+      const response = events.find((m) => m.id === 20);
+      assert.deepEqual(response?.result, {});
+      assert.equal(
+        extensionCommands.filter((msg) => msg.method === 'cdpCommand').length,
+        0,
+        'Page.createIsolatedWorld must not be forwarded to the extension',
+      );
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
   });
 
   it('updates existing manual tab target instead of duplicating it', async () => {
