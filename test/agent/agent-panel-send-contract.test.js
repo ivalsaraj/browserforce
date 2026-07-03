@@ -16,7 +16,7 @@ test('submit handler preserves draft on send failure', () => {
   assert.match(js, /catch\s*\(\w+\)\s*\{[\s\S]*chatInputEl\.value = text;/);
 });
 
-test('sidepanel keeps current-tab attach manual and still sends browserContext with runs', () => {
+test('sidepanel auto-attaches current tab on open and still sends browserContext with runs', () => {
   const sendMessageMatch = js.match(/async function sendMessage\(text\) \{[\s\S]*?\n}\n\nasync function stopRun/);
   assert.ok(sendMessageMatch, 'sendMessage function block should be present');
   const sendMessageBlock = sendMessageMatch[0];
@@ -25,6 +25,8 @@ test('sidepanel keeps current-tab attach manual and still sends browserContext w
   assert.match(js, /runtimeMessage\(\{\s*type:\s*'getStatus'\s*\}\)/);
   assert.match(js, /chrome\.tabs\.onActivated\.addListener/);
   assert.match(js, /attachCurrentTabBtn\.addEventListener\('click'/);
+  assert.match(js, /function startInitialTabAttach\(\)/);
+  assert.match(js, /async function initializePanel\(\)[\s\S]*startInitialTabAttach\(\);/);
   assert.doesNotMatch(sendMessageBlock, /await ensureCurrentTabAttached\(\);/);
   assert.match(js, /const browserContext = await getActiveTabContext\(\);/);
   assert.match(js, /const favIconUrl = String\(tab\.favIconUrl \|\| ''\)\.trim\(\)/);
@@ -201,12 +203,13 @@ test('context usage renderer hides element when unavailable and only shows forma
   assert.doesNotMatch(js, /Context:\s*unavailable/);
 });
 
-test('init opens without auto-attaching the current tab', () => {
+test('init opens smoothly by starting tab attach asynchronously', () => {
+  assert.match(js, /function startInitialTabAttach\(\)/);
+  assert.match(js, /async function initializePanel\(\)[\s\S]*startInitialTabAttach\(\);/);
   const initMatch = js.match(/\(async function init\(\)[\s\S]*?\n}\)\(\);/);
   assert.ok(initMatch, 'init block should be present');
   const initBlock = initMatch[0];
   assert.doesNotMatch(initBlock, /await ensureCurrentTabAttached\(\);/);
-  assert.doesNotMatch(js, /async function initializePanel\(\)[\s\S]*startInitialTabAttach\(\);/);
 });
 
 test('popup open-agent request can force a fresh session on panel init', () => {
@@ -225,13 +228,23 @@ test('panel watches open-agent request changes and starts a fresh session when a
   assert.match(js, /if \(!state\.auth\)\s*\{[\s\S]*state\.pendingAgentOpenRequest = request;/);
 });
 
-test('tab-attach banner reflects manual attach availability without startup progress state', () => {
-  assert.doesNotMatch(js, /function getTabAttachInProgressState\(\)/);
+test('tab-attach banner shows progress during initial auto-attach', () => {
+  assert.match(js, /function getTabAttachInProgressState\(\)/);
+  assert.match(js, /text:\s*'Currently attaching active tab\.\.\.'/);
+  assert.match(js, /busy:\s*true/);
   assert.match(js, /async function refreshTabAttachBanner\(\)/);
-  assert.match(js, /setTabAttachBannerState\(next\);/);
+  assert.match(js, /setTabAttachBannerState\(inProgressState\);/);
   assert.match(js, /text:\s*'Current tab is not connected'/);
-  assert.doesNotMatch(js, /Currently attaching active tab/);
-  assert.doesNotMatch(js, /function startInitialTabAttach\(\)/);
+  assert.match(js, /function startInitialTabAttach\(\)[\s\S]*setTabAttachBannerState\(getTabAttachInProgressState\(\) \|\| undefined\);/);
+});
+
+test('initial tab attach waits 2 seconds before attaching and refreshes banner after completion', () => {
+  const fnMatch = js.match(/function startInitialTabAttach\(\)[\s\S]*?\n}\n\nasync function getActiveTabContext/);
+  assert.ok(fnMatch, 'startInitialTabAttach function block should be present');
+  const fnBlock = fnMatch[0];
+  assert.match(fnBlock, /window\.setTimeout\(\(\)\s*=>\s*\{/);
+  assert.match(fnBlock, /},\s*2000\)/);
+  assert.match(fnBlock, /\.finally\(\(\)\s*=>\s*\{[\s\S]*scheduleTabAttachRefresh\(0\);[\s\S]*\}\)/);
 });
 
 test('tool-call timeline entries render collapsed toggle rows with click-to-expand details', () => {

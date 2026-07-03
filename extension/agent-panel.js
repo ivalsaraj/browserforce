@@ -49,6 +49,8 @@ const state = {
   latestReasoningTitleByRun: {},
   transcriptHandlersBound: false,
   tabAttachWatchersBound: false,
+  initialTabAttachStarted: false,
+  initialTabAttachInFlight: false,
   agentOpenRequestWatcherBound: false,
   lastHandledAgentOpenRequestId: null,
   pendingAgentOpenRequest: null,
@@ -517,6 +519,16 @@ function setTabAttachBannerState({
   tabAttachTextEl.textContent = text;
   attachCurrentTabBtn.disabled = busy || !canAttach;
   attachCurrentTabBtn.textContent = busy ? 'Attaching...' : 'Attach current tab';
+}
+
+function getTabAttachInProgressState() {
+  if (!state.initialTabAttachInFlight) return null;
+  return {
+    hidden: false,
+    text: 'Currently attaching active tab...',
+    canAttach: false,
+    busy: true,
+  };
 }
 
 function dispatch(action) {
@@ -2597,6 +2609,11 @@ async function getCurrentTabAttachmentState() {
 
 async function refreshTabAttachBanner() {
   const token = ++tabAttachRefreshToken;
+  const inProgressState = getTabAttachInProgressState();
+  if (inProgressState) {
+    setTabAttachBannerState(inProgressState);
+    return;
+  }
   const next = await getCurrentTabAttachmentState();
   if (token !== tabAttachRefreshToken) return;
   setTabAttachBannerState(next);
@@ -2629,6 +2646,23 @@ function bindTabAttachWatchers() {
       scheduleTabAttachRefresh(80);
     });
   }
+}
+
+function startInitialTabAttach() {
+  if (state.initialTabAttachStarted) return;
+  state.initialTabAttachStarted = true;
+  state.initialTabAttachInFlight = true;
+  setTabAttachBannerState(getTabAttachInProgressState() || undefined);
+  window.setTimeout(() => {
+    ensureCurrentTabAttached()
+      .catch(() => {
+        // best-effort only
+      })
+      .finally(() => {
+        state.initialTabAttachInFlight = false;
+        scheduleTabAttachRefresh(0);
+      });
+  }, 2000);
 }
 
 async function getActiveTabContext() {
@@ -3288,6 +3322,7 @@ async function initializePanel() {
   }
   await loadAuth();
   bindTabAttachWatchers();
+  startInitialTabAttach();
   try {
     await loadModelPresets();
   } catch {

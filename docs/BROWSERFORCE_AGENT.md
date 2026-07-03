@@ -28,7 +28,9 @@ browserforce agent status
 
 3. In the extension popup, click `Open BrowserForce Agent`.
 
-4. Attach the current tab only when you want the agent to control that tab.
+4. The side panel auto-attaches the current tab shortly after opening. Use
+   `Attach current tab` if you need to retry attachment after a reconnect or tab
+   switch.
 
 5. Send a message in the side panel.
 
@@ -47,10 +49,12 @@ browserforce agent stop
 
 ## Current Tab Attachment
 
-- Opening the BrowserForce side panel does not auto-attach the active tab.
-- Sending a message does not auto-attach the active tab.
-- Use `Attach current tab` only when you want the agent to drive that tab through Chrome DevTools.
-- This keeps fragile pages from being debugger-attached implicitly and reduces surprise automation on the tab you are viewing.
+- Opening the BrowserForce side panel auto-attaches the active tab shortly after
+  the panel renders.
+- Sending a message does not block on a fresh attach; the open-time attach path
+  keeps the active tab available while preserving fast composer startup.
+- Use `Attach current tab` to retry attachment after a reconnect, tab switch, or
+  missed startup attach.
 - When you ask the agent to `check`, `inspect`, `look at`, `review`, or `read` an attached page, it should start with `context.pages()` and reuse the matching existing tab.
 - In that flow, it should not call `context.newPage()` or `page.goto()` just to find a page that is already open.
 - If the page you want is not present in `context.pages()`, the agent should tell you instead of opening a fresh copy.
