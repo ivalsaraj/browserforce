@@ -2,9 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  normalizePluginHelperName,
   normalizePluginHelperNames,
   normalizePluginHelperPrefix,
 } from '../../extension/plugin-helper-normalization.js';
+
+test('normalizePluginHelperName trims and validates one helper call', () => {
+  assert.equal(normalizePluginHelperName(' gs__search '), 'gs__search');
+  assert.equal(normalizePluginHelperName('2bad'), '');
+});
 
 test('normalizePluginHelperNames trims, validates, and deduplicates helper calls', () => {
   assert.deepEqual(

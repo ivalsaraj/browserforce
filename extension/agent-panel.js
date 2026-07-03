@@ -1,5 +1,6 @@
 import { applyEvent, initialState, reduceState } from './agent-panel-state.js';
 import {
+  normalizePluginHelperName,
   normalizePluginHelperNames,
   normalizePluginHelperPrefix,
 } from './plugin-helper-normalization.js';

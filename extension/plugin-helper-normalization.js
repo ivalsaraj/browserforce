@@ -1,7 +1,7 @@
 const PLUGIN_HELPER_NAME_RE = /^[A-Za-z_$][\w$]{0,127}$/;
 const PLUGIN_HELPER_PREFIX_RE = /^[a-z][a-z0-9]{1,31}$/;
 
-function normalizePluginHelperName(value) {
+export function normalizePluginHelperName(value) {
   const text = String(value || '').trim();
   if (!text || !PLUGIN_HELPER_NAME_RE.test(text)) return '';
   return text;

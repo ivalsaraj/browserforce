@@ -105,6 +105,7 @@ test('plugin popover loads catalog and patches per-session enabledPlugins', () =
 });
 
 test('execute preview marks plugin helper calls using plugin catalog metadata', () => {
+  assert.match(js, /normalizePluginHelperName,/);
   assert.match(js, /function buildPluginHelperLookup\(/);
   assert.match(js, /function resolvePluginHelperSource\(/);
   assert.match(js, /step-branch-origin plugin/);
