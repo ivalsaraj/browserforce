@@ -65,9 +65,16 @@ browserforce agent stop
 - Session IDs are explicit and user-selectable. There is no fixed/hardcoded chat session.
 - Sessions persist under `~/.browserforce/agent/sessions/`.
 - BrowserForce stores Codex continuity under `providerState.codex.sessionId`.
-- New runs attempt `codex exec resume <sessionId> --json` when mapping exists.
+- New runs attempt `codex exec resume <sessionId> --json` when mapping exists and
+  effective context pressure is below 85%.
+- At or above 85% effective context pressure, chatd starts a fresh Codex provider
+  session and injects a compacted BrowserForce continuity preamble built from
+  persisted session metadata, recent transcript messages, recent tool activity,
+  enabled plugins, and active tab context.
 - If resume fails with an invalid-session signature, chatd retries once with a fresh run.
-- Usage telemetry from `run.usage` is persisted at `providerState.codex.latestUsage` and used to hydrate the context usage chip.
+- Usage telemetry from `run.usage` is persisted at `providerState.codex.latestUsage`
+  and used to hydrate the context usage chip. Context pressure subtracts
+  `cachedInputTokens` from `totalTokens`.
 
 ## API Surface
 

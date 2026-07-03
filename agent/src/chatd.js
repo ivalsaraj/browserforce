@@ -65,6 +65,11 @@ const LOCAL_IMAGE_EXTENSION_BY_CONTENT_TYPE = Object.entries(LOCAL_IMAGE_CONTENT
 }, {});
 const SESSION_TITLE_MARKER = '[[BF_SESSION_TITLE]]';
 const MAX_SESSION_TITLE_PREFIX_BUFFER = 200;
+const CODEX_COMPACTION_CONTEXT_RATIO = 0.85;
+const CODEX_RESUME_CONTEXT_RATIO = 0.9;
+const COMPACT_CONTEXT_MESSAGE_LIMIT = 24;
+const COMPACT_CONTEXT_TEXT_LIMIT = 1200;
+const COMPACT_CONTEXT_DETAIL_LIMIT = 180;
 
 function parseTopLevelTomlString(raw, key) {
   const lines = String(raw || '').split(/\r?\n/);
@@ -809,6 +814,29 @@ function getEffectiveContextTokens(usage = {}) {
   return Math.max(0, totalTokens - cachedInputTokens);
 }
 
+function getCodexContextPressure(session) {
+  const usage = session?.providerState?.codex?.latestUsage;
+  if (!usage || typeof usage !== 'object') return null;
+
+  const totalTokens = getEffectiveContextTokens(usage);
+  let modelContextWindow = normalizePositiveUsageNumber(usage.modelContextWindow);
+  if (!modelContextWindow && session?.model) {
+    modelContextWindow = getDefaultModelContextWindow(session.model);
+  }
+  return { totalTokens, modelContextWindow };
+}
+
+function shouldCompactCodexSession(session) {
+  const resumeSessionId = session?.providerState?.codex?.sessionId || '';
+  if (!isValidSessionId(resumeSessionId)) return false;
+
+  const pressure = getCodexContextPressure(session);
+  if (!pressure || pressure.totalTokens == null) return false;
+  if (pressure.totalTokens >= 1_000_000) return true;
+  if (!pressure.modelContextWindow) return false;
+  return pressure.totalTokens >= Math.floor(pressure.modelContextWindow * CODEX_COMPACTION_CONTEXT_RATIO);
+}
+
 function shouldResumeCodexSession(session) {
   const resumeSessionId = session?.providerState?.codex?.sessionId || '';
   if (!isValidSessionId(resumeSessionId)) return false;
@@ -816,14 +844,12 @@ function shouldResumeCodexSession(session) {
   const usage = session?.providerState?.codex?.latestUsage;
   if (!usage || typeof usage !== 'object') return true;
 
-  const totalTokens = getEffectiveContextTokens(usage);
-  let modelContextWindow = normalizePositiveUsageNumber(usage.modelContextWindow);
-  if (!modelContextWindow && session?.model) {
-    modelContextWindow = getDefaultModelContextWindow(session.model);
-  }
+  const pressure = getCodexContextPressure(session);
+  const totalTokens = pressure?.totalTokens;
+  const modelContextWindow = pressure?.modelContextWindow;
 
   if (totalTokens != null && totalTokens >= 1_000_000) return false;
-  if (totalTokens != null && modelContextWindow && totalTokens >= Math.floor(modelContextWindow * 0.9)) {
+  if (totalTokens != null && modelContextWindow && totalTokens >= Math.floor(modelContextWindow * CODEX_RESUME_CONTEXT_RATIO)) {
     return false;
   }
 
@@ -1400,6 +1426,129 @@ function buildPromptWithAgentsReminder({
   ].join('\n');
 }
 
+function compactPromptText(value, maxLen = COMPACT_CONTEXT_TEXT_LIMIT) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > maxLen ? `${text.slice(0, Math.max(0, maxLen - 3))}...` : text;
+}
+
+function compactTimelineDetails(timeline = []) {
+  if (!Array.isArray(timeline)) return [];
+  return timeline
+    .slice(-6)
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return '';
+      if (entry.type === 'text') return compactPromptText(entry.text, COMPACT_CONTEXT_DETAIL_LIMIT);
+      const label = compactPromptText(entry.label, 90);
+      if (!label) return '';
+      const status = compactPromptText(entry.status, 24);
+      return `${status ? `${status}: ` : ''}${label}`;
+    })
+    .filter(Boolean);
+}
+
+function formatUsageForCompaction(usage = {}) {
+  const effective = getEffectiveContextTokens(usage);
+  const windowSize = normalizePositiveUsageNumber(usage.modelContextWindow);
+  if (effective == null && windowSize == null) return '';
+  if (effective != null && windowSize != null) {
+    const percent = ((effective / windowSize) * 100).toFixed(1);
+    return `${effective.toLocaleString()} / ${windowSize.toLocaleString()} effective tokens (${percent}%)`;
+  }
+  if (effective != null) return `${effective.toLocaleString()} effective tokens`;
+  return `${windowSize.toLocaleString()} context window`;
+}
+
+function formatMessageForCompaction(message, index) {
+  const role = compactPromptText(message?.role || 'message', 24);
+  const text = compactPromptText(message?.text || '', COMPACT_CONTEXT_TEXT_LIMIT);
+  const lines = [`${index + 1}. ${role}: ${text || '[empty]'}`];
+  const details = compactTimelineDetails(message?.timeline);
+  if (details.length > 0) {
+    lines.push(`   recent activity: ${details.join(' | ')}`);
+  }
+  return lines.join('\n');
+}
+
+function buildCompactedSessionContext({ session, messages, browserContext, enabledPlugins = [] } = {}) {
+  const usage = session?.providerState?.codex?.latestUsage || {};
+  const providerSessionId = compactPromptText(session?.providerState?.codex?.sessionId || '', 160);
+  const usageText = formatUsageForCompaction(usage);
+  const recentMessages = Array.isArray(messages) ? messages.slice(-COMPACT_CONTEXT_MESSAGE_LIMIT) : [];
+
+  const lines = [
+    'Compacted BrowserForce session context:',
+    'The previous Codex provider thread reached the safe context limit, so this is a fresh Codex thread. Treat the compacted context below as continuity from the same BrowserForce chat, then answer the new user request normally.',
+    '',
+    'Previous session metadata:',
+    `- BrowserForce session id: ${compactPromptText(session?.sessionId || '', 160) || '[unknown]'}`,
+    `- Session title: ${compactPromptText(session?.title || session?.predictedTitle || '', 160) || '[untitled]'}`,
+  ];
+
+  if (session?.model) lines.push(`- Model: ${compactPromptText(session.model, 160)}`);
+  if (providerSessionId) lines.push(`- Previous Codex provider session id: ${providerSessionId}`);
+  if (usageText) lines.push(`- Last reported context pressure: ${usageText}`);
+  if (enabledPlugins.length > 0) lines.push(`- Enabled BrowserForce plugins: ${enabledPlugins.join(', ')}`);
+
+  if (browserContext && typeof browserContext === 'object') {
+    lines.push('', 'Active browser context at compaction:');
+    if (browserContext.tabId != null) lines.push(`- Active tab id: ${browserContext.tabId}`);
+    if (browserContext.title) lines.push(`- Active tab title: ${compactPromptText(browserContext.title, 220)}`);
+    if (browserContext.url) lines.push(`- Active tab URL: ${compactPromptText(browserContext.url, 500)}`);
+    if (browserContext.pageSelection) lines.push(`- Current page selection: ${compactPromptText(browserContext.pageSelection, 260)}`);
+  }
+
+  lines.push('', `Recent transcript (${recentMessages.length} turn${recentMessages.length === 1 ? '' : 's'}, oldest to newest):`);
+  if (recentMessages.length === 0) {
+    lines.push('- [no persisted transcript available]');
+  } else {
+    recentMessages.forEach((message, index) => {
+      lines.push(formatMessageForCompaction(message, index));
+    });
+  }
+
+  lines.push('', 'Continuity instructions:');
+  lines.push('- Preserve decisions, file edits, browser state assumptions, and user preferences reflected above.');
+  lines.push('- Do not mention compaction unless the user asks about session internals.');
+  lines.push('- If a detail is absent from this compacted context, re-check the live browser/repository instead of inventing it.');
+
+  return lines.join('\n');
+}
+
+function buildPromptWithCompactedContext({
+  message,
+  browserContext,
+  agentsInstructions,
+  enabledPlugins = [],
+  predictSessionTitle = false,
+  compactedContext,
+}) {
+  const prompt = buildRunPrompt({ message, browserContext, predictSessionTitle });
+  const agents = String(agentsInstructions || '').trim();
+  const pluginContext = buildPluginPromptContext(enabledPlugins, browserContext);
+  return [
+    ...(agents ? [
+      'System instructions from AGENTS.md (highest priority):',
+      '',
+      agents,
+      '',
+      '---',
+      '',
+    ] : []),
+    ...(pluginContext ? [
+      pluginContext,
+      '',
+      '---',
+      '',
+    ] : []),
+    compactedContext,
+    '',
+    '---',
+    '',
+    prompt,
+  ].join('\n');
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -1899,23 +2048,48 @@ export async function startChatd(opts = {}) {
           }
         }
         const enabledPlugins = mergeDefaultAgentPlugins(session.enabledPlugins);
-        const resumeSessionId = shouldResumeCodexSession(session)
+        const compactCodexSession = shouldCompactCodexSession(session);
+        const resumeSessionId = !compactCodexSession && shouldResumeCodexSession(session)
           ? session.providerState.codex.sessionId
           : null;
-        const promptMessage = resumeSessionId
-          ? buildPromptWithAgentsReminder({
+        const agentsInstructions = resumeSessionId ? '' : await loadAgentsInstructions(codexCwd);
+        const promptMessage = await (async () => {
+          if (resumeSessionId) {
+            return buildPromptWithAgentsReminder({
+              message,
+              browserContext,
+              enabledPlugins,
+              predictSessionTitle,
+            });
+          }
+          if (compactCodexSession) {
+            const messages = await readMessages({
+              sessionId,
+              limit: COMPACT_CONTEXT_MESSAGE_LIMIT,
+              storageRoot,
+            });
+            return buildPromptWithCompactedContext({
+              message,
+              browserContext,
+              agentsInstructions,
+              enabledPlugins,
+              predictSessionTitle,
+              compactedContext: buildCompactedSessionContext({
+                session,
+                messages,
+                browserContext,
+                enabledPlugins,
+              }),
+            });
+          }
+          return buildPromptWithAgents({
             message,
             browserContext,
-            enabledPlugins,
-            predictSessionTitle,
-          })
-          : buildPromptWithAgents({
-            message,
-            browserContext,
-            agentsInstructions: await loadAgentsInstructions(codexCwd),
+            agentsInstructions,
             enabledPlugins,
             predictSessionTitle,
           });
+        })();
         const runReasoningEffort = resolveEffectiveReasoningEffort(
           session.reasoningEffort,
           configuredReasoningEffort,

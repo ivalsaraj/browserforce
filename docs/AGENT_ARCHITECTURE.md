@@ -132,8 +132,17 @@ Codex session continuity is tracked in `providerState.codex`:
 }
 ```
 
-- `sessionId` — passed as `resumeSessionId` on next run for `codex exec resume`
-- `latestUsage` — hydrates the context usage chip in the side panel
+- `sessionId` — passed as `resumeSessionId` on the next run for
+  `codex exec resume` while effective context pressure is below 85%
+- `latestUsage` — hydrates the context usage chip in the side panel. Effective
+  pressure is `totalTokens - cachedInputTokens`.
+
+When effective pressure reaches 85% of the model context window, chatd does not
+resume the old Codex provider thread. It starts a fresh `codex exec --json` run
+and injects a compacted BrowserForce continuity preamble assembled from persisted
+session metadata, recent transcript messages, recent timeline/tool entries,
+enabled plugins, and active browser context. The next `run.provider_session`
+event replaces `providerState.codex.sessionId` with the fresh Codex thread id.
 
 ### Event Normalization
 

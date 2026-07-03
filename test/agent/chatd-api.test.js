@@ -1656,14 +1656,15 @@ test('POST /v1/runs reuses codex provider session id on second turn', async () =
   }
 });
 
-test('POST /v1/runs starts fresh when stored codex usage is over context budget', async () => {
+test('POST /v1/runs compacts into a fresh codex session at the safe context limit', async () => {
   const providerSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';
+  const compactedProviderSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d066';
   const observed = [];
   const daemon = await startChatd({
     port: 0,
     writeChatdUrl: false,
-    runExecutor: ({ runId, sessionId, resumeSessionId, onEvent, onExit }) => {
-      observed.push({ runId, sessionId, resumeSessionId: resumeSessionId || null });
+    runExecutor: ({ runId, sessionId, message, resumeSessionId, onEvent, onExit }) => {
+      observed.push({ runId, sessionId, message, resumeSessionId: resumeSessionId || null });
       const isFirstRun = observed.length === 1;
       setTimeout(() => {
         if (isFirstRun) {
@@ -1677,11 +1678,21 @@ test('POST /v1/runs starts fresh when stored codex usage is over context budget'
             event: 'run.usage',
             runId,
             sessionId,
-            payload: { totalTokens: 3_420_664 },
+            payload: {
+              modelContextWindow: 1000,
+              totalTokens: 850,
+            },
+          });
+        } else {
+          onEvent({
+            event: 'run.provider_session',
+            runId,
+            sessionId,
+            payload: { provider: 'codex', sessionId: compactedProviderSessionId },
           });
         }
       }, 5);
-      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'ok' } }), 10);
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: isFirstRun ? 'seeded answer' : 'compacted ok' } }), 10);
       setTimeout(() => onExit({ code: 0 }), 15);
       return { abort() {} };
     },
@@ -1722,6 +1733,18 @@ test('POST /v1/runs starts fresh when stored codex usage is over context budget'
     assert.equal(observed.length >= 2, true);
     assert.equal(observed[0].resumeSessionId, null);
     assert.equal(observed[1].resumeSessionId, null);
+    assert.match(observed[1].message || '', /Compacted BrowserForce session context/);
+    assert.match(observed[1].message || '', /Previous session metadata:/);
+    assert.match(observed[1].message || '', /first/);
+    assert.match(observed[1].message || '', /seeded answer/);
+    assert.match(observed[1].message || '', /summarise page/);
+
+    const sessionRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = await sessionRes.json();
+    assert.equal(sessionBody.providerState?.codex?.sessionId, compactedProviderSessionId);
   } finally {
     await daemon.stop();
   }
