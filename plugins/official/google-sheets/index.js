@@ -1567,9 +1567,8 @@ const helpers = {
 
     gsSummarizeSheet: async (page, ctx, state, options = {}) => {
       assertGoogleSheet(page, 'gsSummarizeSheet');
-      const title = await page.title();
       const sheetMeta = parseSheetMeta(page.url());
-      const sheet = { ...sheetMeta, title };
+      const sheet = { ...sheetMeta, title: '' };
       const explicitColumns = options.columns ? normalizeColumns(options.columns) : null;
       const forceRefresh = options.forceRefresh === true;
       const useCache = options.useCache !== false;

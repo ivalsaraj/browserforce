@@ -1163,7 +1163,10 @@ test('POST /v1/runs routes active Google Sheets tabs to Sheets plugin helpers fi
     assert.match(prompt, /Active tab matches the google-sheets plugin/i);
     assert.match(prompt, /BrowserForce:execute/i);
     assert.match(prompt, /pluginHelp\('google-sheets'\)/);
-    assert.match(prompt, /gs__summarizeSheet\(\)/);
+    assert.match(prompt, /state\.page = await getBrowserforcePageForTab\(\); return await gs__summarizeSheet\(\{ maxRows: 25 \}\);/);
+    assert.match(prompt, /without passing page\/context\/state arguments/i);
+    assert.match(prompt, /Do not inspect BrowserForce source files, run rg\/sed\/cat/i);
+    assert.match(prompt, /Limit normal Sheets read\/summary\/edit requests to two BrowserForce:execute attempts/i);
     assert.match(prompt, /do not silently fall back to Drive, export, CSV, or web search/i);
   } finally {
     await daemon.stop();
@@ -1648,6 +1651,73 @@ test('POST /v1/runs reuses codex provider session id on second turn', async () =
     assert.equal(observed.length >= 2, true);
     assert.equal(observed[0].resumeSessionId, null);
     assert.equal(observed[1].resumeSessionId, providerSessionId);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test('POST /v1/runs starts fresh when stored codex usage is over context budget', async () => {
+  const providerSessionId = '019caa6f-8c63-7c81-a542-3dbcf922d065';
+  const observed = [];
+  const daemon = await startChatd({
+    port: 0,
+    writeChatdUrl: false,
+    runExecutor: ({ runId, sessionId, resumeSessionId, onEvent, onExit }) => {
+      observed.push({ runId, sessionId, resumeSessionId: resumeSessionId || null });
+      setTimeout(() => {
+        onEvent({
+          event: 'run.provider_session',
+          runId,
+          sessionId,
+          payload: { provider: 'codex', sessionId: providerSessionId },
+        });
+      }, 5);
+      setTimeout(() => onEvent({ event: 'chat.final', runId, sessionId, payload: { text: 'ok' } }), 10);
+      setTimeout(() => onExit({ code: 0 }), 15);
+      return { abort() {} };
+    },
+  });
+
+  try {
+    const created = await fetchWithRetry(`${daemon.baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ title: 'Budgeted', model: 'gpt-5.4-mini' }),
+    }).then((res) => res.json());
+
+    const patchRes = await fetch(`${daemon.baseUrl}/v1/sessions/${encodeURIComponent(created.sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({
+        providerState: {
+          codex: {
+            sessionId: providerSessionId,
+            latestUsage: { totalTokens: 3_420_664 },
+          },
+        },
+      }),
+    });
+    assert.equal(patchRes.status, 200);
+
+    const runRes = await fetch(`${daemon.baseUrl}/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${daemon.token}`,
+      },
+      body: JSON.stringify({ sessionId: created.sessionId, message: 'summarise page' }),
+    });
+    assert.equal(runRes.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(observed.length >= 1, true);
+    assert.equal(observed[0].resumeSessionId, null);
   } finally {
     await daemon.stop();
   }

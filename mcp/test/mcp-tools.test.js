@@ -489,6 +489,27 @@ describe('Tool Definitions', () => {
     assert.ok(!execHandler.includes('Promise.race'), 'CLI execute must not add its own timeout race around runCode');
   });
 
+  it('CLI one-shot execute waits for initial page discovery before reading pages', () => {
+    const source = readFileSync(
+      join(MCP_ROOT, '../bin.js'),
+      'utf8'
+    );
+    const execHandler = source.slice(
+      source.indexOf('async function cmdExecute'),
+      source.indexOf('async function cmdServe'),
+    );
+
+    assert.ok(source.includes('async function waitForInitialPageDiscovery'), 'CLI should define a page discovery wait helper');
+    assert.ok(
+      execHandler.includes('await waitForInitialPageDiscovery(ctx);'),
+      'CLI execute should wait for CDP page discovery before ctx.pages()'
+    );
+    assert.ok(
+      execHandler.indexOf('await waitForInitialPageDiscovery(ctx);') < execHandler.indexOf('const pages = ctx.pages();'),
+      'CLI execute should wait before reading ctx.pages()'
+    );
+  });
+
   it('ensureBrowser does not use root relay readiness as attached-page proof', () => {
     // ensureBrowser now lives in the shared runtime; the relay+CDP connect is
     // injected from index.js. Neither path may use the root / health check as

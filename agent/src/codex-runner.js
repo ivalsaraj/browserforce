@@ -103,6 +103,7 @@ const CODEX_MODEL_CONTEXT_WINDOWS = {
   'gpt-5.3-codex': 400_000,
   'gpt-5.3-codex-spark': 400_000,
   'gpt-5.4': 272_000,
+  'gpt-5.4-mini': 272_000,
 };
 
 export function getDefaultModelContextWindow(model) {

@@ -114,6 +114,13 @@ async function connectBrowser() {
   return chromium.connectOverCDP(cdpUrl);
 }
 
+async function waitForInitialPageDiscovery(ctx, { timeoutMs = 5000, pollMs = 100 } = {}) {
+  const started = Date.now();
+  while (ctx.pages().length === 0 && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 function getFirstContext(browser) {
   const contexts = browser.contexts();
   if (contexts.length === 0) {
@@ -150,6 +157,7 @@ async function cmdTabs() {
   const browser = await connectBrowser();
   try {
     const ctx = getFirstContext(browser);
+    await waitForInitialPageDiscovery(ctx);
     const pages = ctx.pages();
     const tabs = pages.map((p, i) => ({ index: i, title: '', url: p.url() }));
     await Promise.all(tabs.map(async (t, i) => {
@@ -174,7 +182,9 @@ async function cmdScreenshot() {
   const index = parseInt(positionals[1] || '0', 10);
   const browser = await connectBrowser();
   try {
-    const pages = getFirstContext(browser).pages();
+    const ctx = getFirstContext(browser);
+    await waitForInitialPageDiscovery(ctx);
+    const pages = ctx.pages();
     if (index >= pages.length) {
       console.error(`Tab ${index} not found. ${pages.length} tab(s) available.`);
       process.exit(1);
@@ -229,7 +239,9 @@ async function cmdSnapshot() {
   const { getAriaSnapshot, renderRefLines, renderFrameErrors } = await import('./mcp/src/aria-snapshot-engine.js');
   const browser = await connectBrowser();
   try {
-    const pages = getFirstContext(browser).pages();
+    const ctx = getFirstContext(browser);
+    await waitForInitialPageDiscovery(ctx);
+    const pages = ctx.pages();
     if (index >= pages.length) {
       console.error(`Tab ${index} not found. ${pages.length} tab(s) available.`);
       process.exit(1);
@@ -280,6 +292,7 @@ async function cmdExecute() {
   const browser = await connectBrowser();
   try {
     const ctx = getFirstContext(browser);
+    await waitForInitialPageDiscovery(ctx);
     const pages = ctx.pages();
     const page = pages[0] || null;
     // One-shot state: fresh per invocation, not persistent across CLI calls

@@ -557,7 +557,10 @@ function buildPluginPromptContext(enabledPlugins, browserContext = null) {
     lines.push('');
     lines.push('Active tab matches the google-sheets plugin.');
     lines.push("For Google Sheets summary/read/edit requests, use BrowserForce:execute and call pluginHelp('google-sheets') before helper calls.");
-    lines.push('For sheet summaries, prefer gs__summarizeSheet() first; for specific ranges or cells, prefer the relevant gs__* helper.');
+    lines.push('For sheet summaries, use this first pass: state.page = await getBrowserforcePageForTab(); return await gs__summarizeSheet({ maxRows: 25 });');
+    lines.push('For specific ranges or cells, set state.page with getBrowserforcePageForTab() once, then call the relevant gs__* helper without passing page/context/state arguments.');
+    lines.push('Do not inspect BrowserForce source files, run rg/sed/cat, or debug the plugin implementation during an ordinary Sheets read/summary/edit request.');
+    lines.push('Limit normal Sheets read/summary/edit requests to two BrowserForce:execute attempts: the intended helper call, then one status/page-binding check if needed.');
     lines.push('Do not silently fall back to Drive, export, CSV, or web search when a Sheets helper fails; report the exact BrowserForce/helper error and one recovery action.');
   }
   return lines.join('\n');
@@ -797,6 +800,27 @@ function normalizeUsagePayload(payload) {
     if (value == null) delete normalized[key];
   }
   return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function shouldResumeCodexSession(session) {
+  const resumeSessionId = session?.providerState?.codex?.sessionId || '';
+  if (!isValidSessionId(resumeSessionId)) return false;
+
+  const usage = session?.providerState?.codex?.latestUsage;
+  if (!usage || typeof usage !== 'object') return true;
+
+  const totalTokens = normalizeUsageNumber(usage.totalTokens);
+  let modelContextWindow = normalizePositiveUsageNumber(usage.modelContextWindow);
+  if (!modelContextWindow && session?.model) {
+    modelContextWindow = getDefaultModelContextWindow(session.model);
+  }
+
+  if (totalTokens != null && totalTokens >= 1_000_000) return false;
+  if (totalTokens != null && modelContextWindow && totalTokens >= Math.floor(modelContextWindow * 0.9)) {
+    return false;
+  }
+
+  return true;
 }
 
 function isResumeSessionInvalidFailure({ code, error, stderr } = {}) {
@@ -1868,7 +1892,7 @@ export async function startChatd(opts = {}) {
           }
         }
         const enabledPlugins = mergeDefaultAgentPlugins(session.enabledPlugins);
-        const resumeSessionId = isValidSessionId(session?.providerState?.codex?.sessionId || '')
+        const resumeSessionId = shouldResumeCodexSession(session)
           ? session.providerState.codex.sessionId
           : null;
         const promptMessage = resumeSessionId

@@ -240,7 +240,7 @@ function createGoogleSheetsMockPage(cellValues = {}, options = {}) {
   const page = {
     isClosed: () => false,
     url: () => currentUrl,
-    title: async () => 'Mock Sheet',
+    title: options.title || (async () => 'Mock Sheet'),
     goto: async (url) => {
       currentUrl = url;
     },
@@ -1198,6 +1198,33 @@ test('gsSummarizeSheet reuses cached rows on repeated calls with same options', 
   const readsAfterSecond = getEditorReadCount();
   assert.equal(second.scan.usedRowCount, 2);
   assert.equal(readsAfterSecond, readsAfterFirst);
+});
+
+test('gsSummarizeSheet does not block on page title metadata', async () => {
+  const { default: googleSheetsPlugin } = await import('../../plugins/official/google-sheets/index.js');
+  const summarize = googleSheetsPlugin.helpers.gsSummarizeSheet;
+  const { page } = createGoogleSheetsMockPage({
+    A1: 'Level',
+    B1: 'Expectation',
+    A2: 'Junior',
+    B2: 'Owns scoped tasks',
+    A3: '',
+    B3: '',
+  }, {
+    title: async () => {
+      throw new Error('title should not be read during summary');
+    },
+  });
+
+  const result = await summarize(page, null, {}, {
+    columns: ['A', 'B'],
+    startRow: 1,
+    maxRows: 3,
+    emptyStreakStop: 1,
+  });
+
+  assert.equal(result.sheet.title, '');
+  assert.equal(result.scan.usedRowCount, 2);
 });
 
 test('gsSummarizeSheet forceRefresh bypasses cache', async () => {
