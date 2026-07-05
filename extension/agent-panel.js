@@ -1281,7 +1281,11 @@ const EXECUTE_HELPER_EXCLUDE_CALLS = new Set([
 function isBrowserForceExecuteStep(entry) {
   const label = String(entry?.label || '').trim().toLowerCase();
   return (
-    label === 'browserforce:execute'
+    label === 'browserforce:exec'
+    || label === 'browserforce exec'
+    || label === 'mcp__browserforce__exec'
+    || label === 'exec'
+    || label === 'browserforce:execute'
     || label === 'browserforce execute'
     || label === 'mcp__browserforce__execute'
     || label === 'execute'

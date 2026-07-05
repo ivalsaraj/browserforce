@@ -561,11 +561,11 @@ function buildPluginPromptContext(enabledPlugins, browserContext = null) {
   if (normalized.includes('google-sheets') && isGoogleSheetsUrl(browserContext?.url)) {
     lines.push('');
     lines.push('Active tab matches the google-sheets plugin.');
-    lines.push("For Google Sheets summary/read/edit requests, use BrowserForce:execute and call pluginHelp('google-sheets') before helper calls.");
+    lines.push("For Google Sheets summary/read/edit requests, use BrowserForce:exec and call pluginHelp('google-sheets') before helper calls.");
     lines.push('For sheet summaries, use this first pass: state.page = await getBrowserforcePageForTab(); return await gs__summarizeSheet({ maxRows: 25 });');
     lines.push('For specific ranges or cells, set state.page with getBrowserforcePageForTab() once, then call the relevant gs__* helper without passing page/context/state arguments.');
     lines.push('Do not inspect BrowserForce source files, run rg/sed/cat, or debug the plugin implementation during an ordinary Sheets read/summary/edit request.');
-    lines.push('Limit normal Sheets read/summary/edit requests to two BrowserForce:execute attempts: the intended helper call, then one status/page-binding check if needed.');
+    lines.push('Limit normal Sheets read/summary/edit requests to two BrowserForce:exec attempts: the intended helper call, then one status/page-binding check if needed.');
     lines.push('Do not silently fall back to Drive, export, CSV, or web search when a Sheets helper fails; report the exact BrowserForce/helper error and one recovery action.');
   }
   return lines.join('\n');

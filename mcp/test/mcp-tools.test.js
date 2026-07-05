@@ -217,8 +217,8 @@ describe('Tool Definitions', () => {
     assert.ok(source.includes('force'), 'help should support forcing repeated section reads');
     const helpIdx = source.indexOf("'help'");
     assert.ok(helpIdx !== -1, 'help tool should exist');
-    const helpEnd = source.indexOf('\n);\n\n// ─── Execute Tool Prompt', helpIdx);
-    assert.ok(helpEnd !== -1, 'help tool should be registered before execute prompt');
+    const helpEnd = source.indexOf('\n);\n\n// ─── Exec Tool Prompt', helpIdx);
+    assert.ok(helpEnd !== -1, 'help tool should be registered before the exec prompt');
     const helpBlock = source.slice(helpIdx, helpEnd);
     assert.doesNotMatch(helpBlock, /ensureBrowser/);
     assert.doesNotMatch(helpBlock, /beginBrowserOperation/);
@@ -411,9 +411,9 @@ describe('Tool Definitions', () => {
       'utf8'
     );
 
-    // EXECUTE_PROMPT is defined as a const above server.tool('execute', EXECUTE_PROMPT, ...)
+    // EXECUTE_PROMPT is defined as a const above server.tool('exec', EXECUTE_PROMPT, ...)
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     assert.ok(promptBlock.length < 2000, `EXECUTE_PROMPT block is ${promptBlock.length} chars`);
@@ -427,7 +427,7 @@ describe('Tool Definitions', () => {
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     assert.ok(promptBlock.includes('getBrowserforceStatus()'), 'should use the relay status helper for attached-tab metadata');
@@ -444,7 +444,7 @@ describe('Tool Definitions', () => {
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     for (const header of [
@@ -457,17 +457,17 @@ describe('Tool Definitions', () => {
     }
   });
 
-  it('execute tool has code and optional timeout params', () => {
+  it('exec tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
-    const execBlock = source.split("'execute'")[1]?.split('server.tool(')[0] || '';
-    assert.ok(execBlock.includes('z.string()'), 'execute should have a string param (code)');
-    assert.ok(execBlock.includes('z.number().optional()'), 'execute should have an optional number param (timeout)');
-    assert.ok(execBlock.includes('code:'), 'execute should have code param');
-    assert.ok(execBlock.includes('timeout:'), 'execute should have timeout param');
+    const execBlock = source.split("'exec'")[1]?.split('server.tool(')[0] || '';
+    assert.ok(execBlock.includes('z.string()'), 'exec should have a string param (code)');
+    assert.ok(execBlock.includes('z.number().optional()'), 'exec should have an optional number param (timeout)');
+    assert.ok(execBlock.includes('code:'), 'exec should have code param');
+    assert.ok(execBlock.includes('timeout:'), 'exec should have timeout param');
   });
 
   it('reset tool has no params', () => {
@@ -622,14 +622,14 @@ describe('Tool Definitions', () => {
     assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
   });
 
-  it('execute catches CodeExecutionTimeoutError and omits the reset hint on timeout', () => {
+  it('exec catches CodeExecutionTimeoutError and omits the reset hint on timeout', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+    const execHandler = (source.split("'exec'")[1] || '').split('server.tool(')[0];
 
-    assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'execute should detect timeout errors');
+    assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'exec should detect timeout errors');
     assert.ok(execHandler.includes("const hint = isTimeout ? ''"), 'timeout errors should produce an empty hint (no reset suggestion)');
     assert.ok(
       execHandler.indexOf("isTimeout ? ''") < execHandler.indexOf('[HINT: Call reset only'),
@@ -637,15 +637,15 @@ describe('Tool Definitions', () => {
     );
   });
 
-  it('execute routes code through the shared runCode boundary with no extra timeout race', () => {
+  it('exec routes code through the shared runCode boundary with no extra timeout race', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+    const execHandler = (source.split("'exec'")[1] || '').split('server.tool(')[0];
 
-    assert.ok(execHandler.includes('await runCode(code, execCtx, timeout)'), 'execute should delegate to the shared runCode boundary');
-    assert.ok(!execHandler.includes('Promise.race'), 'execute must not add its own timeout race around runCode');
+    assert.ok(execHandler.includes('await runCode(code, execCtx, timeout)'), 'exec should delegate to the shared runCode boundary');
+    assert.ok(!execHandler.includes('Promise.race'), 'exec must not add its own timeout race around runCode');
   });
 
   it('runCode owns the single timeout boundary that aborts the run', () => {
@@ -717,12 +717,12 @@ describe('Tool Definitions', () => {
     assert.doesNotMatch(connectBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
   });
 
-  it('execute schema includes an explicit attached-page intent', () => {
+  it('exec schema includes an explicit attached-page intent', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-    const execBlock = source.split("'execute'")[1]?.split('async ({ code')[0] || '';
+    const execBlock = source.split("'exec'")[1]?.split('async ({ code')[0] || '';
     assert.match(execBlock, /intent:\s*z\.enum\(\['inspect', 'open', 'auto'\]\)\.optional\(\)/);
   });
 

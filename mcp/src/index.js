@@ -1,5 +1,5 @@
 // BrowserForce — MCP Server
-// 4-tool architecture: browserforce (high-level commands) + execute (raw
+// 4-tool architecture: browserforce (high-level commands) + exec (raw
 // Playwright code) + help (docs) + reset (reconnect).
 // Connects to the relay via Playwright's CDP client.
 
@@ -117,7 +117,7 @@ const {
 let pluginRuntime = emptyPluginRuntime();
 
 // ─── Update State ────────────────────────────────────────────────────────────
-// Checked once at startup; notice injected into first execute response only.
+// Checked once at startup; notice injected into first exec response only.
 
 let pendingUpdate = null;    // { current, latest } or null
 let updateNoticeSent = false;
@@ -167,9 +167,9 @@ server.tool(
   },
 );
 
-// ─── Execute Tool Prompt ───────────────────────────────────────────────────
+// ─── Exec Tool Prompt ────────────────────────────────────────────────────────
 
-const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome.
+const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome. Escape hatch — prefer the browserforce command tool for simple browser work.
 
 HELP GATE:
 Read each needed help section once per MCP session.
@@ -184,12 +184,12 @@ TAB RULES:
 Use state.page for ongoing work. Use intent:'open' only when the user asked to open/navigate.
 For details call help(section).`;
 
-function registerExecuteTool(skillAppendix = '') {
+function registerExecTool(skillAppendix = '') {
   server.tool(
-    'execute',
+    'exec',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run in BrowserForce execute scope. Use getBrowserforceStatus() for tab metadata; getBrowserforcePageForTab() to inspect an attached tab.'),
+      code: z.string().describe('JavaScript to run in BrowserForce exec scope. Use getBrowserforceStatus() for tab metadata; getBrowserforcePageForTab() to inspect an attached tab.'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
       intent: z.enum(['inspect', 'open', 'auto']).optional()
         .describe('Use inspect for current/attached-tab work; use open only when the user explicitly asked to open/navigate. Defaults to inspect.'),
@@ -374,10 +374,10 @@ async function initPlugins() {
 async function main() {
   await initPlugins();
   registerBrowserforceTool();
-  registerExecuteTool(pluginRuntime.appendix);
+  registerExecTool(pluginRuntime.appendix);
   await ensureRelay();
 
-  // Fire update check in background — result stored in pendingUpdate for execute handler
+  // Fire update check in background — result stored in pendingUpdate for exec handler
   checkForUpdate().then(info => { pendingUpdate = info; }).catch(() => {});
 
   const transport = new StdioServerTransport();

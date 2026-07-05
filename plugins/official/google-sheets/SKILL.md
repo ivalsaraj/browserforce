@@ -13,8 +13,8 @@ tools: []
 Use Google Sheets helpers when work involves reading, summarizing, or structuring sheet content from the active page without guesswork.
 
 Tool naming note:
-- The same browser tool may appear as `execute` or `BrowserForce:execute`.
-- Treat both labels as the same BrowserForce execution path.
+- The same browser tool may appear as `exec`, `BrowserForce:exec`, or (in older sessions) `execute` / `BrowserForce:execute`.
+- Treat all of these labels as the same BrowserForce execution path.
 
 Available helpers:
 - `gs__getMeta()` → current spreadsheet id + gid + title + URL

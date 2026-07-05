@@ -20,8 +20,18 @@ test('commentaryHeadingFromDelta ignores command-like and recovery headings', ()
   assert.equal(commentaryHeadingFromDelta('BrowserForce recovered from an error'), '');
 });
 
-test('normalizeToolLabel preserves BrowserForce execute and reset labels', () => {
-  assert.equal(normalizeToolLabel('execute', { name: 'execute', args: { code: 'return 1;' } }), 'BrowserForce:execute');
+test('normalizeToolLabel preserves BrowserForce exec, command, and reset labels', () => {
+  assert.equal(normalizeToolLabel('exec', { name: 'exec', args: { code: 'return 1;' } }), 'BrowserForce:exec');
+  assert.equal(normalizeToolLabel('browserforce', { name: 'browserforce', args: { command: 'snapshot' } }), 'BrowserForce:command');
+  assert.equal(
+    normalizeToolLabel('mcp__browserforce__browserforce', { name: 'mcp__browserforce__browserforce', arguments: '{"command":"tabs"}' }),
+    'BrowserForce:command',
+  );
   assert.equal(normalizeToolLabel('reset', { name: 'reset', arguments: '{}' }), 'BrowserForce:reset');
+  assert.equal(normalizeToolLabel('exec', { name: 'exec', arguments: '{"query":"status"}' }), 'exec');
+});
+
+test('normalizeToolLabel keeps branding legacy execute events recorded before the rename', () => {
+  assert.equal(normalizeToolLabel('execute', { name: 'execute', args: { code: 'return 1;' } }), 'BrowserForce:execute');
   assert.equal(normalizeToolLabel('execute', { name: 'execute', arguments: '{"query":"status"}' }), 'execute');
 });
