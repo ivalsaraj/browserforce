@@ -321,6 +321,71 @@ test('removing a page before the active page preserves the same logical active h
   assert.equal(runtime.getStablePageHandle(runtime.getActivePage()), activeHandle);
 });
 
+// ─── Many-tab stress (Task 12): the primitives stay fast and identity-stable ──
+
+test('stress: listTabRows over 100 pages is prompt, unique, and stable through churn', async () => {
+  const ctxPages = Array.from({ length: 100 }, (_, i) => makeTabPage({
+    url: `https://site-${i}.test/path?session=${i}`,
+    title: `Site ${i}`,
+  }));
+  const runtime = makeTabRuntime(ctxPages);
+  runtime.setActivePage(ctxPages[60]);
+
+  const started = Date.now();
+  const rows = await runtime.listTabRows();
+  const elapsed = Date.now() - started;
+
+  assert.equal(rows.length, 100);
+  assert.ok(elapsed < 2000, `listTabRows over 100 pages should be prompt (took ${elapsed}ms)`);
+  const handles = rows.map((row) => row.handle);
+  assert.ok(handles.every((h) => /^t\d+$/.test(h)));
+  assert.equal(new Set(handles).size, 100, 'every page has its own stable handle');
+  const activeRows = rows.filter((row) => row.active);
+  assert.equal(activeRows.length, 1, 'exactly one row is marked active');
+  const activeHandle = activeRows[0].handle;
+
+  // Churn: close + remove 30 pages listed before the active one.
+  for (const page of ctxPages.slice(0, 30)) page.closeNow();
+  ctxPages.splice(0, 30);
+
+  const after = await runtime.listTabRows();
+  assert.equal(after.length, 70);
+  const activeAfter = after.find((row) => row.active);
+  assert.equal(activeAfter.handle, activeHandle, 'the active logical tab kept its handle through churn');
+  assert.equal(runtime.getActivePage(), ctxPages[30], 'the active page object never changed');
+});
+
+test('stress: resolveTabTarget soft-matching stays precise across 100 pages', async () => {
+  const ctxPages = Array.from({ length: 100 }, (_, i) => makeTabPage({
+    url: `https://site-${i}.test/path?session=${i}`,
+    title: `Site ${i}`,
+  }));
+  const mrr = makeTabPage({
+    url: 'https://app.heymantle.com/reports/mrr?range=90d&compare=prev',
+    title: 'MRR — Mantle',
+  });
+  const dupA = makeTabPage({ url: 'https://one.test/', title: 'Dashboard — One' });
+  const dupB = makeTabPage({ url: 'https://two.test/', title: 'Dashboard — Two' });
+  ctxPages.splice(57, 0, mrr, dupA, dupB);
+  const runtime = makeTabRuntime(ctxPages);
+
+  // Query-string drift: the query has no ?range=… but still matches uniquely.
+  const hit = await runtime.resolveTabTarget('app.heymantle.com/reports/mrr');
+  assert.equal(hit.page, mrr);
+  assert.equal(hit.matchedBy, 'url-substring');
+
+  // Ambiguity fails loudly even with 103 candidates to scan.
+  await assert.rejects(
+    () => runtime.resolveTabTarget('Dashboard'),
+    (err) => err.code === 'TAB_AMBIGUOUS' && /matches 2 tabs/.test(err.message),
+  );
+
+  // A unique title substring still resolves.
+  const byTitle = await runtime.resolveTabTarget('Site 73');
+  assert.equal(byTitle.matchedBy, 'title-substring');
+  assert.equal(byTitle.page.meta.title, 'Site 73');
+});
+
 test('named tab conflicts: duplicate names fail without replace, move with replace', () => {
   const p1 = makeTabPage();
   const p2 = makeTabPage();

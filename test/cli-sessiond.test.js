@@ -779,6 +779,105 @@ describe('CLI session daemon', () => {
       assert.match(resp.error, /--tab/);
     });
   });
+
+  // ─── Stress: many named tabs + parallel --tab reads over the real wire ─────
+  // (Task 12) One daemon, many tabs opened via the CLI, then concurrent CLI
+  // processes reading different named tabs. Proves handles/names stay stable
+  // and per-run pinning holds across separate CLI invocations.
+  describe('stress: CLI many named tabs + parallel --tab reads (Task 12)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    const TAB_COUNT = 12;
+    let child;
+    let lockPath;
+    let env;
+
+    async function execFail(args) {
+      try {
+        const { stdout, stderr } = await exec('node', ['bin.js', ...args], { cwd: ROOT, env });
+        return { code: 0, stdout, stderr };
+      } catch (err) {
+        return { code: err.code, stdout: err.stdout || '', stderr: err.stderr || '' };
+      }
+    }
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      // Open TAB_COUNT named tabs through the real CLI `open` path.
+      for (let i = 0; i < TAB_COUNT; i += 1) {
+        await exec('node', ['bin.js', 'open', `https://job-${i}.test/`, '--as', `job-${i}`, '--json'], { cwd: ROOT, env });
+      }
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('tabs lists every opened tab with unique stable handles and its name', async () => {
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(rows.length, TAB_COUNT + 1, 'the original fixture tab plus every opened tab');
+
+      const handles = rows.map((row) => row.handle);
+      assert.ok(handles.every((h) => /^t\d+$/.test(h)));
+      assert.equal(new Set(handles).size, rows.length, 'handles are unique');
+
+      for (let i = 0; i < TAB_COUNT; i += 1) {
+        const row = rows.find((r) => r.name === `job-${i}`);
+        assert.ok(row, `job-${i} is named in tabs output`);
+        assert.equal(row.url, `https://job-${i}.test/`);
+      }
+      const active = rows.filter((row) => row.active);
+      assert.equal(active.length, 1);
+      assert.equal(active[0].name, `job-${TAB_COUNT - 1}`, 'the last open is the active tab');
+    });
+
+    it('concurrent CLI processes reading different --tab targets each hit their own page', async () => {
+      const targets = [2, 5, 8, 11];
+      const results = await Promise.all(targets.map((i) =>
+        exec('node', ['bin.js', 'get', 'url', '--tab', `job-${i}`, '--json'], { cwd: ROOT, env })
+      ));
+      results.forEach(({ stdout }, idx) => {
+        const resp = JSON.parse(stdout);
+        assert.equal(resp.success, true);
+        assert.equal(resp.data.url, `https://job-${targets[idx]}.test/`, 'each concurrent read landed on its own tab');
+      });
+
+      // Parallel --tab reads never moved the active tab.
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(rows.find((row) => row.active)?.name, `job-${TAB_COUNT - 1}`);
+    });
+
+    it('re-using a taken name fails over the wire until --replace is given', async () => {
+      const conflict = await execFail(['open', 'https://newer.test/', '--as', 'job-3', '--json']);
+      assert.notEqual(conflict.code, 0);
+      const resp = JSON.parse(conflict.stdout);
+      assert.equal(resp.success, false);
+      assert.match(resp.error, /job-3/);
+      assert.match(resp.error, /--replace/);
+
+      const replaced = JSON.parse(
+        (await exec('node', ['bin.js', 'open', 'https://newer.test/', '--as', 'job-3', '--replace', '--json'], { cwd: ROOT, env })).stdout
+      );
+      assert.equal(replaced.success, true);
+      assert.equal(replaced.data.tab.name, 'job-3');
+      assert.equal(replaced.data.tab.url, 'https://newer.test/');
+
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const named = rows.filter((row) => row.name === 'job-3');
+      assert.equal(named.length, 1, 'exactly one tab holds the name after --replace');
+      assert.equal(named[0].url, 'https://newer.test/');
+    });
+  });
 });
 
 describe('sessiond lifecycle hardening (stop / restart / warning / backend flags)', () => {

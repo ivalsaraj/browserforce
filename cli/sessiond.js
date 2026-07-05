@@ -290,7 +290,12 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
       }
       // Request was valid + authed but the command failed: keep the envelope
       // contract (HTTP 200, success:false) so the CLI reads body.success.
-      sendJson(res, 200, envelope({ success: false, error: String(err?.message || err) }));
+      // Suggestions fold into the error STRING (the envelope has no extra
+      // keys), matching how bin.js formats local registry errors.
+      const suggestion = err instanceof BrowserforceCommandError && err.suggestion
+        ? ` ${err.suggestion}`
+        : '';
+      sendJson(res, 200, envelope({ success: false, error: `${String(err?.message || err)}${suggestion}` }));
     }
   }
 

@@ -409,6 +409,153 @@ describe('tab commands: tabs / use / open / rename / forget', () => {
   });
 });
 
+// ─── Stress: many tabs, parallel named tabs, name conflicts (Task 12) ────────
+// A realistic browser has dozens of tabs. These tests prove the command
+// surface stays fast, unambiguous, and identity-stable at that scale.
+
+describe('stress: many tabs, parallel named tabs, name conflicts', () => {
+  // 84 filler tabs plus three realistic "interesting" tabs buried mid-list:
+  // an MRR report whose URL carries query-string drift, and two tabs that
+  // collide on the title "Dashboard".
+  function manyTabsEnv() {
+    const pages = [];
+    for (let i = 0; i < 84; i += 1) {
+      pages.push(fakePage({
+        url: `https://site-${i}.test/path/${i}?session=${i}&theme=dark`,
+        title: `Site ${i}`,
+      }));
+    }
+    const mrr = fakePage({
+      url: 'https://app.heymantle.com/reports/mrr?range=90d&compare=prev',
+      title: 'MRR — Mantle',
+    });
+    const dashOne = fakePage({ url: 'https://one.test/home', title: 'Dashboard — One' });
+    const dashTwo = fakePage({ url: 'https://two.test/home', title: 'Dashboard — Two' });
+    pages.splice(41, 0, mrr, dashOne, dashTwo);
+    return { ...tabRuntimeEnv({ pages }), mrr, dashOne, dashTwo };
+  }
+
+  it('tabs over 87 pages returns promptly with a unique stable handle on every row', async () => {
+    const { run } = manyTabsEnv();
+    const started = Date.now();
+    const { data } = await run('tabs');
+    const elapsed = Date.now() - started;
+
+    assert.equal(data.tabs.length, 87);
+    assert.ok(elapsed < 2000, `tabs over 87 pages should return promptly (took ${elapsed}ms)`);
+    const handles = data.tabs.map((row) => row.handle);
+    assert.ok(handles.every((h) => /^t\d+$/.test(h)), 'every row carries a t<N> handle');
+    assert.equal(new Set(handles).size, handles.length, 'handles are unique across all rows');
+  });
+
+  it('use soft-matches a buried tab despite query-string drift in the live URL', async () => {
+    const { runtime, run, mrr } = manyTabsEnv();
+
+    // The live URL has ?range=90d&compare=prev; the query omits it entirely.
+    const { data } = await run('use app.heymantle.com/reports/mrr');
+    assert.equal(runtime.getActivePage(), mrr, 'soft match found the one MRR tab among 87');
+    assert.equal(data.matchedBy, 'url-substring');
+    assert.equal(data.active.url, 'https://app.heymantle.com/reports/mrr?range=90d&compare=prev');
+  });
+
+  it('ambiguous soft matches fail loudly even at scale — never silently picks one', async () => {
+    const { runtime, run, dashOne } = manyTabsEnv();
+    runtime.setActivePage(dashOne);
+
+    await assert.rejects(
+      () => run('use Dashboard'),
+      (err) => err instanceof BrowserforceCommandError
+        && err.code === 'TAB_AMBIGUOUS'
+        && /matches 2 tabs/.test(err.message)
+        && err.resetHintAllowed === false,
+    );
+    assert.equal(runtime.getActivePage(), dashOne, 'ambiguity leaves the active tab unchanged');
+  });
+
+  it('closing earlier tabs shifts positions but never moves the active logical tab', async () => {
+    const { runtime, run, pages, mrr } = manyTabsEnv();
+    await run('use app.heymantle.com/reports/mrr');
+
+    const before = (await run('tabs')).data.tabs.find((row) => row.active);
+    assert.equal(before.url, mrr.url());
+
+    // Close and remove ten tabs listed BEFORE the active one.
+    for (const page of pages.slice(0, 10)) page.closeNow();
+    pages.splice(0, 10);
+
+    const after = (await run('tabs')).data.tabs.find((row) => row.active);
+    assert.equal(runtime.getActivePage(), mrr, 'the active page object is untouched');
+    assert.equal(after.handle, before.handle, 'the stable handle survives earlier closes');
+    assert.equal(after.url, before.url);
+    assert.equal(after.index, before.index - 10, 'list position shifted — which is why handles matter');
+  });
+
+  it('parallel commands against named tabs each pin their own page; the active tab never moves', async () => {
+    const docs = fakePage({ url: 'https://docs.test/', title: 'Docs' });
+    const app = fakePage({ url: 'https://app.test/', title: 'App' });
+    const { runtime, run, runs } = pinnedRuntimeEnv({ pages: [docs, app] });
+    runtime.setActivePage(docs);
+    runtime.setNamedPage('app', app);
+    runtime.setNamedPage('docs', docs);
+
+    // Concurrent, not sequential: the per-run pin must hold under interleaving.
+    await Promise.all([
+      run('snapshot --tab app'),
+      run('snapshot --tab docs'),
+      run('click @e2 --tab app'),
+    ]);
+
+    const snapshotRuns = runs.filter((r) => /snapshotData\(/.test(r.code));
+    const clickRuns = runs.filter((r) => /locator\.click\(\)/.test(r.code));
+    assert.equal(snapshotRuns.length, 2);
+    assert.ok(snapshotRuns.some((r) => r.pinnedPage === app), 'one snapshot pinned the app page');
+    assert.ok(snapshotRuns.some((r) => r.pinnedPage === docs), 'one snapshot pinned the docs page');
+    assert.equal(clickRuns.length, 1);
+    assert.equal(clickRuns[0].pinnedPage, app, 'the click pinned the app page');
+    assert.equal(runtime.getActivePage(), docs, 'concurrent --tab work never moved the active tab');
+  });
+
+  it('12 named tabs, 12 concurrent --tab reads: every run lands on its own page', async () => {
+    const pages = Array.from({ length: 12 }, (_, i) => fakePage({
+      url: `https://tab-${i}.test/`,
+      title: `Tab ${i}`,
+    }));
+    const { runtime, run, runs } = pinnedRuntimeEnv({ pages });
+    runtime.setActivePage(pages[0]);
+    pages.forEach((page, i) => runtime.setNamedPage(`job-${i}`, page));
+
+    await Promise.all(pages.map((_, i) => run(`get url --tab job-${i}`)));
+
+    assert.equal(runs.length, 12);
+    const pinned = new Set(runs.map((r) => r.pinnedPage));
+    assert.equal(pinned.size, 12, 'no two concurrent runs shared a pinned page');
+    pages.forEach((page) => assert.ok(pinned.has(page), `${page._url} was pinned by exactly one run`));
+    assert.equal(runtime.getActivePage(), pages[0], 'the active tab never moved');
+  });
+
+  it('repeated open --as docs keeps failing until --replace moves the name', async () => {
+    const { runtime, run, pages } = tabRuntimeEnv({ pages: [] });
+    await run('open https://docs-0.test --as docs');
+    assert.equal(runtime.getNamedPage('docs'), pages[0]);
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await assert.rejects(
+        () => run(`open https://docs-${attempt}.test --as docs`),
+        (err) => err instanceof BrowserforceCommandError
+          && err.code === 'TAB_NAME_IN_USE'
+          && /--replace/.test(err.suggestion),
+        `attempt ${attempt} without --replace must fail`,
+      );
+    }
+    assert.equal(pages.length, 1, 'no losing attempt leaked an orphan tab');
+    assert.equal(runtime.getNamedPage('docs'), pages[0], 'the name never moved without --replace');
+
+    await run('open https://docs-final.test --as docs --replace');
+    assert.equal(pages.length, 2);
+    assert.equal(runtime.getNamedPage('docs'), pages[1], '--replace moved the name to the new tab');
+  });
+});
+
 describe('parseBrowserforceCommand', () => {
   it('parses bare verbs', () => {
     assert.deepEqual(parseBrowserforceCommand('tabs'), {
