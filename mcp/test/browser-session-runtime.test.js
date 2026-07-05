@@ -200,6 +200,225 @@ function makeClosablePage(closed = false) {
   return { isClosed() { if (closed === 'throw') throw new Error('detached'); return closed; } };
 }
 
+// ─── Active tab + named tab primitives ───────────────────────────────────────
+
+// Fake page with identity, closable state, and mutable url/title (to prove
+// stable handles are keyed by page identity, not by page metadata).
+function makeTabPage({ url = 'about:blank', title = 'Tab' } = {}) {
+  let closed = false;
+  return {
+    meta: { url, title },
+    isClosed: () => closed,
+    closeNow: () => { closed = true; },
+    url() { return this.meta.url; },
+    async title() { return this.meta.title; },
+    on() {},
+    mainFrame() { return 'main-frame'; },
+  };
+}
+
+function makeTabRuntime(ctxPages) {
+  return createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages: ctxPages }),
+  });
+}
+
+test('runtime starts with no explicit active tab', () => {
+  const runtime = makeTabRuntime([makeTabPage()]);
+  assert.equal(runtime.getActivePage(), null);
+});
+
+test('setActivePage pins the page and closed active pages are dropped', async () => {
+  const p1 = makeTabPage();
+  const runtime = makeTabRuntime([p1]);
+
+  runtime.setActivePage(p1);
+  assert.equal(runtime.getActivePage(), p1);
+  assert.equal(runtime.userState.page, p1, 'active page is the persistent state.page');
+
+  p1.closeNow();
+  assert.equal(runtime.getActivePage(), null, 'closed active page is dropped');
+  assert.equal(runtime.userState.page, null, 'dropped pin is cleared from state');
+
+  assert.throws(() => runtime.setActivePage(p1), /closed/i, 'cannot activate a closed page');
+});
+
+test('unnamed commands use the active page', async () => {
+  const p1 = makeTabPage({ url: 'https://one.test/' });
+  const p2 = makeTabPage({ url: 'https://two.test/' });
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages: [p1, p2] }),
+    buildExecContext: (page) => ({ page }),
+    runCode: async (_code, execCtx) => execCtx.page,
+  });
+
+  runtime.setActivePage(p2);
+  const target = await runtime.runCommand({ code: 'noop' });
+  assert.equal(target, p2, 'runCommand targets the explicitly activated page, not pages()[0]');
+});
+
+test('named tabs are stored separately from the active tab', () => {
+  const p1 = makeTabPage();
+  const p2 = makeTabPage();
+  const runtime = makeTabRuntime([p1, p2]);
+
+  runtime.setNamedPage('docs', p1);
+  runtime.setActivePage(p2);
+
+  assert.equal(runtime.getNamedPage('docs'), p1);
+  assert.equal(runtime.getActivePage(), p2);
+
+  runtime.forgetPageName('docs');
+  assert.equal(runtime.getNamedPage('docs'), null);
+  assert.equal(runtime.getActivePage(), p2, 'forgetting a name never touches the active tab');
+});
+
+test('reset clears active page and tab names', async () => {
+  const p1 = makeTabPage();
+  const runtime = makeTabRuntime([p1]);
+
+  runtime.setActivePage(p1);
+  runtime.setNamedPage('docs', p1);
+  await runtime.reset();
+
+  assert.equal(runtime.getActivePage(), null);
+  assert.equal(runtime.getNamedPage('docs'), null);
+  assert.deepEqual(runtime.listPageNames(), []);
+});
+
+test('stable handles survive page title/URL changes', async () => {
+  const p1 = makeTabPage({ url: 'https://a.test/', title: 'A' });
+  const runtime = makeTabRuntime([p1]);
+  await runtime.ensureBrowser();
+
+  const handle = runtime.getStablePageHandle(p1);
+  assert.match(handle, /^t\d+$/, 'handles use the t<N> shape');
+
+  p1.meta.url = 'https://a.test/changed';
+  p1.meta.title = 'A (changed)';
+  assert.equal(runtime.getStablePageHandle(p1), handle, 'handle is keyed by page identity, not metadata');
+});
+
+test('removing a page before the active page preserves the same logical active handle', async () => {
+  const pA = makeTabPage({ title: 'A' });
+  const pB = makeTabPage({ title: 'B' });
+  const pC = makeTabPage({ title: 'C' });
+  const ctxPages = [pA, pB, pC];
+  const runtime = makeTabRuntime(ctxPages);
+  await runtime.ensureBrowser();
+
+  const before = runtime.listStablePages();
+  assert.deepEqual(before.map((row) => row.handle), ['t1', 't2', 't3']);
+  runtime.setActivePage(pB);
+  const activeHandle = runtime.getStablePageHandle(pB);
+
+  // Close + remove the page listed BEFORE the active one.
+  pA.closeNow();
+  ctxPages.splice(ctxPages.indexOf(pA), 1);
+
+  const after = runtime.listStablePages();
+  assert.deepEqual(after.map((row) => row.handle), ['t2', 't3'], 'handles never renumber when earlier tabs close');
+  assert.equal(runtime.getStablePageHandle(runtime.getActivePage()), activeHandle);
+});
+
+test('named tab conflicts: duplicate names fail without replace, move with replace', () => {
+  const p1 = makeTabPage();
+  const p2 = makeTabPage();
+  const runtime = makeTabRuntime([p1, p2]);
+
+  runtime.setNamedPage('docs', p1);
+
+  assert.throws(
+    () => runtime.setNamedPage('docs', p2),
+    (err) => err.code === 'TAB_NAME_IN_USE',
+    'assigning an existing name without replace fails with a structured code',
+  );
+
+  const result = runtime.setNamedPage('docs', p2, { replace: true });
+  assert.equal(result.replaced, true);
+  assert.equal(runtime.getNamedPage('docs'), p2, 'replace moves the name to the new page');
+  assert.equal(p1.isClosed(), false, 'the previously named page stays open');
+});
+
+test('forgetPageName removes the mapping and reports whether it existed', () => {
+  const p1 = makeTabPage();
+  const runtime = makeTabRuntime([p1]);
+
+  runtime.setNamedPage('docs', p1);
+  assert.equal(runtime.forgetPageName('docs'), true);
+  assert.equal(runtime.getNamedPage('docs'), null);
+  assert.equal(runtime.forgetPageName('docs'), false, 'forgetting a missing name reports false');
+});
+
+test('renamePageName moves the mapping; renaming onto an existing name needs replace', () => {
+  const p1 = makeTabPage();
+  const p2 = makeTabPage();
+  const runtime = makeTabRuntime([p1, p2]);
+
+  runtime.setNamedPage('docs', p1);
+  runtime.renamePageName('docs', 'api-docs');
+  assert.equal(runtime.getNamedPage('docs'), null);
+  assert.equal(runtime.getNamedPage('api-docs'), p1);
+
+  runtime.setNamedPage('app', p2);
+  assert.throws(
+    () => runtime.renamePageName('app', 'api-docs'),
+    (err) => err.code === 'TAB_NAME_IN_USE',
+    'renaming onto a taken name fails without replace',
+  );
+
+  const moved = runtime.renamePageName('app', 'api-docs', { replace: true });
+  assert.equal(moved.replaced, true);
+  assert.equal(runtime.getNamedPage('api-docs'), p2);
+
+  assert.throws(
+    () => runtime.renamePageName('ghost', 'anything'),
+    (err) => err.code === 'TAB_NAME_NOT_FOUND',
+    'renaming an unknown name fails with a structured code',
+  );
+});
+
+test('closed pages are pruned from names and stable listings', async () => {
+  const p1 = makeTabPage();
+  const p2 = makeTabPage();
+  const ctxPages = [p1, p2];
+  const runtime = makeTabRuntime(ctxPages);
+  await runtime.ensureBrowser();
+
+  runtime.setNamedPage('docs', p1);
+  p1.closeNow();
+  ctxPages.splice(ctxPages.indexOf(p1), 1);
+
+  assert.equal(runtime.getNamedPage('docs'), null, 'names pointing at closed pages resolve to null');
+  assert.deepEqual(runtime.listPageNames(), [], 'closed pages are pruned from the name listing');
+  assert.equal(runtime.listStablePages().some((row) => row.page === p1), false);
+});
+
+test('resolveCommandPage resolves handles, names, active page, and fails structurally', async () => {
+  const p1 = makeTabPage();
+  const p2 = makeTabPage();
+  const runtime = makeTabRuntime([p1, p2]);
+  await runtime.ensureBrowser();
+
+  const [row1, row2] = runtime.listStablePages();
+  assert.equal(runtime.resolveCommandPage({ tab: row2.handle }), p2, 'resolves by stable handle');
+  assert.equal(runtime.resolveCommandPage({ tab: row2.handle.toUpperCase() }), p2, 'handles are case-insensitive');
+
+  runtime.setNamedPage('docs', p1);
+  assert.equal(runtime.resolveCommandPage({ tab: 'docs' }), p1, 'resolves by name');
+
+  runtime.setActivePage(p2);
+  assert.equal(runtime.resolveCommandPage({}), p2, 'no tab means the active page');
+  assert.equal(runtime.resolveCommandPage({ tab: row1.handle }), p1, 'resolving a tab does not require it to be active');
+  assert.equal(runtime.getActivePage(), p2, 'resolveCommandPage never changes the active tab');
+
+  assert.throws(
+    () => runtime.resolveCommandPage({ tab: 'nope' }),
+    (err) => err.code === 'TAB_NOT_FOUND' && /tabs/.test(err.message),
+    'unknown tabs fail with a structured code and a tabs suggestion',
+  );
+});
+
 test('runCommand targets a usable state.page, drops closed/throwing handles, and re-pins the fallback', async () => {
   const clock = makeFakeClock();
   const open = makeClosablePage(false);

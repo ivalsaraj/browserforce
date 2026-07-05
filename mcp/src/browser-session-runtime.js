@@ -99,6 +99,25 @@ export function createBrowserSessionRuntime(deps = {}) {
   let cachedAgentPreferences = null;
   let cachedBrowserforceRestrictions = null;
 
+  // ─── Tab identity state ──────────────────────────────────────────────────────
+  // Named tabs (user-assigned labels) live beside — never inside — the active
+  // tab so naming/forgetting a tab can never move the session focus. Stable
+  // handles (t1, t2, ...) are keyed by page identity in a WeakMap: they are
+  // assigned once per page in first-listed order and NEVER renumber when other
+  // tabs close or when the page's URL/title changes.
+  const namedPages = new Map(); // name → page
+  let stableHandles = new WeakMap(); // page → 't<N>'
+  let nextStableHandleNumber = 1;
+
+  // Structured tab-state failure. The runtime stays import-free (see header),
+  // so it throws plain Errors with a stable `code`; the command registry maps
+  // codes to agent-facing BrowserforceCommandError suggestions.
+  function tabStateError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+  }
+
   function getContext() {
     if (!browser?.isConnected()) throw new Error('Not connected to relay. Is the relay running?');
     const contexts = browser.contexts();
@@ -301,6 +320,131 @@ export function createBrowserSessionRuntime(deps = {}) {
     return first;
   }
 
+  // ─── Tab identity APIs ───────────────────────────────────────────────────────
+
+  /** Pin `page` as the persistent active tab (state.page). */
+  function setActivePage(page) {
+    if (!isUsablePage(page)) {
+      throw tabStateError('TAB_NOT_USABLE', 'Cannot activate a closed page.');
+    }
+    userState.page = page;
+    return page;
+  }
+
+  /** Current active tab, or null. Closed handles are dropped, never returned. */
+  function getActivePage() {
+    const current = userState.page;
+    if (isUsablePage(current)) return current;
+    if (current) userState.page = null;
+    return null;
+  }
+
+  /** Stable `t<N>` handle for a page — assigned once, permanent for the page. */
+  function getStablePageHandle(page) {
+    if (!page) return null;
+    let handle = stableHandles.get(page);
+    if (!handle) {
+      handle = `t${nextStableHandleNumber}`;
+      nextStableHandleNumber += 1;
+      stableHandles.set(page, handle);
+    }
+    return handle;
+  }
+
+  /** All open pages with their stable handles, in current context order. */
+  function listStablePages() {
+    return getPages()
+      .filter((page) => isUsablePage(page))
+      .map((page) => ({ handle: getStablePageHandle(page), page }));
+  }
+
+  function pruneNamedPages() {
+    for (const [name, page] of namedPages) {
+      if (!isUsablePage(page)) namedPages.delete(name);
+    }
+  }
+
+  /**
+   * Assign a user-facing name to a page. Names are unique: reassigning an
+   * in-use name requires `replace: true` (which moves the name and leaves the
+   * previously named page open and unnamed).
+   */
+  function setNamedPage(name, page, { replace = false } = {}) {
+    const key = String(name ?? '').trim();
+    if (!key) throw tabStateError('BAD_TAB_NAME', 'Tab name must be a non-empty string.');
+    if (!isUsablePage(page)) throw tabStateError('TAB_NOT_USABLE', 'Cannot name a closed page.');
+    pruneNamedPages();
+    const existing = namedPages.get(key);
+    if (existing && existing !== page && !replace) {
+      throw tabStateError('TAB_NAME_IN_USE', `Tab name "${key}" is already in use.`);
+    }
+    namedPages.set(key, page);
+    return { name: key, replaced: !!existing && existing !== page };
+  }
+
+  /** Page for a name, or null. Names pointing at closed pages are pruned. */
+  function getNamedPage(name) {
+    const key = String(name ?? '').trim();
+    const page = namedPages.get(key);
+    if (!page) return null;
+    if (!isUsablePage(page)) {
+      namedPages.delete(key);
+      return null;
+    }
+    return page;
+  }
+
+  /** Move a name to a new label. Colliding with an existing name requires replace. */
+  function renamePageName(oldName, newName, { replace = false } = {}) {
+    const from = String(oldName ?? '').trim();
+    const to = String(newName ?? '').trim();
+    if (!to) throw tabStateError('BAD_TAB_NAME', 'New tab name must be a non-empty string.');
+    const page = getNamedPage(from);
+    if (!page) throw tabStateError('TAB_NAME_NOT_FOUND', `No tab named "${from}".`);
+    if (from === to) return { name: to, replaced: false };
+    const existing = getNamedPage(to);
+    if (existing && !replace) {
+      throw tabStateError('TAB_NAME_IN_USE', `Tab name "${to}" is already in use.`);
+    }
+    namedPages.delete(from);
+    namedPages.set(to, page);
+    return { name: to, replaced: !!existing };
+  }
+
+  /** Remove a name mapping. Returns whether the name existed. */
+  function forgetPageName(name) {
+    return namedPages.delete(String(name ?? '').trim());
+  }
+
+  /** All live name → page mappings (closed pages pruned). */
+  function listPageNames() {
+    pruneNamedPages();
+    return [...namedPages.entries()].map(([name, page]) => ({ name, page }));
+  }
+
+  /**
+   * Resolve the page a command should act on WITHOUT changing the active tab.
+   * No `tab` → the persistent active page. With `tab` → exact stable handle
+   * (case-insensitive), then exact name. Throws TAB_NOT_FOUND otherwise.
+   */
+  function resolveCommandPage({ tab } = {}) {
+    if (tab == null || String(tab).trim() === '') {
+      return resolveActivePage(getContext());
+    }
+    const query = String(tab).trim();
+
+    if (/^t\d+$/i.test(query)) {
+      const wanted = query.toLowerCase();
+      const hit = listStablePages().find((row) => row.handle === wanted);
+      if (hit) return hit.page;
+    }
+
+    const named = getNamedPage(query);
+    if (named) return named;
+
+    throw tabStateError('TAB_NOT_FOUND', `No tab matched "${query}". Run tabs to list open tabs.`);
+  }
+
   /**
    * Run a user snippet against the live session through the guarded runCode()
    * boundary. Ensures the browser is connected, resolves the persistent active
@@ -345,6 +489,9 @@ export function createBrowserSessionRuntime(deps = {}) {
     cachedBrowserforceRestrictions = null;
     contextListenerAttached = false;
     consoleLogs.clear();
+    namedPages.clear();
+    stableHandles = new WeakMap();
+    nextStableHandleNumber = 1;
   }
 
   return {
@@ -373,6 +520,16 @@ export function createBrowserSessionRuntime(deps = {}) {
     getContext,
     getPages,
     runCommand,
+    setActivePage,
+    getActivePage,
+    setNamedPage,
+    getNamedPage,
+    renamePageName,
+    forgetPageName,
+    listPageNames,
+    getStablePageHandle,
+    listStablePages,
+    resolveCommandPage,
     getAgentPreferencesForSession,
     getBrowserforceRestrictionsForSession,
     reset,
