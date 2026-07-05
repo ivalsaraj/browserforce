@@ -570,18 +570,82 @@ function commandToBody({ verb, args, flags }) {
   }
 }
 
+// ─── Shared text rendering ────────────────────────────────────────────────────
+// One renderer for MCP text content and CLI human output, driven by the SAME
+// structured data as --json / sessiond envelopes — stable handles and names can
+// never exist in one surface's output and not another's.
+
+function renderTabRowsText(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return 'No tabs open.';
+  return rows
+    .map((row) => {
+      const marker = row.active ? '*' : ' ';
+      const name = row.name ? ` (${row.name})` : '';
+      return `${marker} ${row.handle}${name} ${row.title || '(untitled)'}\n    ${row.url}`;
+    })
+    .join('\n');
+}
+
+function renderSnapshotDataText(data) {
+  const refs = Array.isArray(data?.refs) ? data.refs : [];
+  const refTable = refs.length > 0
+    ? '\n\n--- Ref → Locator ---\n' + refs.map((r) => `${r.ref} (${r.role}${r.name ? ` "${r.name}"` : ''}): ${r.locator ?? '(frame-scoped; use locatorForRef)'}`).join('\n')
+    : '';
+  return `Page: ${data?.title ?? ''} (${data?.url ?? ''})\nRefs: ${refs.length} interactive elements\n\n${data?.tree || ''}${refTable}`;
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function describeTabRow(row) {
+  if (!row) return '(no active tab)';
+  const name = row.name ? ` (${row.name})` : '';
+  return `${row.handle}${name} "${row.title || '(untitled)'}" ${row.url}`;
+}
+
+/** Render a command's structured result as agent-facing text. */
+export function renderBrowserforceCommandText(verb, data) {
+  if (typeof data === 'string') return data;
+  switch (verb) {
+    case 'tabs':
+      return renderTabRowsText(data?.tabs);
+    case 'snapshot':
+      return renderSnapshotDataText(data);
+    case 'use': {
+      const line = `Active tab: ${describeTabRow(data?.active)} [matched by ${data?.matchedBy}]`;
+      return data?.warning ? `${line}\n⚠ ${data.warning}` : line;
+    }
+    case 'open': {
+      const target = data?.tab ? describeTabRow(data.tab) : '(unknown tab)';
+      return `Opened ${data?.opened} — now active: ${target}`;
+    }
+    case 'rename':
+      return `Renamed tab "${data?.renamed?.from}" → "${data?.renamed?.to}"${data?.renamed?.replaced ? ' (replaced the previous holder)' : ''}`;
+    case 'forget':
+      return `Removed tab name "${data?.forgot}".`;
+    default:
+      return safeStringify(data);
+  }
+}
+
 /**
  * Execute a CLI-compatible command string against a browser session runtime.
  * This is the single entry point for the MCP `browserforce` tool and the CLI
- * direct/`run` paths. Returns `{ data, warning }`; throws
- * BrowserforceCommandError for parse/validation/lookup failures.
+ * direct/`run` paths. Returns `{ data, warning, text }` — `data` for JSON
+ * surfaces, `text` rendered from that same data for human/MCP surfaces.
+ * Throws BrowserforceCommandError for parse/validation/lookup failures.
  */
 export async function executeBrowserforceCommand({ command, runtime, timeout } = {}) {
   const parsed = parseBrowserforceCommand(command);
   const { verb } = parsed;
 
   if (verb === 'help') {
-    return { data: COMMAND_HELP_TEXT, warning: null };
+    return { data: COMMAND_HELP_TEXT, warning: null, text: COMMAND_HELP_TEXT };
   }
 
   const body = commandToBody(parsed);
@@ -591,5 +655,5 @@ export async function executeBrowserforceCommand({ command, runtime, timeout } =
     runtime,
     timeout: resolveTimeout(timeout),
   });
-  return { data, warning: null };
+  return { data, warning: null, text: renderBrowserforceCommandText(verb, data) };
 }

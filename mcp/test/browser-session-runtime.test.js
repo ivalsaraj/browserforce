@@ -530,6 +530,34 @@ test('openNewPage creates, navigates, activates — and closes the page on navig
   assert.equal(runtime.getActivePage(), page, 'a failed open leaves the previous active tab in place');
 });
 
+test('runCommand resolves function-valued plugin deps lazily at run time', async () => {
+  const page = makeTabPage();
+  let seenHelpers = null;
+  let seenSkillRuntime = null;
+  // Simulates the MCP server: runtime constructed BEFORE plugins load, with
+  // accessors that read the plugin runtime populated later.
+  let loadedPluginRuntime = { helpers: {}, skillRuntime: {} };
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages: [page] }),
+    buildExecContext: (_page, _ctx, _state, _caps, pluginHelpers, _prefs, _restrictions, pluginSkillRuntime) => {
+      seenHelpers = pluginHelpers;
+      seenSkillRuntime = pluginSkillRuntime;
+      return {};
+    },
+    runCode: async () => 'ok',
+    pluginHelpers: () => loadedPluginRuntime.helpers,
+    pluginSkillRuntime: () => loadedPluginRuntime.skillRuntime,
+  });
+
+  // Plugins finish loading AFTER runtime construction (as in mcp/src/index.js).
+  const myHelper = () => {};
+  loadedPluginRuntime = { helpers: { myHelper }, skillRuntime: { catalog: [{ name: 'demo' }] } };
+
+  await runtime.runCommand({ code: 'noop' });
+  assert.equal(seenHelpers.myHelper, myHelper, 'late-loaded plugin helpers are visible to command runs');
+  assert.deepEqual(seenSkillRuntime.catalog, [{ name: 'demo' }], 'late-loaded skill runtime is visible too');
+});
+
 test('runCommand({ page }) pins the run to that page without touching the active tab', async () => {
   const active = makeTabPage({ title: 'Active' });
   const target = makeTabPage({ title: 'Target' });

@@ -278,6 +278,133 @@ describe('Tool Definitions', () => {
     }
   });
 
+  // Extract the full browserforce handler block (registration + async handler)
+  // for source-contract assertions.
+  function browserforceHandlerBlock(source) {
+    const start = source.indexOf('function registerBrowserforceTool()');
+    assert.ok(start !== -1, 'registerBrowserforceTool should exist');
+    const end = source.indexOf("server.tool(\n  'reset'", start);
+    assert.ok(end !== -1, 'browserforce handler block should end before the reset tool');
+    return source.slice(start, end);
+  }
+
+  it('browserforce handler delegates to the shared registry with the MCP runtime', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const block = browserforceHandlerBlock(source);
+
+    assert.ok(
+      /executeBrowserforceCommand\(\{ command, runtime, timeout \}\)/.test(block),
+      'handler must call executeBrowserforceCommand with the shared MCP runtime (same userState as exec)'
+    );
+    assert.ok(block.includes('preflightAttachedPageBeforeCdp'), 'handler runs the same preflight as exec');
+    assert.ok(block.includes("verb === 'open' ? 'open' : 'inspect'"), 'open command maps to open intent, everything else inspects');
+  });
+
+  it('browserforce handler never touches raw Playwright page/locator APIs', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const block = browserforceHandlerBlock(source);
+
+    for (const forbidden of ['.locator(', '.click(', '.newPage(', '.goto(', 'page.', 'getPages()']) {
+      assert.ok(
+        !block.includes(forbidden),
+        `browserforce handler must not call raw Playwright APIs (found "${forbidden}") — all actions go through the guarded registry/runtime boundary`
+      );
+    }
+  });
+
+  it('command path source contract: handler → registry → runtime.runCommand → runCode', () => {
+    const indexSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const registrySource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browserforce-command-registry.js'),
+      'utf8'
+    );
+    const runtimeSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
+      'utf8'
+    );
+
+    assert.ok(browserforceHandlerBlock(indexSource).includes('executeBrowserforceCommand('), 'handler calls the registry');
+    assert.ok(/runtime\.runCommand\(/.test(registrySource), 'registry executes through runtime.runCommand()');
+    // Strip comments (they legitimately mention the forbidden APIs when
+    // documenting this exact rule) before checking for real usage.
+    const registryCode = registrySource.replace(/^\s*\/\/.*$/gm, '');
+    assert.ok(
+      !/new Function\(|globalThis\.eval\(|\bvm\./.test(registryCode),
+      'registry never builds executable code outside the guarded boundary'
+    );
+    assert.ok(/await runCode\(code, execCtx, timeout\)/.test(runtimeSource), 'runtime.runCommand runs through the guarded runCode() boundary');
+  });
+
+  it('browserforce handler formats command errors without reset hints', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const block = browserforceHandlerBlock(source);
+
+    const commandErrorFn = block.slice(
+      block.indexOf('const commandErrorResponse'),
+      block.indexOf('// Parse first'),
+    );
+    assert.ok(commandErrorFn.includes('isError: true'), 'command errors are isError responses');
+    assert.ok(!commandErrorFn.includes('HINT'), 'command errors never append reset hints');
+    assert.ok(commandErrorFn.includes('err.suggestion'), 'command errors surface the structured suggestion');
+  });
+
+  it('browserforce responds over JSON-RPC: help succeeds, bad commands teach without reset hints', async () => {
+    const proc = spawn(process.execPath, ['src/index.js'], {
+      cwd: MCP_ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        BF_CDP_URL: 'ws://127.0.0.1:9/cdp?token=test',
+      },
+    });
+    const send = createRpcClient(proc);
+
+    try {
+      await send('initialize', {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'browserforce-tool-test', version: '1.0.0' },
+      });
+      proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+
+      // Real handler path: the help command needs no browser and returns the
+      // shared command help text.
+      const helpResult = await send('tools/call', {
+        name: 'browserforce',
+        arguments: { command: 'help' },
+      });
+      const helpText = helpResult.content?.[0]?.text || '';
+      assert.match(helpText, /open <url>/, 'command help lists open');
+      assert.match(helpText, /click <ref>/, 'command help lists click');
+      assert.notEqual(helpResult.isError, true);
+
+      // Unknown commands fail as teaching errors, not reset-hinted crashes.
+      const badResult = await send('tools/call', {
+        name: 'browserforce',
+        arguments: { command: 'bogus-command' },
+      });
+      assert.equal(badResult.isError, true);
+      const badText = badResult.content?.[0]?.text || '';
+      assert.match(badText, /Unknown command: bogus-command/);
+      assert.match(badText, /help/i, 'teaching error suggests help');
+      assert.ok(!badText.includes('HINT'), 'no reset hint for command errors');
+    } finally {
+      proc.kill('SIGTERM');
+    }
+  });
+
   it('execute prompt is small and starts with the help gate plus tab rules', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),

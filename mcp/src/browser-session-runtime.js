@@ -67,11 +67,17 @@ export function createBrowserSessionRuntime(deps = {}) {
     // Execution boundary deps (injected so the runtime stays decoupled from
     // exec-engine and unit-testable). runCommand is the single place CLI atomic
     // verbs run user snippets — always through runCode()'s guarded boundary.
+    // Plugin deps may be plain objects (sessiond wires them after plugin load)
+    // OR functions (lazy accessors, resolved at runCommand() time) — the MCP
+    // server constructs the runtime at module scope BEFORE loadPluginRuntime()
+    // finishes, so it passes accessors that read the loaded plugin runtime.
     buildExecContext = null,
     runCode = null,
     pluginHelpers = {},
     pluginSkillRuntime = {},
   } = deps;
+
+  const resolveDep = (dep) => (typeof dep === 'function' ? dep() : dep) || {};
 
   const doFetch = fetchImpl || globalThis.fetch;
 
@@ -616,10 +622,10 @@ export function createBrowserSessionRuntime(deps = {}) {
         ctx,
         userState,
         { consoleLogs, setupConsoleCapture, pinnedPage: pinnedPage || null },
-        pluginHelpers,
+        resolveDep(pluginHelpers),
         await getAgentPreferencesForSession(),
         await getBrowserforceRestrictionsForSession(),
-        pluginSkillRuntime,
+        resolveDep(pluginSkillRuntime),
       );
       return await runCode(code, execCtx, timeout);
     } finally {
