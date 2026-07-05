@@ -214,7 +214,10 @@ function registerExecTool(skillAppendix = '') {
         const agentPreferences = await getAgentPreferencesForSession();
         const ctx = getContext();
         const pages = ctx.pages();
-        let page = pages[0] || null;
+        // Shared active tab: the raw top-level `page` must agree with the
+        // browserforce command tool (state.page set by use/open), not silently
+        // rebind to pages[0] — on real Chrome that is an arbitrary user tab.
+        let page = runtime.getActivePage() || pages[0] || null;
 
         if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
           page = await ctx.newPage();

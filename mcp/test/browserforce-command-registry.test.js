@@ -866,7 +866,13 @@ describe('executeBrowserforceCommand → runtime.runCommand snippets', () => {
     await executeBrowserforceCommand({ command: 'get url', runtime });
     assert.match(runtime.calls[0].code, /return \{ url: page\.url\(\) \};/);
     await executeBrowserforceCommand({ command: 'get title', runtime });
-    assert.match(runtime.calls[1].code, /return \{ title: await page\.title\(\) \};/);
+    // Title reads are BOUNDED: page.title() hangs forever on lazily-attached
+    // real-Chrome tabs, so the snippet races a timeout and degrades with a
+    // teaching note instead of burning the whole run budget.
+    assert.match(runtime.calls[1].code, /Promise\.race/);
+    assert.match(runtime.calls[1].code, /page\.title\(\)/);
+    assert.match(runtime.calls[1].code, /Title unavailable/);
+    assert.match(runtime.calls[1].code, /return \{ title \};/);
   });
 
   it('get text @e2 and get html @e5 read through stored refs', async () => {

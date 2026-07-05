@@ -217,8 +217,50 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   async function waitForInitialPageDiscovery(ctx, { timeoutMs = initialPageDiscoveryTimeoutMs } = {}) {
     const started = Date.now();
-    while (ctx.pages().length === 0 && Date.now() - started < timeoutMs) {
-      await new Promise((resolve) => setTimeoutImpl(resolve, initialPageDiscoveryPollMs));
+    // Target discovery STREAMS on the relay bridge: with 100+ real tabs the
+    // first page appears immediately but the full set arrives over seconds,
+    // with irregular gaps while Playwright initializes each page. Returning
+    // early made tabs/use act on a partial list (a not-yet-discovered tab
+    // soft-matched as TAB_NOT_FOUND). Two exit conditions, bounded by
+    // timeoutMs:
+    //   1. Exact: the relay's /extension/status reports how many tab targets
+    //      exist — return as soon as Playwright has discovered them all.
+    //   2. Heuristic (relay unreachable — managed backend, tests): count is
+    //      non-zero and stable for several consecutive polls.
+    // Polls use REAL timers (not the injectable setTimeoutImpl): this is an
+    // internal wait, and fake-clock tests inject timers that never fire on
+    // their own — an injected poll timer would deadlock ensureBrowser.
+    let expectedCount = 0;
+    try {
+      const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
+      if (relayHttpUrl) {
+        const response = await doFetch(`${relayHttpUrl}/extension/status`, {
+          signal: AbortSignal.timeout(1500),
+        });
+        if (response.ok) {
+          const body = await response.json();
+          if (Array.isArray(body?.attachedTabs)) expectedCount = body.attachedTabs.length;
+        }
+      }
+    } catch { /* no relay on this backend — fall back to settle heuristic */ }
+
+    // 6 polls ≈ 600ms of no growth. Playwright's streamed page inits can gap
+    // a few hundred ms on the relay bridge; shorter windows settled early and
+    // produced partial tab lists when the exact-count fetch was unavailable.
+    const settlePolls = 6;
+    let lastCount = -1;
+    let stablePolls = 0;
+    while (Date.now() - started < timeoutMs) {
+      const count = ctx.pages().length;
+      if (expectedCount > 0 && count >= expectedCount) return;
+      if (count > 0 && count === lastCount) {
+        stablePolls += 1;
+        if (stablePolls >= settlePolls) return;
+      } else {
+        stablePolls = 0;
+      }
+      lastCount = count;
+      await new Promise((resolve) => globalThis.setTimeout(resolve, initialPageDiscoveryPollMs));
     }
   }
 
@@ -440,6 +482,27 @@ export function createBrowserSessionRuntime(deps = {}) {
    * ALL surfaces (sessiond JSON, CLI --json, MCP text rendering), so stable
    * handles can never exist in one output and not another.
    */
+  // Bounded page.title() read. On the real relay bridge, title() NEVER resolves
+  // for a tab whose debugger was never lazily attached: Playwright waits for an
+  // execution context, but the relay synthetically acked Runtime.enable while
+  // the tab was unattached (INIT_ONLY_METHODS), so no context is ever announced
+  // — and title() sends no CDP command that would trigger the lazy attach.
+  // With dozens of real tabs, one unbounded title() hangs `tabs`/`use` forever.
+  // Bound the read and fall back to '' — the URL remains the row's identifier.
+  async function pageTitleBounded(page, ms = 1000) {
+    let timer;
+    try {
+      return await Promise.race([
+        page.title(),
+        new Promise((resolve) => { timer = setTimeoutImpl(() => resolve(''), ms); }),
+      ]) || '';
+    } catch {
+      return ''; // page navigating/closed mid-read
+    } finally {
+      clearTimeoutImpl(timer);
+    }
+  }
+
   async function listTabRows() {
     await ensureBrowser();
     beginOperation();
@@ -447,24 +510,22 @@ export function createBrowserSessionRuntime(deps = {}) {
       // Use resolveActivePage (not getActivePage) so the row marked active is
       // the tab a subsequent unnamed command would actually target.
       const active = resolveActivePage(getContext());
-      const rows = [];
       const stable = listStablePages();
-      for (let index = 0; index < stable.length; index += 1) {
-        const { handle, page } = stable[index];
-        let title = '';
+      // Parallel + bounded: sequential unbounded title reads hang on real
+      // many-tab sessions (see pageTitleBounded).
+      return Promise.all(stable.map(async ({ handle, page }, index) => {
+        const title = await pageTitleBounded(page);
         let url = '';
-        try { title = await page.title(); } catch { /* page navigating/closed */ }
         try { url = page.url(); } catch { /* page closed mid-listing */ }
-        rows.push({
+        return {
           handle,
           index,
           title,
           url,
           active: page === active,
           name: nameForPage(page),
-        });
-      }
-      return rows;
+        };
+      }));
     } finally {
       endOperation();
     }
@@ -515,14 +576,14 @@ export function createBrowserSessionRuntime(deps = {}) {
         };
       }
 
-      const metas = [];
-      for (const row of stable) {
+      // Parallel + bounded title reads: see pageTitleBounded — an unbounded
+      // title() on a never-attached tab hangs forever on the relay bridge.
+      const metas = await Promise.all(stable.map(async (row) => {
         let url = '';
-        let title = '';
         try { url = row.page.url() || ''; } catch { /* closed mid-match */ }
-        try { title = (await row.page.title()) || ''; } catch { /* closed mid-match */ }
-        metas.push({ ...row, url, title });
-      }
+        const title = await pageTitleBounded(row.page);
+        return { ...row, url, title };
+      }));
       const lower = q.toLowerCase();
       const tiers = [
         ['url', metas.filter((m) => m.url === q)],

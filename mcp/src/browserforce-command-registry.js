@@ -510,7 +510,19 @@ const VERB_EXECUTORS = {
     const what = String(body?.what ?? '');
     if (what === 'url' || what === 'title') {
       const page = await resolveVerbPage({ body, runtime });
-      const code = what === 'url' ? 'return { url: page.url() };' : 'return { title: await page.title() };';
+      // page.title() hangs forever on a lazily-attached real-Chrome tab (no JS
+      // execution context is ever announced for it), so bound it and degrade
+      // with a teaching note instead of burning the whole run timeout.
+      const code = what === 'url'
+        ? 'return { url: page.url() };'
+        : `const title = await Promise.race([
+  page.title(),
+  new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+]);
+if (title === null) {
+  return { title: '', url: page.url(), note: 'Title unavailable: this tab has no JS execution context yet (BrowserForce lazy attach). Use snapshot to read the page instead.' };
+}
+return { title };`;
       return runCommandGuarded(runtime, { code, timeout, page });
     }
     if (what === 'text' || what === 'html') {
