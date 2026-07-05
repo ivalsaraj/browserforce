@@ -52,12 +52,14 @@ function makeFakeLocator(selector, frameChain = []) {
     frameLocator(sel) { return { locator: (s) => makeFakeLocator(s, [...frameChain, sel]) }; },
     async evaluate() {},
     async click() { record({ action: 'click', selector }); },
+    async hover() { record({ action: 'hover', selector }); },
     async fill(value) { record({ action: 'fill', selector, value }); },
     async type(value) { record({ action: 'type', selector, value }); },
     async pressSequentially(value) { record({ action: 'type', selector, value }); },
     async press(key) { record({ action: 'press', selector, key }); },
     async textContent() { return 'Submit'; },
     async innerText() { return 'Submit'; },
+    async innerHTML() { return '<span>Submit</span>'; },
   };
 }
 

@@ -436,6 +436,105 @@ describe('CLI session daemon', () => {
     });
   });
 
+  describe('sessiond endpoint compatibility (registry-backed /command/* envelope contract)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let lock;
+    let base;
+
+    const post = (path, body) => httpFetch('POST', `${base}${path}`, body, lock.token);
+
+    const assertEnvelopeShape = (body) => {
+      assert.deepEqual(
+        Object.keys(body).sort(),
+        ['data', 'error', 'success', 'warning'],
+        'envelope keeps the exact { success, data, error, warning } contract',
+      );
+    };
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      child = spawn('node', [SESSIOND], {
+        cwd: ROOT,
+        env: {
+          ...process.env,
+          BF_SESSIOND_LOCK_PATH: lockPath,
+          BF_BROWSER_BACKEND: 'managed',
+          BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      base = `http://127.0.0.1:${lock.port}`;
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('POST /command/snapshot keeps the envelope contract', async () => {
+      const { status, body } = await post('/command/snapshot', {});
+      assert.equal(status, 200);
+      assertEnvelopeShape(body);
+      assert.equal(body.success, true);
+      assert.equal(body.error, null);
+      assert.equal(body.data.url, 'https://fake.test/');
+      assert.ok(Array.isArray(body.data.refs));
+    });
+
+    it('POST /command/click keeps the envelope contract', async () => {
+      const { status, body } = await post('/command/click', { ref: '@e1' });
+      assert.equal(status, 200);
+      assertEnvelopeShape(body);
+      assert.equal(body.success, true);
+      assert.equal(body.data.clicked, 'e1');
+    });
+
+    it('POST /command/fill keeps the envelope contract', async () => {
+      const { status, body } = await post('/command/fill', { ref: '@e1', text: 'hello' });
+      assert.equal(status, 200);
+      assertEnvelopeShape(body);
+      assert.equal(body.success, true);
+      assert.equal(body.data.filled, 'e1');
+    });
+
+    it('POST /command/hover and get html reach the new registry commands', async () => {
+      const hover = await post('/command/hover', { ref: '@e1' });
+      assert.equal(hover.status, 200);
+      assert.equal(hover.body.success, true);
+      assert.equal(hover.body.data.hovered, 'e1');
+
+      const html = await post('/command/get', { what: 'html', ref: '@e1' });
+      assert.equal(html.status, 200);
+      assert.equal(html.body.success, true);
+      assert.equal(html.body.data.html, '<span>Submit</span>');
+    });
+
+    it('command failures stay HTTP 200 with success:false (envelope, not status)', async () => {
+      const unknownRef = await post('/command/click', { ref: '@e404' });
+      assert.equal(unknownRef.status, 200);
+      assertEnvelopeShape(unknownRef.body);
+      assert.equal(unknownRef.body.success, false);
+      assert.match(unknownRef.body.error, /Unknown ref/);
+
+      const badPress = await post('/command/press', {});
+      assert.equal(badPress.status, 200);
+      assert.equal(badPress.body.success, false);
+      assert.match(badPress.body.error, /press requires a key/);
+    });
+
+    it('unknown verbs still return HTTP 501', async () => {
+      const { status, body } = await post('/command/bogus', {});
+      assert.equal(status, 501);
+      assert.equal(body.success, false);
+      assert.match(body.error, /command not implemented: bogus/);
+    });
+  });
+
   describe('wait/get/eval verbs (real CLI path → sessiond → runCode)', () => {
     const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
     let child;

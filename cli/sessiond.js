@@ -37,8 +37,11 @@ import {
   clearSessiondLock,
   writeSessiondUrl,
   clearSessiondUrl,
-  normalizeRef,
 } from './session-client.js';
+import {
+  executeBrowserforceVerb,
+  BrowserforceCommandError,
+} from '../mcp/src/browserforce-command-registry.js';
 import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
 
 const HOST = '127.0.0.1';
@@ -176,41 +179,6 @@ function envelope({ success = true, data = null, error = null, warning = null } 
   return { success, data, error, warning };
 }
 
-// Build a ref-interaction snippet that resolves a stored ref via locatorForRef()
-// inside runCode(), then runs `actionLine` (already containing JSON-encoded
-// literals) and returns `returnExpr`. Refs/text are passed as JSON literals, so
-// untrusted input is never concatenated as executable code.
-function refLocatorSnippet(ref, actionLine, returnExpr) {
-  const unknown = `Unknown ref: ${ref}. Run \`browserforce snapshot --sessiond\` again to refresh refs.`;
-  return [
-    `const locator = locatorForRef({ ref: ${JSON.stringify(ref)} });`,
-    `if (!locator) throw new Error(${JSON.stringify(unknown)});`,
-    actionLine,
-    `return ${returnExpr};`,
-  ].join('\n');
-}
-
-// Build a `wait` snippet using Playwright's own waiters (their internal polling
-// + the passed timeout keep it abort-safe). The value is always a JSON literal.
-function waitSnippet(kind, value, timeout) {
-  const v = JSON.stringify(value ?? '');
-  const t = Number(timeout) || 30000;
-  switch (kind) {
-    case 'text':
-      return `await page.waitForFunction((s) => !!document.body && document.body.innerText.toLocaleLowerCase().includes(String(s).toLocaleLowerCase()), ${v}, { timeout: ${t}, polling: 100 });\nreturn { waited: 'text', text: ${v} };`;
-    case 'url':
-      return `await page.waitForURL(${v}, { timeout: ${t} });\nreturn { waited: 'url', url: page.url() };`;
-    case 'load': {
-      const state = value || 'load';
-      return `await page.waitForLoadState(${JSON.stringify(state)}, { timeout: ${t} });\nreturn { waited: 'load', state: ${JSON.stringify(state)} };`;
-    }
-    case 'fn':
-      return `await page.waitForFunction(${v}, undefined, { timeout: ${t}, polling: 100 });\nreturn { waited: 'fn' };`;
-    default:
-      return null;
-  }
-}
-
 export async function startSessiond({ lockPath, urlPath } = {}) {
   const token = process.env.BF_SESSIOND_TOKEN || randomBytes(32).toString('base64url');
   const envPort = Number(process.env.BF_SESSIOND_PORT || 0);
@@ -303,104 +271,23 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
     sendJson(res, 404, envelope({ success: false, error: `not found: ${path}` }));
   }
 
-  // Atomic verbs. Each verb builds a snippet that calls an exec-context helper
-  // and routes it through runtime.runCommand() → runCode() (the guarded
-  // execution boundary). No helper is ever called outside runCode().
+  // Atomic verbs. Verb execution lives in the shared command registry
+  // (mcp/src/browserforce-command-registry.js) so the CLI, sessiond, and the
+  // MCP `browserforce` tool share identical behavior: every action routes
+  // through runtime.runCommand() → runCode() (the guarded execution boundary).
+  // This handler only owns the sessiond HTTP envelope contract.
   async function handleCommand(verb, body, res) {
-    const requested = Number(body?.timeout);
-    const timeout = Number.isFinite(requested) && requested > 0 ? requested : 30000;
-    // Attach the managed-fallback warning to EVERY command envelope (not just
-    // snapshot) so the mandatory warning is visible regardless of which verb the
-    // user runs first. It is null when no fallback occurred.
-    const withWarning = (data) => envelope({ data, warning: runtime.getBackendInfo().warning });
     try {
-      if (verb === 'snapshot') {
-        const args = {
-          selector: body?.selector,
-          search: body?.search,
-          interactiveOnly: body?.interactiveOnly === true,
-        };
-        const code = `return await snapshotData(${JSON.stringify(args)});`;
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'click') {
-        const ref = normalizeRef(body?.ref);
-        const code = refLocatorSnippet(ref, `await locator.click();`, `{ clicked: ${JSON.stringify(ref)} }`);
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'fill') {
-        const ref = normalizeRef(body?.ref);
-        const text = String(body?.text ?? '');
-        const code = refLocatorSnippet(ref, `await locator.fill(${JSON.stringify(text)});`, `{ filled: ${JSON.stringify(ref)} }`);
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'type') {
-        const ref = normalizeRef(body?.ref);
-        const text = String(body?.text ?? '');
-        const code = refLocatorSnippet(ref, `await locator.pressSequentially(${JSON.stringify(text)});`, `{ typed: ${JSON.stringify(ref)} }`);
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'press') {
-        const key = String(body?.key ?? '');
-        if (!key) { sendJson(res, 200, envelope({ success: false, error: 'press requires a key' })); return; }
-        const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'wait') {
-        const kind = String(body?.kind ?? '');
-        const value = body?.value;
-        const code = waitSnippet(kind, value, timeout);
-        if (!code) { sendJson(res, 200, envelope({ success: false, error: `unknown wait kind: ${kind}` })); return; }
-        // Give runCode headroom beyond the inner Playwright waiter so the waiter
-        // times out first with a precise message before the hard run abort.
-        const data = await runtime.runCommand({ code, timeout: timeout + 5000 });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'get') {
-        const what = String(body?.what ?? '');
-        let code;
-        if (what === 'url') code = `return { url: page.url() };`;
-        else if (what === 'title') code = `return { title: await page.title() };`;
-        else if (what === 'text') {
-          code = refLocatorSnippet(normalizeRef(body?.ref), '', `{ text: await locator.textContent() }`);
-        } else {
-          sendJson(res, 200, envelope({ success: false, error: `unknown get target: ${what}` }));
-          return;
-        }
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      if (verb === 'eval') {
-        const code = String(body?.code ?? '');
-        if (!code.trim()) { sendJson(res, 200, envelope({ success: false, error: 'eval requires code' })); return; }
-        // The user's code IS the snippet — same guarded runCode() boundary as
-        // MCP execute / CLI -e. Never eval()/new Function() at the caller.
-        const data = await runtime.runCommand({ code, timeout });
-        sendJson(res, 200, withWarning(data));
-        return;
-      }
-
-      sendJson(res, 501, envelope({ success: false, error: `command not implemented: ${verb}` }));
+      const data = await executeBrowserforceVerb({ verb, body, runtime });
+      // Attach the managed-fallback warning to EVERY command envelope (not just
+      // snapshot) so the mandatory warning is visible regardless of which verb
+      // the user runs first. It is null when no fallback occurred.
+      sendJson(res, 200, envelope({ data, warning: runtime.getBackendInfo().warning }));
     } catch (err) {
+      if (err instanceof BrowserforceCommandError && err.code === 'UNKNOWN_VERB') {
+        sendJson(res, 501, envelope({ success: false, error: err.message }));
+        return;
+      }
       // Request was valid + authed but the command failed: keep the envelope
       // contract (HTTP 200, success:false) so the CLI reads body.success.
       sendJson(res, 200, envelope({ success: false, error: String(err?.message || err) }));
