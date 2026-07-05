@@ -19,8 +19,9 @@ cookies, and extensions already active. No headless browser, no fresh profiles.
 ## Load the full runtime skill first
 
 This file is a quick-start stub. For the complete, up-to-date guide — the
-persistent session daemon, atomic verbs (`click`/`fill`/`wait`/`get`/`eval`),
-the snapshot-and-ref workflow, and troubleshooting — load the runtime skill:
+session commands (`open`/`tabs`/`use`/`snapshot`/`click`/`fill`/`wait`/`get`/`eval`),
+the snapshot-and-ref workflow, multi-tab handling, and troubleshooting — load
+the runtime skill:
 
 ```bash
 browserforce skills get core          # the full core guide
@@ -35,35 +36,66 @@ The user must have:
 
 Check with: `browserforce status`
 
-## Quick Reference
+## Use commands first
+
+Session commands share one persistent browser session (and snapshot refs)
+across CLI calls — the same command language as the MCP `browserforce` tool:
 
 ```bash
-browserforce status              # Check relay + extension status
-browserforce tabs                # List open tabs
-browserforce snapshot [n]        # Accessibility tree of tab n
+browserforce tabs                # List tabs: stable t<N> handles + names
+browserforce use t2              # Switch the active tab
+browserforce open <url> --as docs  # Open a new tab, optionally named
+browserforce snapshot            # Accessibility tree + @eN refs
+browserforce click @e2           # Act on a ref from the last snapshot
 browserforce screenshot [n]      # Screenshot tab n (PNG to stdout)
-browserforce navigate <url>      # Open URL in new tab
-browserforce -e "<code>"         # Run Playwright JavaScript (one-shot)
+browserforce -e "<code>"         # Raw Playwright JavaScript (one-shot escape hatch)
 ```
 
-## Two execution paths
-
-- **Persistent session (preferred)** — `browserforce snapshot --sessiond` then
-  atomic verbs (`click`/`fill`/`type`/`press`/`wait`/`get`/`eval`) share one
-  browser session and its `@eN` refs across commands. See
-  `browserforce skills get core`.
-- **One-shot `-e`** — each `browserforce -e` call is independent (state does NOT
-  persist between `-e` calls). Do everything in a single `-e` snippet.
+Use `-e` only when the command layer cannot express the task.
 
 ## Core Workflow: Observe → Act → Observe
 
-### Quick observation (no code needed)
 ```bash
-browserforce snapshot 0          # See what's on tab 0
-browserforce tabs                # List all tabs
+browserforce open https://example.com/login
+browserforce snapshot                      # find the email/password/submit refs
+browserforce fill @e3 "user@example.com"
+browserforce fill @e4 "hunter2"
+browserforce click @e5
+browserforce wait url "**/dashboard"
+browserforce snapshot                      # verify the result
 ```
 
-### Navigate and read a page
+Refs go stale the moment the page changes — always re-snapshot before the next
+ref interaction.
+
+### Multi-tab work
+
+```bash
+browserforce open https://docs.example.com --as docs
+browserforce open https://app.example.com --as app
+browserforce snapshot --tab app            # read app without switching tabs
+browserforce click @e2 --tab app
+browserforce use docs                      # or switch the active tab
+```
+
+Target tabs by stable handle (`t2`) or name — never by list position. Tab
+names are unique; pass `--replace` only when you intentionally want to move a
+name to another tab.
+
+### Extract data
+
+```bash
+browserforce get url                       # current URL
+browserforce get text @e5                  # text content of a ref
+browserforce get html @e5                  # innerHTML of a ref
+echo "return await page.title();" | browserforce eval --stdin
+```
+
+### One-shot `-e` (escape hatch)
+
+Each `browserforce -e` call is independent (state does NOT persist between
+`-e` calls). Do everything in a single snippet:
+
 ```bash
 browserforce -e "
   state.page = await context.newPage();
@@ -73,62 +105,24 @@ browserforce -e "
 "
 ```
 
-Note: `snapshot()` reads from `state.page` (if set) or `page` (default tab 0).
-Always assign `state.page` when creating a new page so `snapshot()` reads the right tab.
-
-### Click and verify
-```bash
-browserforce -e "
-  state.page = context.pages()[context.pages().length - 1];
-  await state.page.locator('role=button[name=\"Next\"]').click();
-  await waitForPageLoad();
-  return await snapshot();
-"
-```
-
-### Fill a form
-```bash
-browserforce -e "
-  state.page = context.pages()[context.pages().length - 1];
-  await state.page.locator('role=textbox[name=\"Email\"]').fill('user@example.com');
-  return await snapshot();
-"
-```
-
-### Extract data
-```bash
-browserforce -e "
-  const p = context.pages()[context.pages().length - 1];
-  return await p.evaluate(() => document.querySelector('.price').textContent);
-"
-```
-
-### Screenshot
-```bash
-browserforce screenshot 0 > page.png
-# or via -e:
-browserforce -e "
-  state.page = context.pages()[0];
-  return await state.page.screenshot();
-" > page.png
-```
-
 ## Rules
 
-1. **snapshot() over screenshot()** — snapshot returns text (fast, cheap).
+1. **snapshot over screenshot** — snapshot returns text (fast, cheap).
    Use screenshot only for visual layout verification.
-2. **One-shot execution** — each -e call is independent. Do all steps in one call.
-3. **Don't navigate existing tabs** — create your own via `context.newPage()`
-   or `browserforce navigate <url>`.
-4. **Use convenience commands** for simple operations: `browserforce tabs`,
-   `browserforce snapshot`, `browserforce screenshot`.
-5. **waitForPageLoad()** — call after navigation or clicks that trigger page loads.
+2. **Re-snapshot after every page change** — refs go stale immediately.
+3. **Don't navigate existing tabs** — open your own via `browserforce open`.
+4. **Commands over `-e`** — reach for raw Playwright only when the command
+   layer cannot express the task.
+5. **Command errors teach the next step** — stale ref → re-snapshot; unknown
+   tab → `browserforce tabs`. Fix and retry.
 
 ## Error Recovery
 
-- Connection lost: User must check `browserforce status`
-- No tabs: `browserforce navigate https://example.com`
-- Element not found: `browserforce -e "return await snapshot({ search: 'button' })"`
+- "Unknown ref": the page changed — `browserforce snapshot`, use the new refs
+- "No tab named …": `browserforce tabs`, target a listed handle or name
+- Connection lost: user must check `browserforce status`
+- No tabs: `browserforce open https://example.com`
+- Element not found: `browserforce snapshot --search "button"`
 
 ## Important
 

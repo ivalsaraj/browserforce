@@ -179,6 +179,30 @@ describe('skills-cmd: real CLI path (browserforce skills ...)', () => {
     assert.match(res.data[0].content, /BrowserForce/);
   });
 
+  it('shipped core skill teaches the unified command workflow (not legacy forms)', async () => {
+    const { stdout } = await exec('node', ['bin.js', 'skills', 'get', 'core', '--full', '--json'], { cwd: ROOT });
+    const res = JSON.parse(stdout);
+    const content = res.data[0].content;
+
+    // Session commands + multi-tab named-tab workflow are the primary path.
+    assert.match(content, /browserforce open .* --as docs/);
+    assert.match(content, /browserforce use t2/);
+    assert.match(content, /browserforce snapshot\b/);
+    assert.match(content, /--tab docs/);
+    assert.match(content, /--replace/);
+    assert.match(content, /run "click @e2 --tab docs"|browserforce run "/);
+    // Brittle guidance stays out (last-page indexing; --sessiond spelling).
+    assert.ok(!/pages\(\)\[.*length - 1\]/.test(content), 'core skill must not teach last-page indexing');
+    assert.ok(!content.includes('--sessiond'), 'core skill must not teach the legacy --sessiond spelling');
+    // Stable-handle rule is explicit.
+    assert.match(content, /never by list position/);
+
+    const commandsRef = res.data[0].files.find((f) => f.path === 'references/commands.md');
+    assert.ok(commandsRef, 'commands reference ships with the skill');
+    assert.match(commandsRef.content, /browserforce open <url> \[--as name\] \[--replace\]/);
+    assert.match(commandsRef.content, /stable `t<N>` handles/);
+  });
+
   it('skills get core --full --json attaches references/commands.md', async () => {
     const { stdout } = await exec('node', ['bin.js', 'skills', 'get', 'core', '--full', '--json'], { cwd: ROOT });
     const res = JSON.parse(stdout);

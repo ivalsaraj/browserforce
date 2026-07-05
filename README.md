@@ -24,7 +24,7 @@ When you ask an agent to inspect an existing page, BrowserForce exposes open Chr
 | Tab access     | N/A (new browser)    | Managed by agent        | Click each tab          | Click each tab       | **Open tabs + manual attached tabs** |
 | Autonomous     | Yes                  | Yes                     | No (manual click)       | No (manual click)    | **Yes (fully autonomous)**           |
 | Context method | Screenshots (100KB+) | Screenshots + snapshots | A11y snapshots (5-20KB) | Screenshots (100KB+) | **A11y snapshots (5-20KB), also support screenshots**          |
-| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **3 tools: `execute`, `help`, `reset` + extend via plugins** |
+| Tools          | Many dedicated       | 1 `browser` tool        | 1 `execute` tool        | Built-in             | **4 tools: `browserforce`, `exec`, `help`, `reset` + extend via plugins** |
 | Agent support  | Any MCP client       | OpenClaw only           | Any MCP client          | Claude only          | **Any MCP client**                   |
 | Playwright API | Partial              | No                      | Full                    | No                   | **Full**                             |
 
@@ -374,10 +374,8 @@ npm install -g browserforce   # or: pnpm add -g browserforce
 ```bash
 browserforce serve              # Start the relay server
 browserforce status             # Check relay and extension status
-browserforce tabs               # List open browser tabs
-browserforce snapshot [n]       # Accessibility tree of tab n
 browserforce screenshot [n]     # Screenshot tab n (PNG to stdout)
-browserforce navigate <url>     # Open URL in a new tab
+browserforce navigate <url>     # Open URL in a new tab (one-shot, no session)
 browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
 browserforce skills get core    # Print the runtime agent skill (--full for references)
 browserforce doctor [--fix]     # Diagnose relay/extension/sidecars/backend
@@ -394,32 +392,46 @@ browserforce install-extension  # Copy extension to ~/.browserforce/extension/
 
 Setup flags: `--dry-run` (preview), `--no-autostart` (skip OS login daemon/service registration only), `--json` (machine-readable output).
 
-#### Persistent CLI session: the atomic verb loop
+#### Persistent CLI session: the command loop
 
 For step-by-step agent work the CLI runs a small **session daemon** (`sessiond`)
 that holds one browser session, so state and snapshot refs persist across
-separate commands. This is the natural observe → act → observe loop:
+separate commands. The CLI speaks the **same command language as the MCP
+`browserforce` tool** — examples transfer 1:1 between surfaces. This is the
+natural observe → act → observe loop:
 
 ```bash
-browserforce snapshot --sessiond            # accessibility tree + @eN refs (shared session)
+browserforce open https://example.com --as docs   # open a new tab (optionally named)
+browserforce tabs                             # list tabs: stable t<N> handles + names + active marker
+browserforce use t2                           # switch the active tab (handle, name, or title/url text)
+browserforce snapshot                         # accessibility tree + @eN refs (shared session)
 browserforce click @e3                        # act on a ref from the snapshot
+browserforce hover @e3                        # hover a ref
 browserforce fill @e2 "user@example.com"      # clear + type
 browserforce type @e2 " more"                 # type without clearing
 browserforce press Enter                      # press a key
-browserforce wait --text "saved"              # case-insensitive; or --url <glob> / --load <state> / --fn <expr>
-browserforce get url | title | text @e5       # read page/element data
+browserforce wait text "saved"                # case-insensitive; also url <glob> / load <state> / fn <expr>
+browserforce get url | title | text @e5 | html @e5   # read page/element data
 echo 'return await snapshot()' | browserforce eval --stdin   # run piped Playwright JS in the session
+browserforce rename docs api-docs             # rename a tab name
+browserforce forget api-docs                  # remove a tab name
+browserforce run "click @e2 --tab docs"       # run any command string verbatim
 browserforce session start | status | stop    # manage the daemon (auto-starts; idles out after 5m)
 ```
 
+Ref/read commands accept `--tab <handle|name|text>` to target a specific tab
+without switching the active one. Tab names are unique — pass `--replace` only
+when you intentionally want to move a name to another tab.
+
 Refs accept `@e1`, `e1`, or `ref=e1` and go stale the moment the page changes —
-re-snapshot before the next ref interaction. Every verb routes through the same
-guarded `runCode()` boundary as the MCP `execute` tool; add `--json` for a
-`{ success, data, error, warning }` envelope.
+re-snapshot before the next ref interaction. Every command routes through the
+same guarded `runCode()` boundary as the MCP `exec` tool; add `--json` for a
+`{ success, data, error, warning }` envelope (`tabs --json` prints the rows
+array directly, a superset of the old `index`/`title`/`url` shape).
 
 One-shot `-e` stays independent (state does not persist between `-e` calls) for
-self-contained scripts. For a persistent session, use `--sessiond` (above) or
-the MCP server.
+self-contained scripts. For a persistent session, use the session commands
+(above) or the MCP server.
 
 #### Backend modes (real Chrome first)
 
@@ -482,7 +494,7 @@ The core onboarding above stays visible. The sections below keep full detail, or
 
 ## Plugins
 
-Plugins add custom helpers directly into the `execute` tool scope. Install once — your agent calls them like built-in functions.
+Plugins add custom helpers directly into the `exec` tool scope. Install once — your agent calls them like built-in functions.
 
 ### Install a plugin
 
@@ -490,11 +502,11 @@ Plugins add custom helpers directly into the `execute` tool scope. Install once 
 browserforce plugin install highlight
 ```
 
-That's it. Restart MCP (or Claude Desktop) after every plugin install or update, then `highlight()` is available in every `execute` call.
+That's it. Restart MCP (or Claude Desktop) after every plugin install or update, then `highlight()` is available in every `exec` call.
 
 ### Prompt behavior (metadata-first)
 
-Plugin `SKILL.md` content is no longer fully inlined into the default `execute` prompt. BrowserForce now exposes plugin metadata first (name, description, helpers), then loads details on demand:
+Plugin `SKILL.md` content is no longer fully inlined into the default `exec` prompt. BrowserForce now exposes plugin metadata first (name, description, helpers), then loads details on demand:
 
 - Call `pluginCatalog()` to discover installed plugins, helper names, and available sections.
 - Call `pluginHelp(name, section?)` only when you need plugin-specific instructions.
@@ -556,7 +568,7 @@ export default {
 };
 ```
 
-Drop it in `~/.browserforce/plugins/my-plugin/`, restart MCP, and call `await scrollToBottom()` or `await countLinks()` from any `execute` call.
+Drop it in `~/.browserforce/plugins/my-plugin/`, restart MCP, and call `await scrollToBottom()` or `await countLinks()` from any `exec` call.
 
 Add a `SKILL.md` file alongside `index.js` to publish plugin metadata and help text. The default prompt includes only metadata; fetch full or sectioned guidance on demand with `pluginHelp('my-plugin')` or `pluginHelp('my-plugin', 'examples')`.
 
@@ -589,7 +601,20 @@ No token config needed for MCP — the server reads it automatically from `~/.br
 
 ## What Your Agent Can Do
 
-Once connected, your agent has full Playwright access to your real browser:
+Agents drive the browser with high-level commands first (the `browserforce`
+tool — same command language as the CLI):
+
+```text
+browserforce "open https://example.com --as docs"
+browserforce "tabs"                  → t1 (docs) Example Domain — the active marker + names
+browserforce "snapshot"              → accessibility tree with @eN refs
+browserforce "click @e2"
+browserforce "fill @e3 'user@example.com'"
+browserforce "snapshot --tab docs"   → read a tab without switching to it
+```
+
+And when the command layer cannot express the task, `exec` gives full
+Playwright access to your real browser:
 
 ```javascript
 // Navigate (uses your cookies — no login needed)
@@ -619,19 +644,20 @@ state.results = await page.evaluate(() => document.title);
 
 | Tool      | Description                                                                                                                                                                                                                    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `execute` | Run Playwright JavaScript in your real Chrome. The prompt is intentionally small so agents see the help gate and tab rules before truncation. |
+| `browserforce` | Run high-level commands (`tabs`, `use`, `open`, `snapshot`, `click`, `fill`, `wait`, `get`, `eval`, …). The primary tool — one command string per call, stable tab handles, named tabs, `--tab` routing. |
+| `exec` | Run Playwright JavaScript in your real Chrome. The escape hatch for work the command layer cannot express. The prompt is intentionally small so agents see the help gate and tab rules before truncation. |
 | `help`    | Read detailed BrowserForce guidance by section. Section reads are cached per MCP session; `help` does not connect to Chrome or CDP. |
-| `reset`   | Reconnect to the relay and clear state. Use when the connection drops.                                                                                                                                                         |
+| `reset`   | Reconnect to the relay and clear state. Use only for real connection/session corruption — command failures teach their own recovery.                                                                                                                                                         |
 
-`execute` keeps only the visible operating contract in its tool description.
-Call `help(section)` for detailed guidance such as tabs, navigation, snapshots,
-logs, raw CDP, plugins, errors, parallel work, and examples. No separate
-BrowserForce skill is required.
+`exec` keeps only the visible operating contract in its tool description.
+Call `help(section)` for detailed guidance such as commands, tabs, navigation,
+snapshots, logs, raw CDP, plugins, errors, parallel work, and examples. No
+separate BrowserForce skill is required.
 
 
 ### Diff-Aware Helpers
 
-Use `showDiffSinceLastCall` to control diff output vs full output in execute helper calls:
+Use `showDiffSinceLastCall` to control diff output vs full output in exec helper calls:
 
 ```javascript
 await snapshot({ showDiffSinceLastCall: true });
@@ -686,6 +712,18 @@ Get started with simple prompts. The AI generates code and does the work.
 
 
 ### Multi-Tab Workflows
+
+Agents keep multiple named tabs and read them without switching — stable `t<N>`
+handles and names mean no tab is ever targeted by list position:
+
+```text
+browserforce "open https://example.com --as docs"
+browserforce "open https://app.heymantle.com --as app"
+browserforce "snapshot --tab app"
+browserforce "snapshot --tab docs"
+```
+
+Name conflicts fail by default; `--replace` moves a name intentionally.
 
 **Example 3: Search → Extract → Return**
 
@@ -898,7 +936,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 - **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
 - **Rotate-visible demo mode (`rotate-visible`)**: Temporarily normalized to `foreground-tab` while the visibility lock is enforced.
 
-MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new execute calls.
+MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new exec calls.
 
 
 ### Controlled Tab Workflows
@@ -1120,7 +1158,7 @@ This is the structured `BF_NEW_TABS_DISABLED` / `BF_NO_ATTACHED_PAGE` response. 
 Recovery depends on the flow:
 
 - **Manual / no-new-tabs / current-tab flow:** attach a tab with the BrowserForce extension popup first, then retry. Confirm with `curl -s http://127.0.0.1:19222/extension/status | jq` that `manualAttachedTabs` is non-empty (or `activeManualTargets > 0`).
-- **Explicit open / navigate flow (`execute({ intent: 'open' })`):** the relay guard will only honor this when `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`. Ask the user to relax restrictions in the extension popup, or call `execute` without `intent: 'open'`.
+- **Explicit open / navigate flow (`exec({ intent: 'open' })`):** the relay guard will only honor this when `restrictions.mode !== 'manual'` and `restrictions.noNewTabs !== true`. Ask the user to relax restrictions in the extension popup, or call `exec` without `intent: 'open'`.
 - **Crash-safe default:** BrowserForce no longer auto-creates a tab. To restore the legacy auto-bootstrap, set `BF_ALLOW_IMPLICIT_STARTUP_PAGE=1` on the MCP process.
 
 ### MCP Error: `BF_RESTRICTIONS_UNAVAILABLE`
