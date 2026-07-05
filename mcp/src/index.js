@@ -184,6 +184,11 @@ TAB RULES:
 Use state.page for ongoing work. Use intent:'open' only when the user asked to open/navigate.
 For details call help(section).`;
 
+// Reset guidance — appended ONLY to connection/internal failures. Command
+// errors (stale refs, tab lookups, selector/action failures, parse errors)
+// must never carry it: agents over-reset, and reset destroys session state.
+const RESET_HINT = '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
+
 function registerExecTool(skillAppendix = '') {
   server.tool(
     'exec',
@@ -231,7 +236,7 @@ function registerExecTool(skillAppendix = '') {
           return { content };
         } catch (err) {
           const isTimeout = err instanceof CodeExecutionTimeoutError;
-          const hint = isTimeout ? '' : '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
+          const hint = isTimeout ? '' : RESET_HINT;
           return {
             content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
             isError: true,
@@ -266,11 +271,13 @@ function registerBrowserforceTool() {
     },
     async ({ command, timeout = 30000 }) => {
       const commandErrorResponse = (err) => {
-        // Structured command errors teach the next step. They are never
-        // connection failures, so no reset hint is appended here.
-        const suggestion = err.suggestion ? `\n${err.suggestion}` : '';
+        // Structured command errors teach the next step. Reset guidance is
+        // appended ONLY when the error explicitly allows it (connection or
+        // internal failures) — never for selector/stale-ref/tab/parse errors.
+        const suggestion = err.suggestion ? `\nSuggestion: ${err.suggestion}` : '';
+        const hint = err.resetHintAllowed === true ? RESET_HINT : '';
         return {
-          content: [{ type: 'text', text: `Error: ${err.message}${suggestion}` }],
+          content: [{ type: 'text', text: `Error: ${err.message}${suggestion}${hint}` }],
           isError: true,
         };
       };
@@ -316,7 +323,7 @@ function registerBrowserforceTool() {
         // Connection/internal failures — the only class where reset guidance
         // is appropriate.
         return {
-          content: [{ type: 'text', text: `Error: ${err.message}\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]` }],
+          content: [{ type: 'text', text: `Error: ${err.message}${RESET_HINT}` }],
           isError: true,
         };
       } finally {

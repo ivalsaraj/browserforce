@@ -322,6 +322,7 @@ describe('tab commands: tabs / use / open / rename / forget', () => {
       (err) => err instanceof BrowserforceCommandError
         && err.code === 'TAB_AMBIGUOUS'
         && /t1/.test(err.message) && /t2/.test(err.message)
+        && /t<N> handle|more specific/.test(err.suggestion)
         && err.resetHintAllowed === false,
     );
     assert.equal(runtime.getActivePage(), a, 'ambiguity leaves the active tab unchanged');
@@ -784,6 +785,94 @@ describe('executeBrowserforceVerb (sessiond JSON body path)', () => {
       executeBrowserforceVerb({ verb: 'bogus', body: {}, runtime: fakeRuntime() }),
       (err) => err instanceof BrowserforceCommandError && err.code === 'UNKNOWN_VERB'
         && /command not implemented: bogus/.test(err.message),
+    );
+  });
+});
+
+// ─── Run-failure shaping (Task 10) ────────────────────────────────────────────
+// runtime.runCommand() failures must come back agent-actionable: stale refs
+// teach re-snapshot, action failures never mention reset, and only
+// connection/timeout failures pass through raw for transport-level handling.
+
+describe('run-failure shaping', () => {
+  function throwingRuntime(error) {
+    return {
+      async runCommand() { throw error; },
+    };
+  }
+
+  it('stale refs teach re-snapshot with no reset hint (click, hover, get html)', async () => {
+    const staleError = new Error('Unknown ref: e2. Run snapshot again to refresh refs.');
+    for (const command of ['click @e2', 'hover @e2', 'get html @e2']) {
+      await assert.rejects(
+        () => executeBrowserforceCommand({ command, runtime: throwingRuntime(staleError) }),
+        (err) => {
+          assert.ok(err instanceof BrowserforceCommandError, `${command}: wrapped as a command error`);
+          assert.equal(err.code, 'STALE_REF');
+          assert.match(err.suggestion, /browserforce "snapshot"/, `${command}: suggests re-snapshot`);
+          assert.equal(err.resetHintAllowed, false, `${command}: never allows a reset hint`);
+          return true;
+        },
+      );
+    }
+  });
+
+  it('selector/action failures become COMMAND_FAILED with no reset hint', async () => {
+    const actionError = new Error('locator.click: Timeout 30000ms exceeded.');
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'click @e1', runtime: throwingRuntime(actionError) }),
+      (err) => {
+        assert.ok(err instanceof BrowserforceCommandError);
+        assert.equal(err.code, 'COMMAND_FAILED');
+        assert.match(err.suggestion, /snapshot/);
+        assert.equal(err.resetHintAllowed, false);
+        return true;
+      },
+    );
+  });
+
+  it('user eval code errors shape like action failures (fix and retry, no reset)', async () => {
+    const codeError = new TypeError("Cannot read properties of undefined (reading 'href')");
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'eval "return x.href"', runtime: throwingRuntime(codeError) }),
+      (err) => err instanceof BrowserforceCommandError
+        && err.code === 'COMMAND_FAILED'
+        && err.resetHintAllowed === false,
+    );
+  });
+
+  it('connection failures pass through RAW so the transport may add reset guidance', async () => {
+    for (const message of [
+      'Not connected to relay. Is the relay running?',
+      'browserContext.newCDPSession: Target closed',
+      'Target page, context or browser has been closed',
+    ]) {
+      const connectionError = new Error(message);
+      await assert.rejects(
+        () => executeBrowserforceCommand({ command: 'get url', runtime: throwingRuntime(connectionError) }),
+        (err) => {
+          assert.ok(!(err instanceof BrowserforceCommandError), `"${message}" passes through unwrapped`);
+          assert.equal(err, connectionError);
+          return true;
+        },
+      );
+    }
+  });
+
+  it('run timeouts pass through raw (matched by name — the registry is import-free)', async () => {
+    const timeoutError = new Error('Code execution timed out after 30000ms');
+    timeoutError.name = 'CodeExecutionTimeoutError';
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'click @e1', runtime: throwingRuntime(timeoutError) }),
+      (err) => err === timeoutError,
+    );
+  });
+
+  it('structured command errors thrown below runCommand are preserved as-is', async () => {
+    const structured = new BrowserforceCommandError('custom', { code: 'CUSTOM', suggestion: 'do x' });
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'press Enter', runtime: throwingRuntime(structured) }),
+      (err) => err === structured,
     );
   });
 });

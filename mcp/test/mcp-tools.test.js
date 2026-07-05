@@ -344,7 +344,7 @@ describe('Tool Definitions', () => {
     assert.ok(/await runCode\(code, execCtx, timeout\)/.test(runtimeSource), 'runtime.runCommand runs through the guarded runCode() boundary');
   });
 
-  it('browserforce handler formats command errors without reset hints', () => {
+  it('browserforce handler formats command errors with Suggestion lines and gated reset hints', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -356,8 +356,12 @@ describe('Tool Definitions', () => {
       block.indexOf('// Parse first'),
     );
     assert.ok(commandErrorFn.includes('isError: true'), 'command errors are isError responses');
-    assert.ok(!commandErrorFn.includes('HINT'), 'command errors never append reset hints');
+    assert.ok(commandErrorFn.includes('Suggestion: '), 'command errors render an explicit Suggestion line');
     assert.ok(commandErrorFn.includes('err.suggestion'), 'command errors surface the structured suggestion');
+    assert.ok(
+      commandErrorFn.includes("err.resetHintAllowed === true ? RESET_HINT : ''"),
+      'reset guidance is appended ONLY when resetHintAllowed === true'
+    );
   });
 
   it('browserforce responds over JSON-RPC: help succeeds, bad commands teach without reset hints', async () => {
@@ -413,7 +417,7 @@ describe('Tool Definitions', () => {
 
     // EXECUTE_PROMPT is defined as a const above server.tool('exec', EXECUTE_PROMPT, ...)
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     assert.ok(promptBlock.length < 2000, `EXECUTE_PROMPT block is ${promptBlock.length} chars`);
@@ -427,7 +431,7 @@ describe('Tool Definitions', () => {
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     assert.ok(promptBlock.includes('getBrowserforceStatus()'), 'should use the relay status helper for attached-tab metadata');
@@ -630,10 +634,9 @@ describe('Tool Definitions', () => {
     const execHandler = (source.split("'exec'")[1] || '').split('server.tool(')[0];
 
     assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'exec should detect timeout errors');
-    assert.ok(execHandler.includes("const hint = isTimeout ? ''"), 'timeout errors should produce an empty hint (no reset suggestion)');
     assert.ok(
-      execHandler.indexOf("isTimeout ? ''") < execHandler.indexOf('[HINT: Call reset only'),
-      'the reset hint must live in the non-timeout branch only'
+      execHandler.includes("const hint = isTimeout ? '' : RESET_HINT"),
+      'timeout errors produce an empty hint; the reset hint lives in the non-timeout branch only'
     );
   });
 

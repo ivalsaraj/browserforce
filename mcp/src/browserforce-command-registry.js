@@ -322,6 +322,52 @@ function resolveTimeout(requested, fallback = 30000) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+// ─── Run-failure shaping ─────────────────────────────────────────────────────
+// agent-browser lesson: agents over-reset. Only bridge/session failures may
+// carry reset guidance; selector timeouts, stale refs, and user-code errors
+// must teach the actual next step instead.
+
+// Failures of the bridge/session itself (relay down, extension gone, page or
+// browser closed mid-command). These pass through RAW so transport callers
+// (the MCP handler's generic branch) may append reset guidance.
+const CONNECTION_ERROR_PATTERN =
+  /not connected|target closed|has been closed|browser.*disconnected|websocket|econnrefused/i;
+
+/**
+ * Classify a runtime.runCommand() failure into an agent-actionable command
+ * error. Stale refs teach re-snapshot; other page/action failures (selector
+ * timeouts, strict-mode violations, user eval code) become COMMAND_FAILED
+ * with no reset hint. Connection failures and run timeouts pass through raw.
+ */
+function wrapRunCommandError(err) {
+  if (err instanceof BrowserforceCommandError) return err;
+  // Timeouts are rendered specially by callers (never with a reset hint) —
+  // matched by name because this registry is import-free by design.
+  if (err?.name === 'CodeExecutionTimeoutError') return err;
+  const message = String(err?.message || err);
+  if (/^Unknown ref\b/i.test(message)) {
+    return new BrowserforceCommandError(message, {
+      code: 'STALE_REF',
+      suggestion: 'Run browserforce "snapshot" again to refresh refs, then retry with a fresh ref.',
+    });
+  }
+  if (CONNECTION_ERROR_PATTERN.test(message)) return err;
+  return new BrowserforceCommandError(message, {
+    code: 'COMMAND_FAILED',
+    suggestion: 'If the page changed, run browserforce "snapshot" to see its current state and retry.',
+  });
+}
+
+// Every snippet-backed verb runs through this guard so failures are shaped
+// identically on all surfaces (MCP tool, CLI, sessiond).
+async function runCommandGuarded(runtime, params) {
+  try {
+    return await runtime.runCommand(params);
+  } catch (err) {
+    throw wrapRunCommandError(err);
+  }
+}
+
 const VERB_EXECUTORS = {
   async tabs({ runtime }) {
     return { tabs: await runtime.listTabRows() };
@@ -407,7 +453,7 @@ const VERB_EXECUTORS = {
       interactiveOnly: body?.interactiveOnly === true,
     };
     const code = `return await snapshotData(${JSON.stringify(args)});`;
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 
   async click({ body, runtime, timeout }) {
@@ -415,7 +461,7 @@ const VERB_EXECUTORS = {
     if (!ref) throw usageError('click requires a ref (e.g. click @e2)');
     const page = await resolveVerbPage({ body, runtime });
     const code = refLocatorSnippet(ref, 'await locator.click();', `{ clicked: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 
   async hover({ body, runtime, timeout }) {
@@ -423,7 +469,7 @@ const VERB_EXECUTORS = {
     if (!ref) throw usageError('hover requires a ref (e.g. hover @e2)');
     const page = await resolveVerbPage({ body, runtime });
     const code = refLocatorSnippet(ref, 'await locator.hover();', `{ hovered: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 
   async fill({ body, runtime, timeout }) {
@@ -432,7 +478,7 @@ const VERB_EXECUTORS = {
     const page = await resolveVerbPage({ body, runtime });
     const text = String(body.text ?? '');
     const code = refLocatorSnippet(ref, `await locator.fill(${JSON.stringify(text)});`, `{ filled: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 
   async type({ body, runtime, timeout }) {
@@ -441,7 +487,7 @@ const VERB_EXECUTORS = {
     const page = await resolveVerbPage({ body, runtime });
     const text = String(body.text ?? '');
     const code = refLocatorSnippet(ref, `await locator.pressSequentially(${JSON.stringify(text)});`, `{ typed: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 
   async press({ body, runtime, timeout }) {
@@ -449,7 +495,7 @@ const VERB_EXECUTORS = {
     if (!key) throw usageError('press requires a key');
     const page = await resolveVerbPage({ body, runtime });
     const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 
   async wait({ body, runtime, timeout }) {
@@ -457,7 +503,7 @@ const VERB_EXECUTORS = {
     const code = waitSnippet(kind, body?.value, timeout);
     if (!code) throw usageError(`unknown wait kind: ${kind}`);
     const page = await resolveVerbPage({ body, runtime });
-    return runtime.runCommand({ code, timeout: timeout + WAIT_RUN_HEADROOM_MS, page });
+    return runCommandGuarded(runtime, { code, timeout: timeout + WAIT_RUN_HEADROOM_MS, page });
   },
 
   async get({ body, runtime, timeout }) {
@@ -465,7 +511,7 @@ const VERB_EXECUTORS = {
     if (what === 'url' || what === 'title') {
       const page = await resolveVerbPage({ body, runtime });
       const code = what === 'url' ? 'return { url: page.url() };' : 'return { title: await page.title() };';
-      return runtime.runCommand({ code, timeout, page });
+      return runCommandGuarded(runtime, { code, timeout, page });
     }
     if (what === 'text' || what === 'html') {
       const ref = normalizeRef(body?.ref);
@@ -473,7 +519,7 @@ const VERB_EXECUTORS = {
       const page = await resolveVerbPage({ body, runtime });
       const expr = what === 'text' ? '{ text: await locator.textContent() }' : '{ html: await locator.innerHTML() }';
       const code = refLocatorSnippet(ref, '', expr);
-      return runtime.runCommand({ code, timeout, page });
+      return runCommandGuarded(runtime, { code, timeout, page });
     }
     throw usageError(`unknown get target: ${what}`);
   },
@@ -484,7 +530,7 @@ const VERB_EXECUTORS = {
     const page = await resolveVerbPage({ body, runtime });
     // The user's code IS the snippet — same guarded runCode() boundary as MCP
     // exec / CLI -e. Never eval()/new Function() at the caller.
-    return runtime.runCommand({ code, timeout, page });
+    return runCommandGuarded(runtime, { code, timeout, page });
   },
 };
 
