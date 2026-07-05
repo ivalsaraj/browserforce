@@ -117,7 +117,18 @@ describe('Tool Definitions', () => {
     assert.equal(result, 'function function');
   });
 
-  it('registers exactly 3 tools: execute, help, reset', () => {
+  // Extract a tool's registration block (description + schema, up to the async
+  // handler) anchored on the server.tool() call — NOT a bare string split,
+  // because names like 'browserforce' also appear as the McpServer name.
+  function toolRegistrationBlock(source, name) {
+    const match = source.match(new RegExp(`server\\.tool\\(\\s*'${name}',`));
+    if (!match) return '';
+    const rest = source.slice(match.index + match[0].length);
+    const end = rest.indexOf('async (');
+    return end === -1 ? rest : rest.slice(0, end);
+  }
+
+  it('registers exactly 4 tools: browserforce, exec, help, reset', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -130,8 +141,54 @@ describe('Tool Definitions', () => {
       toolNames.push(match[1]);
     }
 
-    assert.equal(toolNames.length, 3, `Should have exactly 3 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
-    assert.deepEqual(toolNames.sort(), ['execute', 'help', 'reset']);
+    assert.equal(toolNames.length, 4, `Should have exactly 4 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
+    assert.deepEqual(toolNames.sort(), ['browserforce', 'exec', 'help', 'reset']);
+  });
+
+  it('does not advertise the old execute tool by default', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.doesNotMatch(
+      source,
+      /server\.tool\(\s*['"]execute['"]/,
+      'execute must not be advertised by default (renamed to exec)'
+    );
+  });
+
+  it('browserforce tool accepts a command string and optional timeout', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const bfBlock = toolRegistrationBlock(source, 'browserforce');
+    assert.ok(bfBlock, 'browserforce tool should be registered');
+    assert.ok(bfBlock.includes('command:'), 'browserforce should have a command param');
+    assert.ok(bfBlock.includes('z.string()'), 'command should be a string');
+    assert.ok(bfBlock.includes('timeout:'), 'browserforce should have a timeout param');
+    assert.ok(bfBlock.includes('z.number().optional()'), 'timeout should be an optional number');
+  });
+
+  it('exec tool keeps the raw execution shape: code, timeout, intent', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const execBlock = toolRegistrationBlock(source, 'exec');
+    assert.ok(execBlock, 'exec tool should be registered');
+    assert.ok(execBlock.includes('code:'), 'exec should have a code param');
+    assert.ok(execBlock.includes('z.string()'), 'code should be a string');
+    assert.ok(execBlock.includes('timeout:'), 'exec should have a timeout param');
+    assert.ok(execBlock.includes('z.number().optional()'), 'timeout should be an optional number');
+    assert.ok(execBlock.includes('intent:'), 'exec should keep the intent param');
+    assert.ok(
+      execBlock.includes("z.enum(['inspect', 'open', 'auto'])"),
+      'intent should keep the inspect/open/auto enum'
+    );
   });
 
   it('tools have non-empty descriptions', () => {
