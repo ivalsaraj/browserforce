@@ -45,7 +45,10 @@ export const COMMAND_SPECS = Object.freeze({
   fill: { flags: { tab: 'value' } },
   type: { flags: { tab: 'value' } },
   press: { flags: { tab: 'value' } },
-  wait: { flags: { tab: 'value' } },
+  // `wait text <value>` is the primary form; the kind flags (--text <value>,
+  // --url, --load, --fn, --selector) are an accepted alias kept for CLI
+  // compatibility, valid on every surface.
+  wait: { flags: { tab: 'value', text: 'value', url: 'value', load: 'value', fn: 'value', selector: 'value' } },
   get: { flags: { tab: 'value' } },
   eval: { flags: { tab: 'value' } },
   rename: { flags: { replace: 'boolean' } },
@@ -506,7 +509,7 @@ export async function executeBrowserforceVerb({ verb, body = {}, runtime, timeou
 
 // ─── Command-string execution (MCP `browserforce` tool + CLI direct verbs) ───
 
-const COMMAND_HELP_TEXT = `BrowserForce commands:
+export const COMMAND_HELP_TEXT = `BrowserForce commands:
   open <url> [--as name] [--replace]   Open a URL in a new tab (optionally named)
   tabs                                 List tabs with stable handles (t1, t2, ...)
   use <t handle|name|url/title text>   Switch the active tab
@@ -519,6 +522,7 @@ const COMMAND_HELP_TEXT = `BrowserForce commands:
   press <key> [--tab name]             Press a keyboard key (e.g. Enter)
   wait <text|selector|url|load|fn> <value> [--tab name]
                                        Wait for text/selector/url/load-state
+                                       (flag form also works: wait --text <s>)
   get <url|title> [--tab name]         Read page url/title
   get <text|html> <ref> [--tab name]   Read element text/innerHTML
   eval <js> [--tab name]               Run raw Playwright JS in the session
@@ -529,9 +533,13 @@ const COMMAND_HELP_TEXT = `BrowserForce commands:
 Refs (@e1, @e2, ...) come from snapshot and go stale when the page changes —
 run snapshot again after navigation or UI changes.`;
 
+const WAIT_KIND_FLAGS = ['text', 'url', 'load', 'fn', 'selector'];
+
 // Convert parsed command-string args/flags into the normalized verb body used
-// by the sessiond JSON path, so both surfaces execute identically.
-function commandToBody({ verb, args, flags }) {
+// by the sessiond JSON path, so both surfaces execute identically. Exported so
+// the CLI can turn a parsed direct command into the sessiond JSON body without
+// re-implementing any mapping.
+export function commandToBody({ verb, args, flags }) {
   switch (verb) {
     case 'tabs':
       return {};
@@ -545,6 +553,11 @@ function commandToBody({ verb, args, flags }) {
     case 'forget':
       return { name: args[0] };
     case 'snapshot':
+      if (args.length > 0) {
+        throw usageError(
+          `snapshot takes no positional arguments (got "${args.join(' ')}"). Target a tab with --tab, e.g. snapshot --tab t2.`
+        );
+      }
       return {
         selector: flags.selector,
         search: flags.search,
@@ -559,8 +572,19 @@ function commandToBody({ verb, args, flags }) {
       return { ref: args[0], text: args.length > 1 ? args.slice(1).join(' ') : undefined, tab: flags.tab };
     case 'press':
       return { key: args[0], tab: flags.tab };
-    case 'wait':
+    case 'wait': {
+      const kindFlags = WAIT_KIND_FLAGS.filter((k) => flags[k] !== undefined);
+      if (kindFlags.length > 1) {
+        throw usageError(`wait accepts one kind flag, got --${kindFlags.join(' --')}.`);
+      }
+      if (kindFlags.length === 1) {
+        if (args.length > 0) {
+          throw usageError(`wait accepts either a positional kind or --${kindFlags[0]}, not both.`);
+        }
+        return { kind: kindFlags[0], value: flags[kindFlags[0]], tab: flags.tab };
+      }
       return { kind: args[0], value: args.length > 1 ? args.slice(1).join(' ') : undefined, tab: flags.tab };
+    }
     case 'get':
       return { what: args[0], ref: args[1], tab: flags.tab };
     case 'eval':

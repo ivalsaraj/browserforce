@@ -13,7 +13,8 @@ Session-backed verbs print a JSON envelope with `--json`:
 
 `success: false` sets a non-zero exit code so the verbs are scriptable. Without
 `--json`, `data` is printed in a human-readable form and `warning` goes to
-stderr.
+stderr. Exception: `tabs --json` prints the tab rows array directly
+(`index`/`title`/`url` plus `handle`/`active`/`name`).
 
 ## Status and lifecycle
 
@@ -22,8 +23,7 @@ stderr.
 | `browserforce status` | Relay + extension connection status. |
 | `browserforce serve` | Start the relay server (foreground). |
 | `browserforce mcp` | Start the MCP server (stdio). |
-| `browserforce tabs` | List open browser tabs. |
-| `browserforce navigate <url>` | Open a URL in a new tab. |
+| `browserforce navigate <url>` | Open a URL in a new tab (one-shot, no session). |
 | `browserforce screenshot [n]` | PNG of tab `n` (default 0) to stdout. |
 | `browserforce install-extension` | Copy the extension into a local dir to load unpacked. |
 | `browserforce update` | Check for / install a newer BrowserForce. |
@@ -52,41 +52,60 @@ The daemon negotiates a browser backend at startup:
 
 `browserforce session status --json` reports `{ backend, requestedBackend, fallbackReason, warning }`.
 
-## Atomic verbs
+## Session commands
 
-All verbs route through the daemon's guarded execution boundary (the same
-`runCode()` vm used by MCP `execute` and one-shot `-e`).
+All commands route through the daemon's guarded execution boundary (the same
+`runCode()` vm used by MCP `exec` and one-shot `-e`) and share the exact
+command language of the MCP `browserforce` tool.
 
 | Command | Description |
 |---|---|
-| `browserforce snapshot --sessiond` | Accessibility tree + `@eN` refs from the session page. |
+| `browserforce open <url> [--as name] [--replace]` | Open a URL in a new tab, optionally naming it. |
+| `browserforce tabs` | List tabs with stable `t<N>` handles, names, and the active marker. |
+| `browserforce use <t handle\|name\|text>` | Switch the active tab (soft-matches title/url text). |
+| `browserforce snapshot` | Accessibility tree + `@eN` refs from the active (or `--tab`) page. |
 | `browserforce click <@ref>` | Click the element behind a ref. |
+| `browserforce hover <@ref>` | Hover the element behind a ref. |
 | `browserforce fill <@ref> <text>` | Clear, then type into a field. |
 | `browserforce type <@ref> <text>` | Type without clearing. |
 | `browserforce press <key>` | Press a key at the current focus (`Enter`, `Control+a`). |
-| `browserforce wait --text <s>` | Wait until text appears on the page. |
-| `browserforce wait --url <glob>` | Wait until the URL matches a glob. |
-| `browserforce wait --load <state>` | Wait for a load state (`load`, `domcontentloaded`, `networkidle`). |
-| `browserforce wait --fn <expr>` | Wait until a JS predicate is truthy. |
+| `browserforce wait text <s>` | Wait until text appears (`--text <s>` also accepted). |
+| `browserforce wait url <glob>` | Wait until the URL matches a glob. |
+| `browserforce wait load <state>` | Wait for a load state (`load`, `domcontentloaded`, `networkidle`). |
+| `browserforce wait fn <expr>` | Wait until a JS predicate is truthy. |
 | `browserforce get url` | Current URL. |
 | `browserforce get title` | Page title. |
 | `browserforce get text <@ref>` | Text content of a ref. |
+| `browserforce get html <@ref>` | innerHTML of a ref. |
 | `browserforce eval --stdin` | Run piped Playwright JS in the session (or `eval "<code>"`). |
+| `browserforce rename <old> <new> [--replace]` | Rename a tab name. |
+| `browserforce forget <name>` | Remove a tab name. |
+| `browserforce run "<command>"` | Run any command string verbatim (MCP-doc compatible). |
+
+Ref/read commands accept `--tab <handle|name|text>` to target a specific tab
+for that command only (the active tab does not change).
 
 ### snapshot flags
 
 | Flag | Description |
 |---|---|
-| `--sessiond` | Use the persistent session (required for the atomic-verb workflow). |
+| `--tab <target>` | Snapshot a specific tab without switching the active one. |
 | `--selector <css>` | Scope the snapshot to a CSS selector. |
 | `--search <text>` | Only include nodes whose accessible name matches. |
-| `--interactive-only` | Only interactive elements (buttons, links, inputs). |
+| `--interactive` | Only interactive elements (`--interactive-only` also accepted). |
 | `--json` | Machine-readable envelope. |
 
 ### Ref aliases
 
 `@e1`, `e1`, and `ref=e1` all resolve to the same element. Refs are assigned
 fresh on every snapshot and go stale as soon as the page changes.
+
+### Tab handles and names
+
+`tabs` assigns each open tab a stable `t<N>` handle that never shifts when
+other tabs close. `open --as <name>` / `rename` attach human names. Names are
+unique: a conflicting `--as`/`rename` fails unless `--replace` moves the name
+intentionally. Target tabs by handle or name — never by list position.
 
 ## One-shot execution
 

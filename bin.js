@@ -153,31 +153,6 @@ async function cmdStatus() {
   }
 }
 
-async function cmdTabs() {
-  const browser = await connectBrowser();
-  try {
-    const ctx = getFirstContext(browser);
-    await waitForInitialPageDiscovery(ctx);
-    const pages = ctx.pages();
-    const tabs = pages.map((p, i) => ({ index: i, title: '', url: p.url() }));
-    await Promise.all(tabs.map(async (t, i) => {
-      try { t.title = await pages[i].title(); } catch { t.title = '(untitled)'; }
-    }));
-    if (values.json) {
-      output(tabs, true);
-    } else if (tabs.length === 0) {
-      console.log('No tabs available');
-    } else {
-      for (const t of tabs) {
-        console.log(`  [${t.index}] ${t.title}`);
-        console.log(`      ${t.url}`);
-      }
-    }
-  } finally {
-    await browser.close().catch(() => {});
-  }
-}
-
 async function cmdScreenshot() {
   const index = parseInt(positionals[1] || '0', 10);
   const browser = await connectBrowser();
@@ -195,71 +170,6 @@ async function cmdScreenshot() {
     } else {
       process.stdout.write(buf);
     }
-  } finally {
-    await browser.close().catch(() => {});
-  }
-}
-
-async function cmdSnapshotViaSessiond() {
-  const { sessiondCommand } = await import('./cli/session-client.js');
-  await ensureSessiondRunning();
-
-  const timeoutMs = parseInt(values.timeout, 10);
-  const body = { timeout: timeoutMs };
-  if (values.selector) body.selector = values.selector;
-  if (values.search) body.search = values.search;
-  if (values['interactive-only']) body.interactiveOnly = true;
-
-  const { body: resp } = await sessiondCommand({ method: 'POST', path: '/command/snapshot', body });
-
-  if (values.json) {
-    output(resp, true);
-    if (resp && resp.success === false) process.exit(1);
-    return;
-  }
-
-  if (!resp || resp.success === false) {
-    console.error(`Error: ${resp?.error || 'snapshot failed'}`);
-    process.exit(1);
-  }
-  const data = resp.data || {};
-  const refTable = Array.isArray(data.refs) && data.refs.length > 0
-    ? '\n\n--- Ref → Locator ---\n' + data.refs.map((r) => `${r.ref} (${r.role}${r.name ? ` "${r.name}"` : ''}): ${r.locator ?? '(frame-scoped; use locatorForRef)'}`).join('\n')
-    : '';
-  if (resp.warning) process.stderr.write(`⚠  ${resp.warning}\n`);
-  output(`Page: ${data.title} (${data.url})\nRefs: ${Array.isArray(data.refs) ? data.refs.length : 0} interactive elements\n\n${data.tree || ''}${refTable}`, false);
-}
-
-async function cmdSnapshot() {
-  if (values.sessiond) {
-    await cmdSnapshotViaSessiond();
-    return;
-  }
-  const index = parseInt(positionals[1] || '0', 10);
-  const { getAriaSnapshot, renderRefLines, renderFrameErrors } = await import('./mcp/src/aria-snapshot-engine.js');
-  const browser = await connectBrowser();
-  try {
-    const ctx = getFirstContext(browser);
-    await waitForInitialPageDiscovery(ctx);
-    const pages = ctx.pages();
-    if (index >= pages.length) {
-      console.error(`Tab ${index} not found. ${pages.length} tab(s) available.`);
-      process.exit(1);
-    }
-    const page = pages[index];
-    const cdp = await page.context().newCDPSession(page);
-    let result;
-    try {
-      result = await getAriaSnapshot({ page, cdp, interactiveOnly: false });
-    } finally {
-      await cdp.detach().catch(() => {});
-    }
-    const refTable = result.refs.length > 0
-      ? '\n\n--- Ref → Locator ---\n' + result.refs.map((r) => `${r.shortRef} (${r.role}): ${r.locator ?? '(frame-scoped)'}`).join('\n')
-      : '';
-    const title = await page.title().catch(() => '');
-    const frameWarning = renderFrameErrors(result.frameErrors);
-    output(`Page: ${title} (${page.url()})\nRefs: ${result.refs.length} interactive elements${frameWarning}\n\n${renderRefLines(result.tree)}${refTable}`, values.json);
   } finally {
     await browser.close().catch(() => {});
   }
@@ -1032,14 +942,125 @@ async function cmdSession() {
   process.exit(1);
 }
 
-// Send an authed command to the sessiond daemon (auto-starting it if needed)
-// and print the { success, data, error, warning } envelope. Exits non-zero on
-// failure so atomic verbs are scriptable.
-async function runSessiondVerb(path, body) {
+// ─── Registry-backed command verbs ──────────────────────────────────────────
+// Direct verbs (`browserforce click @e2 --tab app`) and the quoted form
+// (`browserforce run "click @e2 --tab app"`) share one path: rebuild the
+// command string from the RAW post-verb argv, hand it to the shared registry
+// parser (the single authority for command flags/args — parseArgs strict:false
+// must never pre-consume or swallow them), then send the normalized JSON body
+// to the sessiond per-verb endpoint.
+
+const REGISTRY_COMMAND_VERBS = new Set([
+  'open', 'tabs', 'use', 'snapshot', 'click', 'hover', 'fill', 'type',
+  'press', 'wait', 'get', 'eval', 'rename', 'forget', 'run',
+]);
+
+// Global flags owned by bin.js — extracted from the raw argv and never
+// forwarded to the registry parser. Everything else (known command flags AND
+// unknown typos) flows through so the registry can accept or reject it.
+const GLOBAL_CLI_BOOLEAN_FLAGS = new Set([
+  '--json', '--sessiond', '--stdin', '--real', '--managed', '--headless',
+  '--no-autostart', '--dry-run', '--help', '-h',
+]);
+const GLOBAL_CLI_VALUE_FLAGS = new Set(['--timeout', '--backend']);
+
+// Raw argv tokens after the verb, minus global CLI flags (wherever they
+// appear). The first non-flag token is the verb itself and is skipped.
+function extractRawCommandTokens() {
+  const raw = process.argv.slice(2);
+  const tokens = [];
+  let verbSeen = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const token = raw[i];
+    const isFlag = token.startsWith('-');
+    const eqIdx = token.indexOf('=');
+    const flagName = isFlag ? (eqIdx === -1 ? token : token.slice(0, eqIdx)) : null;
+    if (flagName && GLOBAL_CLI_BOOLEAN_FLAGS.has(flagName)) continue;
+    if (flagName && GLOBAL_CLI_VALUE_FLAGS.has(flagName)) {
+      if (eqIdx === -1) i += 1; // consume the flag's value token too
+      continue;
+    }
+    if (!verbSeen && !isFlag) { verbSeen = true; continue; }
+    tokens.push(token);
+  }
+  return tokens;
+}
+
+// Re-quote an argv token for the registry tokenizer: double-quote when it
+// contains whitespace/quotes/backslashes (escaping only `\` and `"`, so real
+// newlines from --stdin survive verbatim).
+function quoteCommandToken(token) {
+  if (token !== '' && !/[\s"'\\]/.test(token)) return token;
+  return `"${token.replace(/[\\"]/g, (ch) => `\\${ch}`)}"`;
+}
+
+async function cmdBrowserforceCommand() {
+  const {
+    parseBrowserforceCommand,
+    commandToBody,
+    renderBrowserforceCommandText,
+    BrowserforceCommandError,
+    COMMAND_HELP_TEXT,
+  } = await import('./mcp/src/browserforce-command-registry.js');
+
+  const failLocal = (message) => {
+    if (values.json) output({ success: false, data: null, error: message, warning: null }, true);
+    else console.error(`Error: ${message}`);
+    process.exit(1);
+  };
+
+  let commandString;
+  if (command === 'run') {
+    const rawTokens = extractRawCommandTokens();
+    if (rawTokens.length !== 1 || rawTokens[0].startsWith('--')) {
+      failLocal('Usage: browserforce run "<command>"   (e.g. browserforce run "click @e2")');
+    }
+    commandString = rawTokens[0];
+  } else {
+    let tokens = extractRawCommandTokens();
+    // CLI compat alias: the pre-registry snapshot flag spelling.
+    if (command === 'snapshot') {
+      tokens = tokens.map((t) => (t === '--interactive-only' ? '--interactive' : t));
+    }
+    // eval --stdin: piped code becomes the (single, quoted) code argument.
+    if (command === 'eval' && values.stdin) {
+      tokens = [await readStdin(), ...tokens];
+    }
+    commandString = [command, ...tokens.map(quoteCommandToken)].join(' ');
+  }
+
+  let parsed;
+  let body;
+  try {
+    parsed = parseBrowserforceCommand(commandString);
+    body = commandToBody(parsed);
+  } catch (err) {
+    const suggestion = err instanceof BrowserforceCommandError && err.suggestion ? ` ${err.suggestion}` : '';
+    failLocal(`${err.message}${suggestion}`);
+  }
+
+  // help never needs the daemon.
+  if (parsed.verb === 'help') {
+    if (values.json) output({ success: true, data: COMMAND_HELP_TEXT, error: null, warning: null }, true);
+    else console.log(COMMAND_HELP_TEXT);
+    return;
+  }
+
   const { sessiondCommand } = await import('./cli/session-client.js');
   await ensureSessiondRunning();
-  const { body: resp } = await sessiondCommand({ method: 'POST', path, body });
+  const { body: resp } = await sessiondCommand({
+    method: 'POST',
+    path: `/command/${parsed.verb}`,
+    body: { ...body, timeout: parseInt(values.timeout, 10) },
+  });
+
   if (values.json) {
+    // Compat: `tabs --json` keeps the pre-registry top-level array shape; each
+    // row keeps index/title/url and adds handle/active/name (a superset).
+    if (parsed.verb === 'tabs' && resp && resp.success !== false) {
+      output(resp.data?.tabs ?? [], true);
+      return;
+    }
     output(resp, true);
     if (resp && resp.success === false) process.exit(1);
     return;
@@ -1049,69 +1070,7 @@ async function runSessiondVerb(path, body) {
     process.exit(1);
   }
   if (resp.warning) process.stderr.write(`⚠  ${resp.warning}\n`);
-  output(resp.data, false);
-}
-
-async function cmdClick() {
-  const { normalizeRef } = await import('./cli/session-client.js');
-  const ref = normalizeRef(positionals[1]);
-  if (!ref) { console.error('Usage: browserforce click <@ref>'); process.exit(1); }
-  await runSessiondVerb('/command/click', { ref, timeout: parseInt(values.timeout, 10) });
-}
-
-async function cmdFill() {
-  const { normalizeRef } = await import('./cli/session-client.js');
-  const ref = normalizeRef(positionals[1]);
-  const text = positionals[2];
-  if (!ref || text === undefined) { console.error('Usage: browserforce fill <@ref> <text>'); process.exit(1); }
-  await runSessiondVerb('/command/fill', { ref, text, timeout: parseInt(values.timeout, 10) });
-}
-
-async function cmdType() {
-  const { normalizeRef } = await import('./cli/session-client.js');
-  const ref = normalizeRef(positionals[1]);
-  const text = positionals[2];
-  if (!ref || text === undefined) { console.error('Usage: browserforce type <@ref> <text>'); process.exit(1); }
-  await runSessiondVerb('/command/type', { ref, text, timeout: parseInt(values.timeout, 10) });
-}
-
-async function cmdPress() {
-  const key = positionals[1];
-  if (!key) { console.error('Usage: browserforce press <key>'); process.exit(1); }
-  await runSessiondVerb('/command/press', { key, timeout: parseInt(values.timeout, 10) });
-}
-
-async function cmdWait() {
-  const timeout = parseInt(values.timeout, 10);
-  let kind;
-  let value;
-  if (values.text !== undefined) { kind = 'text'; value = values.text; }
-  else if (values.url !== undefined) { kind = 'url'; value = values.url; }
-  else if (values.load !== undefined) { kind = 'load'; value = values.load || 'load'; }
-  else if (values.fn !== undefined) { kind = 'fn'; value = values.fn; }
-  else {
-    console.error('Usage: browserforce wait --text <s> | --url <glob> | --load <state> | --fn <expr>');
-    process.exit(1);
-  }
-  await runSessiondVerb('/command/wait', { kind, value, timeout });
-}
-
-async function cmdGet() {
-  const what = positionals[1];
-  const timeout = parseInt(values.timeout, 10);
-  if (what === 'url' || what === 'title') {
-    await runSessiondVerb('/command/get', { what, timeout });
-    return;
-  }
-  if (what === 'text') {
-    const { normalizeRef } = await import('./cli/session-client.js');
-    const ref = normalizeRef(positionals[2]);
-    if (!ref) { console.error('Usage: browserforce get text <@ref>'); process.exit(1); }
-    await runSessiondVerb('/command/get', { what: 'text', ref, timeout });
-    return;
-  }
-  console.error('Usage: browserforce get <url|title|text @ref>');
-  process.exit(1);
+  output(renderBrowserforceCommandText(parsed.verb, resp.data), false);
 }
 
 function readStdin() {
@@ -1121,16 +1080,6 @@ function readStdin() {
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     process.stdin.on('error', reject);
   });
-}
-
-async function cmdEval() {
-  const timeout = parseInt(values.timeout, 10);
-  const code = values.stdin ? await readStdin() : positionals[1];
-  if (!code || !code.trim()) {
-    console.error('Usage: browserforce eval --stdin   (pipe code) | browserforce eval "<code>"');
-    process.exit(1);
-  }
-  await runSessiondVerb('/command/eval', { code, timeout });
 }
 
 // Serve the BrowserForce skills bundled with the package (mirrors agent-browser
@@ -1225,18 +1174,28 @@ function cmdHelp() {
     browserforce serve              Start the relay server
     browserforce mcp                Start the MCP server (stdio)
     browserforce status             Check relay and extension status
-    browserforce tabs               List open browser tabs
-    browserforce screenshot [n]     Screenshot tab n (default: 0)
-    browserforce snapshot [n]       Accessibility tree of tab n (default: 0)
-    browserforce snapshot --sessiond  Session-backed snapshot (shares state, stores refs)
+
+  Session commands (shared command language with the MCP browserforce tool):
+    browserforce open <url> [--as name] [--replace]   Open a URL in a new tab
+    browserforce tabs               List tabs with stable handles (t1, t2, ...)
+    browserforce use <t1|name|text> Switch the active tab (soft match)
+    browserforce snapshot [--tab name] [--selector css] [--search re] [--interactive]
     browserforce click <@ref>       Click a ref from the last session snapshot
+    browserforce hover <@ref>       Hover a ref
     browserforce fill <@ref> <text> Fill a ref with text (clears first)
     browserforce type <@ref> <text> Type text into a ref (key by key)
     browserforce press <key>        Press a keyboard key (e.g. Enter)
-    browserforce wait --text <s>    Wait for text / --url <glob> / --load <state> / --fn <expr>
-    browserforce get <url|title>    Read url/title, or: get text <@ref>
+    browserforce wait <text|url|load|fn> <value>  Wait (flag form --text <s> also works)
+    browserforce get <url|title>    Read url/title, or: get <text|html> <@ref>
     browserforce eval --stdin       Run piped Playwright JS in the session (or: eval "<code>")
-    browserforce navigate <url>     Open URL in a new tab
+    browserforce rename <old> <new> Rename a tab name
+    browserforce forget <name>      Remove a tab name
+    browserforce run "<command>"    Run any command string (e.g. run "click @e2 --tab app")
+    Ref/read commands accept --tab <handle|name|text> to target a specific tab.
+
+  Other:
+    browserforce screenshot [n]     Screenshot tab n (default: 0)
+    browserforce navigate <url>     Open URL in a new tab (one-shot, no session)
     browserforce plugin list        List installed plugins
     browserforce plugin install <n> Install a plugin from the registry
     browserforce plugin remove <n>  Remove an installed plugin
@@ -1258,33 +1217,34 @@ function cmdHelp() {
 
   Examples:
     browserforce serve
+    browserforce open https://example.com --as docs
     browserforce tabs
+    browserforce snapshot --tab docs
+    browserforce click @e2
+    browserforce run "fill @e3 'hello world' --tab docs"
     browserforce plugin list
-    browserforce plugin install highlight
     browserforce setup openclaw --dry-run --json
-    browserforce update
     browserforce -e "return await snapshot()"
-    browserforce -e "await page.goto('https://github.com'); return await snapshot()"
     browserforce screenshot 0 > page.png
-    browserforce navigate https://gmail.com
 
-  Note: -e commands are one-shot (state does not persist between calls).
-  For a persistent CLI session, use the atomic verbs with --sessiond
-  (snapshot/click/fill/wait/get/eval), or the MCP server (browserforce mcp).
+  Note: session commands share one persistent browser session (and snapshot
+  refs) via the CLI session daemon — the same command language as the MCP
+  browserforce tool. -e is one-shot (state does not persist between calls).
 `);
 }
 
 // ─── Dispatch ───────────────────────────────────────────────────────────────
 
 const commands = {
-  serve: cmdServe, mcp: cmdMcp, status: cmdStatus, tabs: cmdTabs,
-  screenshot: cmdScreenshot, snapshot: cmdSnapshot, navigate: cmdNavigate,
+  serve: cmdServe, mcp: cmdMcp, status: cmdStatus,
+  screenshot: cmdScreenshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
   'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
-  session: cmdSession, click: cmdClick, fill: cmdFill, type: cmdType, press: cmdPress,
-  wait: cmdWait, get: cmdGet, eval: cmdEval, skills: cmdSkills, doctor: cmdDoctor,
+  session: cmdSession, skills: cmdSkills, doctor: cmdDoctor,
   help: cmdHelp,
 };
+// Session-backed command verbs all share the registry path (direct and `run`).
+for (const verb of REGISTRY_COMMAND_VERBS) commands[verb] = cmdBrowserforceCommand;
 
 const handler = commands[command];
 if (!handler) {

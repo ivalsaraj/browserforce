@@ -674,6 +674,45 @@ describe('executeBrowserforceCommand → runtime.runCommand snippets', () => {
     assert.match(runtime.calls[3].code, /waitForSelector\("#done"/);
   });
 
+  it('wait accepts the CLI flag alias form (--text/--url/--load) on every surface', async () => {
+    const runtime = fakeRuntime();
+    await executeBrowserforceCommand({ command: 'wait --text "Saved"', runtime, timeout: 10000 });
+    assert.match(runtime.calls[0].code, /waitForFunction/);
+    assert.match(runtime.calls[0].code, /"Saved"/);
+    await executeBrowserforceCommand({ command: 'wait --url "**/done"', runtime });
+    assert.match(runtime.calls[1].code, /waitForURL\("\*\*\/done"/);
+    await executeBrowserforceCommand({ command: 'wait --load domcontentloaded', runtime });
+    assert.match(runtime.calls[2].code, /waitForLoadState\("domcontentloaded"/);
+  });
+
+  it('wait rejects mixing kind flags with positional kinds, and multiple kind flags', async () => {
+    const runtime = fakeRuntime();
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'wait text saved --url "**/x"', runtime }),
+      /either a positional kind or --url/
+    );
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'wait --text a --url b', runtime }),
+      /one kind flag/
+    );
+    assert.equal(runtime.calls.length, 0, 'nothing runs on parse failure');
+  });
+
+  it('snapshot rejects positional arguments with a teaching error (old tab-index form)', async () => {
+    const runtime = fakeRuntime();
+    await assert.rejects(
+      () => executeBrowserforceCommand({ command: 'snapshot 1', runtime }),
+      (err) => {
+        assert.equal(err.name, 'BrowserforceCommandError');
+        assert.match(err.message, /snapshot takes no positional arguments/);
+        assert.match(err.message, /--tab/);
+        assert.equal(err.resetHintAllowed, false);
+        return true;
+      }
+    );
+    assert.equal(runtime.calls.length, 0);
+  });
+
   it('get url / title read from the page', async () => {
     const runtime = fakeRuntime();
     await executeBrowserforceCommand({ command: 'get url', runtime });

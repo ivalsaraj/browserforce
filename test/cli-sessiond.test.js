@@ -618,6 +618,167 @@ describe('CLI session daemon', () => {
       assert.equal(second.data, 2, 'second eval sees state persisted by the daemon session');
     });
   });
+
+  describe('direct verbs + run "<command>" share the registry parser (Task 9)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let env;
+
+    // exec() rejects on non-zero exit; capture the failure instead.
+    async function execFail(args) {
+      try {
+        const { stdout, stderr } = await exec('node', ['bin.js', ...args], { cwd: ROOT, env });
+        return { code: 0, stdout, stderr };
+      } catch (err) {
+        return { code: err.code, stdout: err.stdout || '', stderr: err.stderr || '' };
+      }
+    }
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      // Prime refs so ref commands resolve e1.
+      await exec('node', ['bin.js', 'snapshot', '--json'], { cwd: ROOT, env });
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('run "tabs" reaches the registry and matches the direct verb output exactly', async () => {
+      const direct = (await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout;
+      const viaRun = (await exec('node', ['bin.js', 'run', 'tabs', '--json'], { cwd: ROOT, env })).stdout;
+      assert.equal(viaRun, direct, 'run and direct verbs share output formatting');
+
+      const rows = JSON.parse(direct);
+      assert.ok(Array.isArray(rows), 'tabs --json keeps the pre-registry top-level array shape');
+      const row = rows[0];
+      // Superset contract: old fields kept, registry fields added.
+      assert.equal(row.index, 0);
+      assert.equal(row.title, 'Fake');
+      assert.equal(row.url, 'https://fake.test/');
+      assert.equal(row.handle, 't1');
+      assert.equal(row.active, true);
+      assert.equal(row.name, null);
+    });
+
+    it('human tabs output shows the stable handle + active marker on both paths', async () => {
+      const direct = (await exec('node', ['bin.js', 'tabs'], { cwd: ROOT, env })).stdout;
+      const viaRun = (await exec('node', ['bin.js', 'run', 'tabs'], { cwd: ROOT, env })).stdout;
+      assert.equal(viaRun, direct);
+      assert.match(direct, /\* t1 Fake/);
+    });
+
+    it('run "click @e1" executes through the daemon session', async () => {
+      const resp = JSON.parse((await exec('node', ['bin.js', 'run', 'click @e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(resp.success, true);
+      assert.equal(resp.data.clicked, 'e1');
+    });
+
+    it('new registry verbs are reachable directly: hover, get html, use', async () => {
+      const hover = JSON.parse((await exec('node', ['bin.js', 'hover', '@e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(hover.success, true);
+      assert.equal(hover.data.hovered, 'e1');
+
+      const html = JSON.parse((await exec('node', ['bin.js', 'get', 'html', '@e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(html.success, true);
+      assert.equal(html.data.html, '<span>Submit</span>');
+
+      const use = JSON.parse((await exec('node', ['bin.js', 'use', 't1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(use.success, true);
+      assert.equal(use.data.active.handle, 't1');
+    });
+
+    it('eval accepts positional code (not just --stdin)', async () => {
+      const resp = JSON.parse((await exec('node', ['bin.js', 'eval', 'return 6 * 7;', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(resp.success, true);
+      assert.equal(resp.data, 42);
+    });
+
+    it('wait accepts the positional kind form alongside the legacy flag form', async () => {
+      const positional = JSON.parse((await exec('node', ['bin.js', 'wait', 'text', 'saved', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(positional.success, true);
+      assert.equal(positional.data.waited, 'text');
+      assert.equal(positional.data.text, 'saved');
+    });
+
+    it('unknown flags fail loudly on BOTH paths (exit non-zero, no silent swallow)', async () => {
+      const direct = await execFail(['click', '@e1', '--bogus', '--json']);
+      assert.notEqual(direct.code, 0, 'direct verb exits non-zero');
+      const directResp = JSON.parse(direct.stdout);
+      assert.equal(directResp.success, false);
+      assert.match(directResp.error, /Unknown flag --bogus/);
+
+      const viaRun = await execFail(['run', 'click @e1 --bogus', '--json']);
+      assert.notEqual(viaRun.code, 0, 'run path exits non-zero');
+      const runResp = JSON.parse(viaRun.stdout);
+      assert.equal(runResp.success, false);
+      assert.match(runResp.error, /Unknown flag --bogus/);
+    });
+
+    it('missing flag values fail loudly on BOTH paths', async () => {
+      const direct = await execFail(['snapshot', '--tab']);
+      assert.notEqual(direct.code, 0);
+      assert.match(direct.stderr, /Flag --tab requires a value/);
+
+      const viaRun = await execFail(['run', 'snapshot --tab']);
+      assert.notEqual(viaRun.code, 0);
+      assert.match(viaRun.stderr, /Flag --tab requires a value/);
+    });
+
+    it('global CLI flags are never forwarded to the registry parser', async () => {
+      // --timeout (value flag) and --json/--sessiond (booleans) are bin.js-owned:
+      // the registry would reject them as unknown flags if they leaked through.
+      const resp = JSON.parse(
+        (await exec('node', ['bin.js', 'get', 'url', '--timeout', '5000', '--sessiond', '--json'], { cwd: ROOT, env })).stdout
+      );
+      assert.equal(resp.success, true);
+      assert.equal(resp.data.url, 'https://fake.test/');
+    });
+
+    it('quoted multi-word text survives the direct-verb rebuild (fill)', async () => {
+      const resp = JSON.parse(
+        (await exec('node', ['bin.js', 'fill', '@e1', 'hello "quoted" world', '--json'], { cwd: ROOT, env })).stdout
+      );
+      assert.equal(resp.success, true);
+      assert.equal(resp.data.filled, 'e1');
+    });
+
+    it('run requires exactly one command-string argument', async () => {
+      const missing = await execFail(['run']);
+      assert.notEqual(missing.code, 0);
+      assert.match(missing.stderr, /Usage: browserforce run/);
+
+      const extra = await execFail(['run', 'tabs', 'extra']);
+      assert.notEqual(extra.code, 0);
+      assert.match(extra.stderr, /Usage: browserforce run/);
+    });
+
+    it('run "help" prints the command help without needing the daemon', async () => {
+      const { stdout } = await exec('node', ['bin.js', 'run', 'help'], { cwd: ROOT, env });
+      assert.match(stdout, /BrowserForce commands:/);
+      assert.match(stdout, /click <ref> \[--tab name\]/);
+    });
+
+    it('snapshot rejects the old positional tab index with a teaching error', async () => {
+      const res = await execFail(['snapshot', '1', '--json']);
+      assert.notEqual(res.code, 0);
+      const resp = JSON.parse(res.stdout);
+      assert.match(resp.error, /snapshot takes no positional arguments/);
+      assert.match(resp.error, /--tab/);
+    });
+  });
 });
 
 describe('sessiond lifecycle hardening (stop / restart / warning / backend flags)', () => {
