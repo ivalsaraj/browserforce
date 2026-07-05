@@ -448,7 +448,11 @@ export function buildExecContext(
   runtimeRestrictions = {},
   pluginSkillRuntime = {},
 ) {
-  const { consoleLogs, setupConsoleCapture } = consoleHelpers;
+  // `pinnedPage` (per-run target, e.g. a command's --tab page) rides on the
+  // caps argument. It outranks the persistent userState.page for THIS run only
+  // and is never written back to state — concurrent runs against other tabs
+  // keep their own targets.
+  const { consoleLogs, setupConsoleCapture, pinnedPage = null } = consoleHelpers;
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
   // ref → { locator, frameChain } (engine-built; frameChain pierces OOPIF/same-origin frames)
   const lastRefToLocator = userState.__lastRefToLocator || (userState.__lastRefToLocator = new WeakMap());
@@ -535,6 +539,7 @@ export function buildExecContext(
   };
 
   const activePage = () => {
+    if (isUsablePage(pinnedPage)) return pinnedPage;
     if (isUsablePage(userState.page)) return userState.page;
     if (isUsablePage(defaultPage)) return defaultPage;
     throw new Error("No active page. Reuse an existing one first: state.page = context.pages()[0]. If there isn't one, create one with: state.page = await context.newPage()");
@@ -902,7 +907,10 @@ export function buildExecContext(
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     browserforceSettings,
     browserforceRestrictions,
-    page: defaultPage, context: ctx, state: userState,
+    // The run's top-level `page` binding is the pinned page when present, so
+    // canned snippets (`page.url()`, `page.keyboard.press`) target it too.
+    page: isUsablePage(pinnedPage) ? pinnedPage : defaultPage,
+    context: ctx, state: userState,
     snapshot, snapshotData, refToLocator, locatorForRef, waitForPageLoad, getLogs, clearLogs, getCDPSession,
     getBrowserforceStatus, getBrowserforcePageForTab,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,

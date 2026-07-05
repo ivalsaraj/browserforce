@@ -530,6 +530,56 @@ test('openNewPage creates, navigates, activates — and closes the page on navig
   assert.equal(runtime.getActivePage(), page, 'a failed open leaves the previous active tab in place');
 });
 
+test('runCommand({ page }) pins the run to that page without touching the active tab', async () => {
+  const active = makeTabPage({ title: 'Active' });
+  const target = makeTabPage({ title: 'Target' });
+  let builtCaps = null;
+  let builtDefaultPage = null;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages: [active, target] }),
+    buildExecContext: (page, _ctx, _state, caps) => {
+      builtDefaultPage = page;
+      builtCaps = caps;
+      return { page };
+    },
+    runCode: async (_code, execCtx) => execCtx.page,
+  });
+
+  runtime.setActivePage(active);
+  const result = await runtime.runCommand({ code: 'noop', page: target });
+
+  assert.equal(result, target, 'the run targets the pinned page');
+  assert.equal(builtDefaultPage, target, 'the pinned page is the run default page');
+  assert.equal(builtCaps.pinnedPage, target, 'the pin travels to buildExecContext as caps.pinnedPage');
+  assert.equal(runtime.getActivePage(), active, 'pinning never mutates the persistent active tab');
+
+  // Unpinned runs keep the existing behavior (and pass no pin).
+  const unpinned = await runtime.runCommand({ code: 'noop' });
+  assert.equal(unpinned, active);
+  assert.equal(builtCaps.pinnedPage, null, 'unpinned runs pass pinnedPage: null');
+});
+
+test('runCommand({ page }) fails loudly on a closed pin instead of falling back to the active tab', async () => {
+  const active = makeTabPage({ title: 'Active' });
+  const stale = makeTabPage({ title: 'Stale' });
+  stale.closeNow();
+  let ran = false;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages: [active] }),
+    buildExecContext: (page) => ({ page }),
+    runCode: async () => { ran = true; },
+  });
+  runtime.setActivePage(active);
+
+  await assert.rejects(
+    () => runtime.runCommand({ code: 'noop', page: stale }),
+    (err) => err.code === 'TAB_NOT_USABLE' && /closed/.test(err.message),
+    'a stale pin is a structured failure, never a silent wrong-tab run',
+  );
+  assert.equal(ran, false, 'no code runs against the wrong tab');
+  assert.equal(runtime.getActivePage(), active);
+});
+
 test('runCommand targets a usable state.page, drops closed/throwing handles, and re-pins the fallback', async () => {
   const clock = makeFakeClock();
   const open = makeClosablePage(false);

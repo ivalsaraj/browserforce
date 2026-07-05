@@ -287,6 +287,28 @@ async function activeTabRow(runtime) {
   return rows.find((row) => row.active) ?? null;
 }
 
+/**
+ * Resolve a verb's optional `--tab` target to a page for per-run pinning.
+ * Returns null when no tab was requested (the run uses the active page).
+ * Unknown targets fail with the documented teaching error — no reset hint.
+ */
+async function resolveVerbPage({ body, runtime }) {
+  const tab = String(body?.tab ?? '').trim();
+  if (!tab) return null;
+  try {
+    const { page } = await runtime.resolveTabTarget(tab);
+    return page;
+  } catch (err) {
+    if (err?.code === 'TAB_NOT_FOUND') {
+      throw new BrowserforceCommandError(`No tab named "${tab}". Run browserforce "tabs" to see available tabs.`, {
+        code: 'TAB_NOT_FOUND',
+        suggestion: 'Run "tabs" to list open tabs and their stable handles.',
+      });
+    }
+    throw wrapTabStateError(err);
+  }
+}
+
 // ─── Verb executors ──────────────────────────────────────────────────────────
 // Normalized input shape per verb (shared by the sessiond JSON body path and
 // the parsed command-string path): each executor validates, builds a snippet,
@@ -375,73 +397,80 @@ const VERB_EXECUTORS = {
   },
 
   async snapshot({ body, runtime, timeout }) {
+    const page = await resolveVerbPage({ body, runtime });
     const args = {
       selector: body?.selector,
       search: body?.search,
       interactiveOnly: body?.interactiveOnly === true,
     };
     const code = `return await snapshotData(${JSON.stringify(args)});`;
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 
   async click({ body, runtime, timeout }) {
     const ref = normalizeRef(body?.ref);
     if (!ref) throw usageError('click requires a ref (e.g. click @e2)');
+    const page = await resolveVerbPage({ body, runtime });
     const code = refLocatorSnippet(ref, 'await locator.click();', `{ clicked: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 
   async hover({ body, runtime, timeout }) {
     const ref = normalizeRef(body?.ref);
     if (!ref) throw usageError('hover requires a ref (e.g. hover @e2)');
+    const page = await resolveVerbPage({ body, runtime });
     const code = refLocatorSnippet(ref, 'await locator.hover();', `{ hovered: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 
   async fill({ body, runtime, timeout }) {
     const ref = normalizeRef(body?.ref);
     if (!ref || body?.text === undefined) throw usageError('fill requires a ref and text (e.g. fill @e3 "hello")');
+    const page = await resolveVerbPage({ body, runtime });
     const text = String(body.text ?? '');
     const code = refLocatorSnippet(ref, `await locator.fill(${JSON.stringify(text)});`, `{ filled: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 
   async type({ body, runtime, timeout }) {
     const ref = normalizeRef(body?.ref);
     if (!ref || body?.text === undefined) throw usageError('type requires a ref and text (e.g. type @e4 "abc")');
+    const page = await resolveVerbPage({ body, runtime });
     const text = String(body.text ?? '');
     const code = refLocatorSnippet(ref, `await locator.pressSequentially(${JSON.stringify(text)});`, `{ typed: ${JSON.stringify(ref)} }`);
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 
   async press({ body, runtime, timeout }) {
     const key = String(body?.key ?? '');
     if (!key) throw usageError('press requires a key');
+    const page = await resolveVerbPage({ body, runtime });
     const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 
   async wait({ body, runtime, timeout }) {
     const kind = String(body?.kind ?? '');
     const code = waitSnippet(kind, body?.value, timeout);
     if (!code) throw usageError(`unknown wait kind: ${kind}`);
-    return runtime.runCommand({ code, timeout: timeout + WAIT_RUN_HEADROOM_MS });
+    const page = await resolveVerbPage({ body, runtime });
+    return runtime.runCommand({ code, timeout: timeout + WAIT_RUN_HEADROOM_MS, page });
   },
 
   async get({ body, runtime, timeout }) {
     const what = String(body?.what ?? '');
-    if (what === 'url') {
-      return runtime.runCommand({ code: 'return { url: page.url() };', timeout });
-    }
-    if (what === 'title') {
-      return runtime.runCommand({ code: 'return { title: await page.title() };', timeout });
+    if (what === 'url' || what === 'title') {
+      const page = await resolveVerbPage({ body, runtime });
+      const code = what === 'url' ? 'return { url: page.url() };' : 'return { title: await page.title() };';
+      return runtime.runCommand({ code, timeout, page });
     }
     if (what === 'text' || what === 'html') {
       const ref = normalizeRef(body?.ref);
       if (!ref) throw usageError(`get ${what} requires a ref (e.g. get ${what} @e2)`);
+      const page = await resolveVerbPage({ body, runtime });
       const expr = what === 'text' ? '{ text: await locator.textContent() }' : '{ html: await locator.innerHTML() }';
       const code = refLocatorSnippet(ref, '', expr);
-      return runtime.runCommand({ code, timeout });
+      return runtime.runCommand({ code, timeout, page });
     }
     throw usageError(`unknown get target: ${what}`);
   },
@@ -449,9 +478,10 @@ const VERB_EXECUTORS = {
   async eval({ body, runtime, timeout }) {
     const code = String(body?.code ?? '');
     if (!code.trim()) throw usageError('eval requires code');
+    const page = await resolveVerbPage({ body, runtime });
     // The user's code IS the snippet — same guarded runCode() boundary as MCP
     // exec / CLI -e. Never eval()/new Function() at the caller.
-    return runtime.runCommand({ code, timeout });
+    return runtime.runCommand({ code, timeout, page });
   },
 };
 
@@ -519,21 +549,22 @@ function commandToBody({ verb, args, flags }) {
         selector: flags.selector,
         search: flags.search,
         interactiveOnly: flags.interactive === true,
+        tab: flags.tab,
       };
     case 'click':
     case 'hover':
-      return { ref: args[0] };
+      return { ref: args[0], tab: flags.tab };
     case 'fill':
     case 'type':
-      return { ref: args[0], text: args.length > 1 ? args.slice(1).join(' ') : undefined };
+      return { ref: args[0], text: args.length > 1 ? args.slice(1).join(' ') : undefined, tab: flags.tab };
     case 'press':
-      return { key: args[0] };
+      return { key: args[0], tab: flags.tab };
     case 'wait':
-      return { kind: args[0], value: args.length > 1 ? args.slice(1).join(' ') : undefined };
+      return { kind: args[0], value: args.length > 1 ? args.slice(1).join(' ') : undefined, tab: flags.tab };
     case 'get':
-      return { what: args[0], ref: args[1] };
+      return { what: args[0], ref: args[1], tab: flags.tab };
     case 'eval':
-      return { code: args.join(' ') };
+      return { code: args.join(' '), tab: flags.tab };
     default:
       return {};
   }

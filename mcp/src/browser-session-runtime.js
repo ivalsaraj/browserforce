@@ -585,9 +585,16 @@ export function createBrowserSessionRuntime(deps = {}) {
    * boundary. Ensures the browser is connected, resolves the persistent active
    * page (state.page) so every verb targets the same tab, and counts the work as
    * an active operation so the idle disconnect timer never fires mid-command.
+   *
+   * An optional `page` pins THIS run to an explicit target (a command's --tab
+   * page) WITHOUT touching userState.page: the pin travels to buildExecContext
+   * as `pinnedPage`, so concurrent commands against other tabs stay isolated.
+   * A stale pin fails loudly rather than silently falling back to the active
+   * tab (acting on the wrong tab is worse than failing).
+   *
    * Returns runCode()'s raw result.
    */
-  async function runCommand({ code, timeout = 30000 } = {}) {
+  async function runCommand({ code, timeout = 30000, page: pinnedPage = null } = {}) {
     if (typeof buildExecContext !== 'function' || typeof runCode !== 'function') {
       throw new Error('browser session runtime: buildExecContext and runCode deps are required for runCommand');
     }
@@ -595,12 +602,20 @@ export function createBrowserSessionRuntime(deps = {}) {
     beginOperation();
     try {
       const ctx = getContext();
-      const page = resolveActivePage(ctx);
+      let page;
+      if (pinnedPage) {
+        if (!isUsablePage(pinnedPage)) {
+          throw tabStateError('TAB_NOT_USABLE', 'The target tab was closed before the command ran. Run tabs to list open tabs.');
+        }
+        page = pinnedPage;
+      } else {
+        page = resolveActivePage(ctx);
+      }
       const execCtx = buildExecContext(
         page,
         ctx,
         userState,
-        { consoleLogs, setupConsoleCapture },
+        { consoleLogs, setupConsoleCapture, pinnedPage: pinnedPage || null },
         pluginHelpers,
         await getAgentPreferencesForSession(),
         await getBrowserforceRestrictionsForSession(),

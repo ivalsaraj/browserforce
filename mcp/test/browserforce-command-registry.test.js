@@ -13,6 +13,7 @@ import {
   BrowserforceCommandError,
 } from '../src/browserforce-command-registry.js';
 import { createBrowserSessionRuntime } from '../src/browser-session-runtime.js';
+import { buildExecContext, runCode } from '../src/exec-engine.js';
 
 // Fake runtime that records runCommand() calls — proves every action routes
 // through the guarded runtime boundary with the expected generated snippet.
@@ -80,6 +81,180 @@ function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
   const run = (command, timeout) => executeBrowserforceCommand({ command, runtime, timeout });
   return { runtime, run, pages: list };
 }
+
+// ─── --tab routing (per-run pinned pages) ─────────────────────────────────────
+
+// Runtime with recording exec deps: captures which page each run was pinned to
+// (via buildExecContext's caps.pinnedPage) without running real snippets.
+function pinnedRuntimeEnv({ pages = [] } = {}) {
+  const list = [...pages];
+  const context = {
+    on() {},
+    pages: () => list,
+    newPage: async () => {
+      const page = fakePage({ title: 'New Tab' });
+      list.push(page);
+      return page;
+    },
+  };
+  const browser = { isConnected: () => true, contexts: () => [context], on() {}, close: async () => {} };
+  const runs = [];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => browser,
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    buildExecContext: (page, _ctx, _state, caps) => ({ page, pinnedPage: caps?.pinnedPage ?? null }),
+    runCode: async (code, execCtx) => {
+      runs.push({ code, page: execCtx.page, pinnedPage: execCtx.pinnedPage });
+      return { ok: true };
+    },
+  });
+  const run = (command, timeout) => executeBrowserforceCommand({ command, runtime, timeout });
+  return { runtime, run, runs, pages: list };
+}
+
+describe('--tab routing pins the run to the resolved page', () => {
+  it('every ref/read command with --tab pins the resolved page and leaves the active tab alone', async () => {
+    const docs = fakePage({ url: 'https://docs.test/', title: 'Docs' });
+    const app = fakePage({ url: 'https://app.test/', title: 'App' });
+    const { runtime, run, runs } = pinnedRuntimeEnv({ pages: [docs, app] });
+    runtime.setActivePage(docs);
+    runtime.setNamedPage('app', app);
+    runtime.setNamedPage('docs', docs);
+
+    const commands = [
+      'snapshot --tab docs',
+      'click @e2 --tab app',
+      'hover @e2 --tab app',
+      'fill @e3 "hello" --tab app',
+      'type @e4 "abc" --tab app',
+      'press Enter --tab app',
+      'wait text "Saved" --tab app',
+      'get title --tab docs',
+      'get html @e5 --tab docs',
+      'eval "return page.url()" --tab app',
+    ];
+    for (const command of commands) await run(command);
+
+    const expectedPins = [docs, app, app, app, app, app, app, docs, docs, app];
+    assert.equal(runs.length, commands.length);
+    runs.forEach((r, i) => {
+      assert.equal(r.pinnedPage, expectedPins[i], `${commands[i]} pins the resolved --tab page`);
+      assert.equal(r.page, expectedPins[i], `${commands[i]} exposes the pinned page as the run page`);
+    });
+    assert.equal(runtime.getActivePage(), docs, '--tab never changes the global active tab');
+  });
+
+  it('--tab accepts stable handles too', async () => {
+    const a = fakePage({ title: 'A' });
+    const b = fakePage({ title: 'B' });
+    const { runtime, run, runs } = pinnedRuntimeEnv({ pages: [a, b] });
+    runtime.setActivePage(a);
+    await runtime.listTabRows(); // assign handles t1/t2
+
+    await run('get url --tab t2');
+    assert.equal(runs[0].pinnedPage, b);
+  });
+
+  it('unknown --tab fails with the documented teaching error and no reset hint', async () => {
+    const { run, runs } = pinnedRuntimeEnv({ pages: [fakePage({ title: 'Only' })] });
+
+    await assert.rejects(
+      () => run('click @e2 --tab ghost'),
+      (err) => err instanceof BrowserforceCommandError
+        && err.code === 'TAB_NOT_FOUND'
+        && err.message === 'No tab named "ghost". Run browserforce "tabs" to see available tabs.'
+        && /tabs/.test(err.suggestion)
+        && err.resetHintAllowed === false,
+    );
+    assert.equal(runs.length, 0, 'nothing runs when the --tab target is unknown');
+  });
+});
+
+describe('--tab routing against the real exec engine (refs live per page)', () => {
+  // Fixture: two buttons → refs e1 (Save), e2 (Cancel).
+  const domNodes = [
+    { nodeId: 1, backendNodeId: 1, nodeName: 'HTML', attributes: [] },
+    { nodeId: 2, parentId: 1, backendNodeId: 20, nodeName: 'BUTTON', attributes: ['data-testid', 'save'] },
+    { nodeId: 3, parentId: 1, backendNodeId: 21, nodeName: 'BUTTON', attributes: ['data-testid', 'cancel'] },
+  ];
+  const axNodes = [
+    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: '' }, backendDOMNodeId: 1, childIds: ['2', '3'] },
+    { nodeId: '2', role: { value: 'button' }, name: { value: 'Save' }, backendDOMNodeId: 20, childIds: [] },
+    { nodeId: '3', role: { value: 'button' }, name: { value: 'Cancel' }, backendDOMNodeId: 21, childIds: [] },
+  ];
+
+  function makeEngineCdp() {
+    return {
+      async send(method) {
+        if (method === 'DOM.getFlattenedDocument') return { nodes: domNodes };
+        if (method === 'Accessibility.getFullAXTree') return { nodes: axNodes };
+        return {};
+      },
+      async detach() {},
+    };
+  }
+
+  function makeEngineLocator(page, selector, frameChain = []) {
+    return {
+      selector,
+      frameChain,
+      first() { return this; },
+      frameLocator(sel) { return { locator: (s) => makeEngineLocator(page, s, [...frameChain, sel]) }; },
+      async evaluate() {},
+      async click() { page.clicks.push(selector); },
+    };
+  }
+
+  function enginePage({ url, title }) {
+    const page = {
+      clicks: [],
+      isClosed: () => false,
+      url: () => url,
+      title: async () => title,
+      locator: (sel) => makeEngineLocator(page, sel),
+      frameLocator: (sel) => ({ locator: (s) => makeEngineLocator(page, s, [sel]) }),
+      context: () => ({ newCDPSession: async () => makeEngineCdp() }),
+      on() {},
+    };
+    page.mainFrame = () => page;
+    page.frames = () => [page];
+    return page;
+  }
+
+  it('snapshot --tab app stores refs under the app page; click @e2 --tab app resolves from that map', async () => {
+    const docs = enginePage({ url: 'https://docs.test/', title: 'Docs' });
+    const app = enginePage({ url: 'https://app.test/', title: 'App' });
+    const context = { on() {}, pages: () => [docs, app] };
+    const browser = { isConnected: () => true, contexts: () => [context], on() {}, close: async () => {} };
+    const runtime = createBrowserSessionRuntime({
+      connectBrowser: async () => browser,
+      getRelayHttpUrl: () => 'http://relay.test',
+      fetch: async () => ({ ok: true, json: async () => ({}) }),
+      buildExecContext, // REAL exec engine
+      runCode,          // REAL guarded boundary
+    });
+    const run = (command) => executeBrowserforceCommand({ command, runtime });
+
+    runtime.setActivePage(docs);
+    runtime.setNamedPage('app', app);
+
+    const snap = await run('snapshot --tab app');
+    assert.equal(snap.data.url, 'https://app.test/', 'the snapshot ran against the app page, not the active docs page');
+    assert.equal(runtime.getActivePage(), docs, 'snapshot --tab left the active tab unchanged');
+
+    // Refs were stored under the app page: clicking WITHOUT --tab (active docs
+    // page) must fail — the ref map belongs to the app page.
+    await assert.rejects(() => run('click @e2'), /Unknown ref/);
+    assert.deepEqual(docs.clicks, []);
+
+    const click = await run('click @e2 --tab app');
+    assert.deepEqual(click.data, { clicked: 'e2' });
+    assert.deepEqual(app.clicks, ['[data-testid="cancel"]'], 'the click resolved e2 from the app page ref map');
+    assert.deepEqual(docs.clicks, [], 'the active page was never touched');
+    assert.equal(runtime.getActivePage(), docs, 'the active tab is still the docs page');
+  });
+});
 
 describe('tab commands: tabs / use / open / rename / forget', () => {
   it('tabs returns structured rows with stable handles, active marker, and names', async () => {
