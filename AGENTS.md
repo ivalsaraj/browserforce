@@ -16,7 +16,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 │                                                                      │
 │  ┌─────────────────────────────┐  ┌───────────────────────────────┐ │
 │  │  MCP Client (Claude, etc.)  │  │  Direct Playwright Client     │ │
-│  │  Uses execute/reset tools    │  │  chromium.connectOverCDP()    │ │
+│  │  Uses browserforce/exec     │  │  chromium.connectOverCDP()    │ │
 │  └──────────┬──────────────────┘  └──────────┬────────────────────┘ │
 │             │ MCP/stdio                      │ CDP/WebSocket        │
 └─────────────┼────────────────────────────────┼──────────────────────┘
@@ -24,7 +24,8 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
               ▼                                │
 ┌──────────────────────────────────┐           │
 │  MCP Server (mcp/src/index.js)   │           │
-│  - 3 tools: execute + help + reset │        │
+│  - 4 tools: browserforce + exec  │           │
+│    + reset + help                │           │
 │  - Playwright-core CDP client    ├───────────┘
 │  - Auto-discovers relay token    │
 └──────────────┬───────────────────┘
@@ -192,9 +193,47 @@ For side-panel chat continuity, BrowserForce session metadata stores Codex provi
 - Emit and consume `run.usage` and `run.provider_session` events.
 - Side-panel hydrates usage from `GET /v1/sessions/:sessionId` and shows `Context: unavailable` when telemetry is missing.
 
+### MCP Tool Surface & Shared Command Registry
+
+The MCP server exposes exactly four tools: **`browserforce`** (high-level
+command strings), **`exec`** (raw JS escape hatch — the tool formerly named
+`execute`), **`reset`**, and **`help`**. Command-first is the taught default;
+`exec` is for work the command surface cannot express.
+
+- **Rule**: ALL browser command parsing/execution lives in the shared registry
+  `mcp/src/browserforce-command-registry.js` (`parseBrowserforceCommand` /
+  `executeBrowserforceCommand` / `executeBrowserforceVerb`). CLI direct verbs
+  (`bin.js`), sessiond HTTP verbs (`cli/sessiond.js`), and the MCP
+  `browserforce` tool are thin transports over it — never fork command
+  semantics per surface. Every command executes through
+  `runtime.runCommand()` → `runCode()` (the guarded vm boundary); never call
+  raw Playwright APIs from a transport handler.
+- **Rule**: Tab identity — stable `t<N>` handles are permanent per page
+  (`getStablePageHandle`); names are user labels validated by
+  `assertValidTabName` (identifier-like, `t<N>` shape reserved for handles,
+  uniqueness enforced, `--replace` moves a name explicitly).
+- **Rule**: `--tab <target>` pins the page for THAT run only (per-run
+  `pinnedPage` on `buildExecContext`); it must never mutate the persistent
+  active tab (`state.page`), which only `use`/`open` (or snippets assigning
+  `state.page`) change. The raw `exec` top-level `page` follows the runtime
+  active page — never rebind it to `pages()[0]` when an active page exists.
+- **Rule**: Command errors are `BrowserforceCommandError` with `code`,
+  actionable `suggestion`, and `resetHintAllowed` — reset hints are reserved
+  for connection/internal failures, never selector/stale-ref/tab/parse errors.
+  Sessiond appends the suggestion to the wire `error` string; keep that.
+- **Real-Chrome discipline (100+ tabs)**: never issue an unbounded
+  `page.title()` against a lazily-attached tab — the relay synthesizes
+  `Runtime.enable`, the JS execution context never arrives, and the promise
+  never settles (`.catch()` does not fire). Use the bounded readers
+  (`pageTitleBounded` in the runtime, `boundedPageTitle` in exec-engine
+  snapshots, the raced `get title` snippet). Initial Playwright page discovery
+  streams for seconds at that scale: `waitForInitialPageDiscovery` waits for
+  the relay-reported tab count (`/extension/status`) or a stable-count settle,
+  bounded by a 5s timeout.
+
 ### Execute Timeout Cancellation
 
-`runCode()` is the single execution boundary for `execute` (MCP) and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.
+`runCode()` is the single execution boundary for the MCP `exec` tool (formerly `execute`), the `browserforce` command tool's canned snippets, and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.
 
 Exposed BrowserForce helpers and the persistent `state` object are wrapped by `guardObject()` / `guardAsyncFunction()`: a guarded call or property access throws once the run has aborted, so a timed-out snippet cannot keep driving Chrome or mutate `state`. `shouldGuardObject()` only guards "behavioral" values (class instances, or POJOs/arrays exposing methods) so plain-data results (`pluginCatalog()`, `getBrowserforceStatus()`) and the `formatResult()` Buffer/labeled-screenshot contract stay raw. `state` is force-guarded and its writes store the **unwrapped** value, so a timed-out run never persists a run-bound proxy onto `state` and poisons the next run that reads it.
 
@@ -225,7 +264,7 @@ security contract: binds `127.0.0.1` only, random 32-byte bearer token in a
 `0o600` lock/url sidecar, `Authorization: Bearer` on every state route, and
 `/health` is the only unauthenticated route (leaks no secret). Every verb routes
 through the shared `runtime.runCommand()` → `runCode()` guarded boundary — the
-exact same vm boundary as MCP `execute` and one-shot `-e`. Never `eval()` /
+exact same vm boundary as MCP `exec` and one-shot `-e`. Never `eval()` /
 `new Function()` user input at the caller; pass it as the snippet.
 
 Backend policy (`mcp/src/backend-selection.js`, negotiated in
@@ -297,7 +336,9 @@ When reviewing changes to this project:
 | `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
 | `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
-| `mcp/src/index.js` | ~300 | MCP server — execute + help + reset tools via Playwright-core `connectOverCDP` |
+| `mcp/src/index.js` | ~400 | MCP server — browserforce + exec + reset + help tools via Playwright-core `connectOverCDP` |
+| `mcp/src/browserforce-command-registry.js` | ~700 | Shared command registry — parser + executor for CLI/sessiond/MCP command surfaces |
+| `mcp/src/browser-session-runtime.js` | ~800 | Shared browser session runtime — connection lifecycle, active tab, handles/names, runCommand |
 
 ## Agent Roles
 

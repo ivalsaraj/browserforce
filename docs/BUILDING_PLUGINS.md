@@ -120,12 +120,12 @@ Plugins are loaded at startup. Kill and restart the MCP server after dropping a 
 pnpm mcp
 ```
 
-### Step 4 — Call the helper from execute
+### Step 4 — Call the helper from exec
 
-Once loaded, `hl__highlight` and `hl__clearHighlights` are available as globals inside every `execute()` call:
+Once loaded, `hl__highlight` and `hl__clearHighlights` are available as globals inside every `exec` call (the MCP tool formerly named `execute`):
 
 ```js
-// In an execute() block:
+// In an exec block:
 const result = await hl__highlight(page, 'button[type="submit"]', '#f90', 3000);
 if (!result.found) return 'Element not found';
 return `Highlighted: ${result.selector}`;
@@ -151,9 +151,9 @@ See [Section 7](#7-submitting-a-plugin-pr-checklist) for the full checklist.
 
 Every plugin capability maps to one of four surfaces. Pick the one that matches how the capability will be used.
 
-### `helpers` — page utilities called from `execute()`
+### `helpers` — page utilities called from `exec`
 
-Use when the capability needs to compose with other execute code inline — extracting data, manipulating the DOM, reading state. The agent writes a script that calls your helper as a function and uses the return value immediately.
+Use when the capability needs to compose with other exec code inline — extracting data, manipulating the DOM, reading state. The agent writes a script that calls your helper as a function and uses the return value immediately.
 
 ```js
 helpers: {
@@ -168,7 +168,7 @@ helpers: {
 }
 ```
 
-Called from execute:
+Called from exec:
 ```js
 const data = await extractTableData(page, '#results-table');
 return JSON.stringify(data);
@@ -297,7 +297,7 @@ Examples:
 
 Why this convention exists:
 - Reduces helper name conflicts across plugins.
-- Makes plugin helper calls clearly identifiable in side panel execute traces.
+- Makes plugin helper calls clearly identifiable in side panel exec traces.
 - Keeps plugin metadata machine-parseable for UI labeling.
 
 Recommended pattern:
@@ -362,7 +362,7 @@ The following will cause a PR to be rejected without review.
 
 **Single responsibility.** One plugin, one concern. Don't bundle 10 unrelated helpers into one file. If it needs its own README section, it needs its own plugin.
 
-**Use the helper naming convention.** Helper names become globals in `execute()`. Prefer canonical `<prefix>__<action>` names, and keep aliases only for compatibility:
+**Use the helper naming convention.** Helper names become globals in `exec`. Prefer canonical `<prefix>__<action>` names, and keep aliases only for compatibility:
 
 | Bad | Good |
 |-----|------|
@@ -464,7 +464,7 @@ Three levels before submitting.
 
 ### Level 1 — Smoke test (required)
 
-Install locally, restart the MCP server, run a minimal `execute()` call:
+Install locally, restart the MCP server, run a minimal `exec` call:
 
 ```js
 // Minimal smoke test
@@ -578,7 +578,7 @@ export default {
     // browser → Playwright Browser instance
   },
 
-  // Page utilities injected as globals into every execute() call.
+  // Page utilities injected as globals into every exec call.
   // First argument is always `page`. Return values are available to the agent.
   helpers: {
     async myHelper(page, param) {
@@ -586,7 +586,7 @@ export default {
     }
   },
 
-  // Standalone MCP tools. Agents call these by name, not from execute().
+  // Standalone MCP tools. Agents call these by name, not from exec.
   tools: [{
     name: 'my_tool',
     description: 'What this tool does and when the agent should call it.',
@@ -612,6 +612,6 @@ export default {
 | Surface | Receives | Returns | When to use |
 |---------|----------|---------|-------------|
 | `setup` | `{ browser }` | void | One-time init: open connections, warm state |
-| `helpers` | `(page, ...args)` | any | Inline page utilities composed inside `execute()` |
+| `helpers` | `(page, ...args)` | any | Inline page utilities composed inside `exec` |
 | `tools` | `(params, { browser, context })` | MCP content | Standalone agent-callable actions with own schema |
 | `hooks` | varies by hook | void | Passive observers — logging, monitoring, interception |
