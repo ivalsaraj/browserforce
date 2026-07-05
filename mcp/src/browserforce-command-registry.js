@@ -254,6 +254,39 @@ function usageError(message, { code = 'BAD_COMMAND_USAGE' } = {}) {
   return new BrowserforceCommandError(message, { code, suggestion: HELP_SUGGESTION });
 }
 
+// Map the runtime's plain tab-state errors (code-only, import-free by design)
+// to agent-facing structured command errors with actionable suggestions.
+// None of these are connection failures, so reset hints are never allowed.
+const TAB_ERROR_SUGGESTIONS = {
+  TAB_NAME_IN_USE: 'Pass --replace to move the name to this tab.',
+  TAB_NAME_NOT_FOUND: 'Run "tabs" to see named tabs.',
+  TAB_NOT_FOUND: 'Run "tabs" to list open tabs and their stable handles.',
+  TAB_AMBIGUOUS: 'Use a stable t<N> handle or a more specific query.',
+  TAB_NOT_USABLE: 'That tab is closed. Run "tabs" to list open tabs.',
+  BAD_TAB_NAME: HELP_SUGGESTION,
+};
+
+function wrapTabStateError(err) {
+  if (err instanceof BrowserforceCommandError) return err;
+  const suggestion = TAB_ERROR_SUGGESTIONS[err?.code];
+  if (!suggestion) return err;
+  return new BrowserforceCommandError(err.message, { code: err.code, suggestion });
+}
+
+// Normalize an `open` target: keep anything with an explicit scheme
+// (https:, about:, chrome:), default the rest to https://.
+function normalizeOpenUrl(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s;
+  return `https://${s}`;
+}
+
+async function activeTabRow(runtime) {
+  const rows = await runtime.listTabRows();
+  return rows.find((row) => row.active) ?? null;
+}
+
 // ─── Verb executors ──────────────────────────────────────────────────────────
 // Normalized input shape per verb (shared by the sessiond JSON body path and
 // the parsed command-string path): each executor validates, builds a snippet,
@@ -265,6 +298,82 @@ function resolveTimeout(requested, fallback = 30000) {
 }
 
 const VERB_EXECUTORS = {
+  async tabs({ runtime }) {
+    return { tabs: await runtime.listTabRows() };
+  },
+
+  async use({ body, runtime }) {
+    const target = String(body?.target ?? '').trim();
+    if (!target) throw usageError('use requires a tab target (e.g. use t2, use docs, or use part-of-a-title)');
+    try {
+      const { page, matchedBy, warning } = await runtime.resolveTabTarget(target);
+      runtime.setActivePage(page);
+      const active = await activeTabRow(runtime);
+      return { active, matchedBy, ...(warning ? { warning } : {}) };
+    } catch (err) {
+      throw wrapTabStateError(err);
+    }
+  },
+
+  async open({ body, runtime, timeout }) {
+    const url = normalizeOpenUrl(body?.url);
+    if (!url) throw usageError('open requires a url (e.g. open https://example.com)');
+    const name = String(body?.as ?? '').trim();
+    const replace = body?.replace === true;
+
+    // Preflight BEFORE creating anything, mirroring the MCP execute flow:
+    // restrictions come from relay HTTP (no CDP), so attached-only sessions
+    // fail here without a new tab ever being created.
+    const restrictions = await runtime.getBrowserforceRestrictionsForSession();
+    if (restrictions?.mode === 'manual' || restrictions?.noNewTabs) {
+      throw new BrowserforceCommandError('New tabs are disabled in this BrowserForce session.', {
+        code: 'NEW_TABS_DISABLED',
+        suggestion: 'Attach a tab with the BrowserForce extension, then target it with "tabs" and "use".',
+      });
+    }
+    // Name-conflict preflight so a losing open never leaves an orphan tab.
+    if (name && runtime.getNamedPage(name) && !replace) {
+      throw new BrowserforceCommandError(`Tab name "${name}" is already in use.`, {
+        code: 'TAB_NAME_IN_USE',
+        suggestion: 'Pass --replace to move the name to the new tab.',
+      });
+    }
+
+    try {
+      const page = await runtime.openNewPage({ url, timeout });
+      if (name) runtime.setNamedPage(name, page, { replace });
+      const active = await activeTabRow(runtime);
+      return { opened: url, tab: active };
+    } catch (err) {
+      throw wrapTabStateError(err);
+    }
+  },
+
+  async rename({ body, runtime }) {
+    const from = String(body?.from ?? '').trim();
+    const to = String(body?.to ?? '').trim();
+    if (!from || !to) throw usageError('rename requires the current and new name (e.g. rename docs api-docs)');
+    try {
+      const result = runtime.renamePageName(from, to, { replace: body?.replace === true });
+      return { renamed: { from, to: result.name, replaced: result.replaced } };
+    } catch (err) {
+      throw wrapTabStateError(err);
+    }
+  },
+
+  async forget({ body, runtime }) {
+    const name = String(body?.name ?? '').trim();
+    if (!name) throw usageError('forget requires a name (e.g. forget docs)');
+    const removed = runtime.forgetPageName(name);
+    if (!removed) {
+      throw new BrowserforceCommandError(`No tab named "${name}".`, {
+        code: 'TAB_NAME_NOT_FOUND',
+        suggestion: 'Run "tabs" to see named tabs.',
+      });
+    }
+    return { forgot: name };
+  },
+
   async snapshot({ body, runtime, timeout }) {
     const args = {
       selector: body?.selector,
@@ -394,6 +503,17 @@ run snapshot again after navigation or UI changes.`;
 // by the sessiond JSON path, so both surfaces execute identically.
 function commandToBody({ verb, args, flags }) {
   switch (verb) {
+    case 'tabs':
+      return {};
+    case 'use':
+      // Multiword soft-match targets ("use quarterly reports") join back up.
+      return { target: args.join(' ') };
+    case 'open':
+      return { url: args[0], as: flags.as, replace: flags.replace === true };
+    case 'rename':
+      return { from: args[0], to: args[1], replace: flags.replace === true };
+    case 'forget':
+      return { name: args[0] };
     case 'snapshot':
       return {
         selector: flags.selector,
@@ -431,13 +551,6 @@ export async function executeBrowserforceCommand({ command, runtime, timeout } =
 
   if (verb === 'help') {
     return { data: COMMAND_HELP_TEXT, warning: null };
-  }
-
-  if (verb === 'tabs' || verb === 'use' || verb === 'open' || verb === 'rename' || verb === 'forget') {
-    throw new BrowserforceCommandError(`Command "${verb}" is not implemented yet.`, {
-      code: 'NOT_IMPLEMENTED',
-      suggestion: HELP_SUGGESTION,
-    });
   }
 
   const body = commandToBody(parsed);

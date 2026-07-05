@@ -401,22 +401,133 @@ test('resolveCommandPage resolves handles, names, active page, and fails structu
   await runtime.ensureBrowser();
 
   const [row1, row2] = runtime.listStablePages();
-  assert.equal(runtime.resolveCommandPage({ tab: row2.handle }), p2, 'resolves by stable handle');
-  assert.equal(runtime.resolveCommandPage({ tab: row2.handle.toUpperCase() }), p2, 'handles are case-insensitive');
+  assert.equal(await runtime.resolveCommandPage({ tab: row2.handle }), p2, 'resolves by stable handle');
+  assert.equal(await runtime.resolveCommandPage({ tab: row2.handle.toUpperCase() }), p2, 'handles are case-insensitive');
 
   runtime.setNamedPage('docs', p1);
-  assert.equal(runtime.resolveCommandPage({ tab: 'docs' }), p1, 'resolves by name');
+  assert.equal(await runtime.resolveCommandPage({ tab: 'docs' }), p1, 'resolves by name');
 
   runtime.setActivePage(p2);
-  assert.equal(runtime.resolveCommandPage({}), p2, 'no tab means the active page');
-  assert.equal(runtime.resolveCommandPage({ tab: row1.handle }), p1, 'resolving a tab does not require it to be active');
+  assert.equal(await runtime.resolveCommandPage({}), p2, 'no tab means the active page');
+  assert.equal(await runtime.resolveCommandPage({ tab: row1.handle }), p1, 'resolving a tab does not require it to be active');
   assert.equal(runtime.getActivePage(), p2, 'resolveCommandPage never changes the active tab');
 
-  assert.throws(
+  await assert.rejects(
     () => runtime.resolveCommandPage({ tab: 'nope' }),
     (err) => err.code === 'TAB_NOT_FOUND' && /tabs/.test(err.message),
     'unknown tabs fail with a structured code and a tabs suggestion',
   );
+});
+
+test('listTabRows returns structured rows with handles, active marker, and names', async () => {
+  const p1 = makeTabPage({ url: 'https://docs.test/', title: 'Docs' });
+  const p2 = makeTabPage({ url: 'https://app.test/', title: 'App' });
+  const runtime = makeTabRuntime([p1, p2]);
+  await runtime.ensureBrowser();
+
+  runtime.setNamedPage('docs', p1);
+  runtime.setActivePage(p2);
+
+  const rows = await runtime.listTabRows();
+  assert.deepEqual(rows, [
+    { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', active: false, name: 'docs' },
+    { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', active: true, name: null },
+  ]);
+});
+
+test('resolveTabTarget soft-matching tiers: exact URL beats substring, substring beats title', async () => {
+  const exact = makeTabPage({ url: 'https://app.heymantle.com/reports/mrr', title: 'MRR' });
+  const other = makeTabPage({ url: 'https://app.heymantle.com/reports/mrr/details', title: 'MRR details' });
+  const titled = makeTabPage({ url: 'https://elsewhere.test/', title: 'quarterly reports overview' });
+  const runtime = makeTabRuntime([exact, other, titled]);
+  await runtime.ensureBrowser();
+
+  const exactHit = await runtime.resolveTabTarget('https://app.heymantle.com/reports/mrr');
+  assert.equal(exactHit.page, exact, 'an exact URL match wins even when it is also a substring of another URL');
+  assert.equal(exactHit.matchedBy, 'url');
+
+  const substringHit = await runtime.resolveTabTarget('reports/mrr/details');
+  assert.equal(substringHit.page, other);
+  assert.equal(substringHit.matchedBy, 'url-substring');
+
+  const titleHit = await runtime.resolveTabTarget('quarterly');
+  assert.equal(titleHit.page, titled);
+  assert.equal(titleHit.matchedBy, 'title-substring');
+});
+
+test('resolveTabTarget: ambiguity fails with candidates, stale handles fail immediately', async () => {
+  const a = makeTabPage({ url: 'https://one.test/dashboard', title: 'Dashboard' });
+  const b = makeTabPage({ url: 'https://two.test/dashboard', title: 'Dashboard' });
+  const runtime = makeTabRuntime([a, b]);
+  await runtime.ensureBrowser();
+
+  await assert.rejects(
+    () => runtime.resolveTabTarget('Dashboard'),
+    (err) => err.code === 'TAB_AMBIGUOUS' && /t1/.test(err.message) && /t2/.test(err.message),
+    'multiple matches in one tier list candidates instead of silently picking one',
+  );
+
+  await assert.rejects(
+    () => runtime.resolveTabTarget('t99'),
+    (err) => err.code === 'TAB_NOT_FOUND',
+    'a t-handle miss must not fall through to URL/title soft matching',
+  );
+});
+
+test('resolveTabTarget supports 1-based list positions with a stable-handle warning', async () => {
+  const a = makeTabPage({ title: 'A' });
+  const b = makeTabPage({ title: 'B' });
+  const runtime = makeTabRuntime([a, b]);
+  await runtime.ensureBrowser();
+
+  const hit = await runtime.resolveTabTarget('2');
+  assert.equal(hit.page, b);
+  assert.equal(hit.matchedBy, 'index');
+  assert.match(hit.warning, /t2/, 'index selection warns with the stable handle to use next time');
+});
+
+test('openNewPage creates, navigates, activates — and closes the page on navigation failure', async () => {
+  const existing = makeTabPage({ title: 'Existing' });
+  const ctxPages = [existing];
+  const createdPages = [];
+  let failNavigation = false;
+  const context = {
+    on() {},
+    pages: () => ctxPages,
+    newPage: async () => {
+      let closed = false;
+      const page = {
+        isClosed: () => closed,
+        url: () => 'https://opened.test/',
+        title: async () => 'Opened',
+        on() {},
+        mainFrame() { return 'main-frame'; },
+        goto: async (url) => {
+          if (failNavigation) throw new Error(`net::ERR_NAME_NOT_RESOLVED at ${url}`);
+        },
+        close: async () => { closed = true; },
+      };
+      ctxPages.push(page);
+      createdPages.push(page);
+      return page;
+    },
+  };
+  const browser = {
+    isConnected: () => true,
+    contexts: () => [context],
+    on() {},
+    close: async () => {},
+  };
+  const runtime = createBrowserSessionRuntime({ connectBrowser: async () => browser });
+
+  const page = await runtime.openNewPage({ url: 'https://opened.test/' });
+  assert.equal(runtime.getActivePage(), page, 'a successful open activates the new page');
+
+  failNavigation = true;
+  await assert.rejects(() => runtime.openNewPage({ url: 'https://bad.test/' }), /ERR_NAME_NOT_RESOLVED/);
+  assert.equal(createdPages.length, 2);
+  assert.equal(createdPages[1].isClosed(), true, 'navigation failure closes the just-created page (no orphan tabs)');
+  assert.equal(runtime.getActivePage(), page, 'a failed open leaves the previous active tab in place');
 });
 
 test('runCommand targets a usable state.page, drops closed/throwing handles, and re-pins the fallback', async () => {

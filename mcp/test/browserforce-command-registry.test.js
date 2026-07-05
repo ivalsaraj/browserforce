@@ -12,6 +12,7 @@ import {
   normalizeRef,
   BrowserforceCommandError,
 } from '../src/browserforce-command-registry.js';
+import { createBrowserSessionRuntime } from '../src/browser-session-runtime.js';
 
 // Fake runtime that records runCommand() calls — proves every action routes
 // through the guarded runtime boundary with the expected generated snippet.
@@ -25,6 +26,212 @@ function fakeRuntime(result = { ok: true }) {
     },
   };
 }
+
+// ─── Real runtime over a fake browser (for tab-management commands) ──────────
+// Tab commands (tabs/use/open/rename/forget) act through the runtime's tab
+// APIs rather than generated snippets, so they are tested against the REAL
+// createBrowserSessionRuntime with a fake Playwright browser underneath.
+
+function fakePage({ url = 'about:blank', title = '' } = {}) {
+  let closed = false;
+  const page = {
+    isClosed: () => closed,
+    closeNow: () => { closed = true; },
+    url: () => page._url,
+    title: async () => page._title,
+    goto: async (next) => { page._url = next; },
+    close: async () => { closed = true; },
+    on() {},
+    mainFrame() { return 'main-frame'; },
+  };
+  page._url = url;
+  page._title = title;
+  return page;
+}
+
+function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
+  const list = [...pages];
+  const context = {
+    on() {},
+    pages: () => list,
+    newPage: async () => {
+      const page = fakePage({ title: 'New Tab' });
+      list.push(page);
+      return page;
+    },
+  };
+  const browser = {
+    isConnected: () => true,
+    contexts: () => [context],
+    on() {},
+    close: async () => {},
+  };
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => browser,
+    getRelayHttpUrl: () => 'http://relay.test',
+    // Restrictions default to none unless the test injects some.
+    fetch: async (url) => {
+      if (restrictions && url.endsWith('/restrictions')) {
+        return { ok: true, json: async () => restrictions };
+      }
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+  const run = (command, timeout) => executeBrowserforceCommand({ command, runtime, timeout });
+  return { runtime, run, pages: list };
+}
+
+describe('tab commands: tabs / use / open / rename / forget', () => {
+  it('tabs returns structured rows with stable handles, active marker, and names', async () => {
+    const docs = fakePage({ url: 'https://docs.test/', title: 'Docs' });
+    const app = fakePage({ url: 'https://app.test/', title: 'App' });
+    const { runtime, run } = tabRuntimeEnv({ pages: [docs, app] });
+    runtime.setNamedPage('docs', docs);
+    runtime.setActivePage(app);
+
+    const { data } = await run('tabs');
+    assert.deepEqual(data.tabs, [
+      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', active: false, name: 'docs' },
+      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', active: true, name: null },
+    ]);
+  });
+
+  it('the sessiond verb path returns the exact same tab rows as the command path', async () => {
+    const docs = fakePage({ url: 'https://docs.test/', title: 'Docs' });
+    const { runtime, run } = tabRuntimeEnv({ pages: [docs] });
+
+    const { data: commandData } = await run('tabs');
+    const verbData = await executeBrowserforceVerb({ verb: 'tabs', body: {}, runtime });
+    assert.deepEqual(verbData, commandData, 'both surfaces render from the same structured rows');
+  });
+
+  it('use selects by stable handle, name, and soft URL match', async () => {
+    const docs = fakePage({ url: 'https://docs.test/', title: 'Docs' });
+    const mrr = fakePage({ url: 'https://app.heymantle.com/reports/mrr', title: 'MRR' });
+    const { runtime, run } = tabRuntimeEnv({ pages: [docs, mrr] });
+
+    const byHandle = await run('use t2');
+    assert.equal(byHandle.data.active.handle, 't2');
+    assert.equal(byHandle.data.matchedBy, 'handle');
+    assert.equal(runtime.getActivePage(), mrr);
+
+    runtime.setNamedPage('docs', docs);
+    const byName = await run('use docs');
+    assert.equal(byName.data.matchedBy, 'name');
+    assert.equal(runtime.getActivePage(), docs);
+
+    const byUrl = await run('use app.heymantle.com/reports/mrr');
+    assert.equal(byUrl.data.matchedBy, 'url-substring');
+    assert.equal(runtime.getActivePage(), mrr);
+  });
+
+  it('use <position> works but warns to use the stable handle next time', async () => {
+    const a = fakePage({ title: 'A' });
+    const b = fakePage({ title: 'B' });
+    const { runtime, run } = tabRuntimeEnv({ pages: [a, b] });
+
+    const { data } = await run('use 2');
+    assert.equal(runtime.getActivePage(), b);
+    assert.equal(data.matchedBy, 'index');
+    assert.match(data.warning, /t2/, 'index selection warns with the stable handle');
+  });
+
+  it('ambiguous use fails listing candidates and never silently picks one', async () => {
+    const a = fakePage({ url: 'https://one.test/', title: 'Dashboard' });
+    const b = fakePage({ url: 'https://two.test/', title: 'Dashboard' });
+    const { runtime, run } = tabRuntimeEnv({ pages: [a, b] });
+    runtime.setActivePage(a);
+
+    await assert.rejects(
+      () => run('use Dashboard'),
+      (err) => err instanceof BrowserforceCommandError
+        && err.code === 'TAB_AMBIGUOUS'
+        && /t1/.test(err.message) && /t2/.test(err.message)
+        && err.resetHintAllowed === false,
+    );
+    assert.equal(runtime.getActivePage(), a, 'ambiguity leaves the active tab unchanged');
+  });
+
+  it('use with no match fails with a tabs suggestion and no reset hint', async () => {
+    const { run } = tabRuntimeEnv({ pages: [fakePage({ title: 'A' })] });
+    await assert.rejects(
+      () => run('use nothing-matches-this'),
+      (err) => err instanceof BrowserforceCommandError
+        && err.code === 'TAB_NOT_FOUND'
+        && /tabs/.test(err.suggestion)
+        && err.resetHintAllowed === false,
+    );
+  });
+
+  it('open creates a new active page and defaults bare domains to https', async () => {
+    const { runtime, run, pages } = tabRuntimeEnv({ pages: [fakePage({ title: 'Existing' })] });
+
+    const { data } = await run('open example.com');
+    assert.equal(pages.length, 2, 'open created a page');
+    assert.equal(pages[1]._url, 'https://example.com');
+    assert.equal(runtime.getActivePage(), pages[1], 'open activates the new page');
+    assert.equal(data.opened, 'https://example.com');
+    assert.equal(data.tab.active, true);
+  });
+
+  it('open --as names the new page; duplicate names need --replace', async () => {
+    const { runtime, run, pages } = tabRuntimeEnv({ pages: [] });
+
+    await run('open https://docs.test --as docs');
+    assert.equal(runtime.getNamedPage('docs'), pages[0]);
+
+    await assert.rejects(
+      () => run('open https://other.test --as docs'),
+      (err) => err instanceof BrowserforceCommandError
+        && err.code === 'TAB_NAME_IN_USE'
+        && /--replace/.test(err.suggestion),
+    );
+    assert.equal(pages.length, 1, 'the losing open never created an orphan tab');
+
+    await run('open https://other.test --as docs --replace');
+    assert.equal(pages.length, 2);
+    assert.equal(runtime.getNamedPage('docs'), pages[1], '--replace moves the name to the new tab');
+    assert.equal(pages[0].isClosed(), false, 'the previously named tab stays open');
+  });
+
+  it('open respects noNewTabs/manual restrictions without creating a page', async () => {
+    for (const restrictions of [{ noNewTabs: true }, { mode: 'manual' }]) {
+      const { run, pages } = tabRuntimeEnv({ pages: [fakePage()], restrictions });
+      await assert.rejects(
+        () => run('open https://example.com'),
+        (err) => err instanceof BrowserforceCommandError && err.code === 'NEW_TABS_DISABLED',
+      );
+      assert.equal(pages.length, 1, 'no tab is created when new tabs are disabled');
+    }
+  });
+
+  it('rename moves a name and forget removes it', async () => {
+    const docs = fakePage({ title: 'Docs' });
+    const app = fakePage({ title: 'App' });
+    const { runtime, run } = tabRuntimeEnv({ pages: [docs, app] });
+    runtime.setNamedPage('docs', docs);
+
+    const renamed = await run('rename docs api-docs');
+    assert.deepEqual(renamed.data.renamed, { from: 'docs', to: 'api-docs', replaced: false });
+    assert.equal(runtime.getNamedPage('api-docs'), docs);
+
+    runtime.setNamedPage('app', app);
+    await assert.rejects(
+      () => run('rename app api-docs'),
+      (err) => err.code === 'TAB_NAME_IN_USE' && /--replace/.test(err.suggestion),
+    );
+    const replaced = await run('rename app api-docs --replace');
+    assert.equal(replaced.data.renamed.replaced, true);
+    assert.equal(runtime.getNamedPage('api-docs'), app);
+
+    const forgot = await run('forget api-docs');
+    assert.deepEqual(forgot.data, { forgot: 'api-docs' });
+    await assert.rejects(
+      () => run('forget api-docs'),
+      (err) => err.code === 'TAB_NAME_NOT_FOUND' && /tabs/.test(err.suggestion),
+    );
+  });
+});
 
 describe('parseBrowserforceCommand', () => {
   it('parses bare verbs', () => {

@@ -422,27 +422,162 @@ export function createBrowserSessionRuntime(deps = {}) {
     return [...namedPages.entries()].map(([name, page]) => ({ name, page }));
   }
 
+  function nameForPage(page) {
+    for (const [name, candidate] of namedPages) {
+      if (candidate === page) return name;
+    }
+    return null;
+  }
+
+  /**
+   * Structured rows for every open tab — the single builder behind `tabs` on
+   * ALL surfaces (sessiond JSON, CLI --json, MCP text rendering), so stable
+   * handles can never exist in one output and not another.
+   */
+  async function listTabRows() {
+    await ensureBrowser();
+    beginOperation();
+    try {
+      // Use resolveActivePage (not getActivePage) so the row marked active is
+      // the tab a subsequent unnamed command would actually target.
+      const active = resolveActivePage(getContext());
+      const rows = [];
+      const stable = listStablePages();
+      for (let index = 0; index < stable.length; index += 1) {
+        const { handle, page } = stable[index];
+        let title = '';
+        let url = '';
+        try { title = await page.title(); } catch { /* page navigating/closed */ }
+        try { url = page.url(); } catch { /* page closed mid-listing */ }
+        rows.push({
+          handle,
+          index,
+          title,
+          url,
+          active: page === active,
+          name: nameForPage(page),
+        });
+      }
+      return rows;
+    } finally {
+      endOperation();
+    }
+  }
+
+  /**
+   * Soft-match a tab query WITHOUT changing the active tab. Matching tiers:
+   * 1. exact stable handle (`t3`, case-insensitive) — a miss fails immediately
+   *    (a stale handle must never silently soft-match URL/title text),
+   * 2. exact name,
+   * 3. bare integer = 1-based list position (supported, but warns to use the
+   *    stable handle next time),
+   * 4. exact URL,
+   * 5. URL substring,
+   * 6. title substring.
+   * A tier with multiple hits throws TAB_AMBIGUOUS listing candidates — never
+   * silently picks one. Returns `{ page, matchedBy, warning }`.
+   */
+  async function resolveTabTarget(query) {
+    const q = String(query ?? '').trim();
+    if (!q) {
+      throw tabStateError('TAB_NOT_FOUND', 'Empty tab target. Run tabs to list open tabs.');
+    }
+    await ensureBrowser();
+    beginOperation();
+    try {
+      const stable = listStablePages();
+
+      if (/^t\d+$/i.test(q)) {
+        const wanted = q.toLowerCase();
+        const hit = stable.find((row) => row.handle === wanted);
+        if (hit) return { page: hit.page, matchedBy: 'handle', warning: null };
+        throw tabStateError('TAB_NOT_FOUND', `No tab with handle "${wanted}". Run tabs to list open tabs.`);
+      }
+
+      const named = getNamedPage(q);
+      if (named) return { page: named, matchedBy: 'name', warning: null };
+
+      if (/^\d+$/.test(q)) {
+        const row = stable[Number(q) - 1];
+        if (!row) {
+          throw tabStateError('TAB_NOT_FOUND', `No tab at position ${q}. Run tabs to list open tabs.`);
+        }
+        return {
+          page: row.page,
+          matchedBy: 'index',
+          warning: `Selected tab by list position ${q}. Positions shift when tabs close — use the stable handle ${row.handle} next time.`,
+        };
+      }
+
+      const metas = [];
+      for (const row of stable) {
+        let url = '';
+        let title = '';
+        try { url = row.page.url() || ''; } catch { /* closed mid-match */ }
+        try { title = (await row.page.title()) || ''; } catch { /* closed mid-match */ }
+        metas.push({ ...row, url, title });
+      }
+      const lower = q.toLowerCase();
+      const tiers = [
+        ['url', metas.filter((m) => m.url === q)],
+        ['url-substring', metas.filter((m) => m.url.toLowerCase().includes(lower))],
+        ['title-substring', metas.filter((m) => m.title.toLowerCase().includes(lower))],
+      ];
+      for (const [matchedBy, hits] of tiers) {
+        if (hits.length === 1) return { page: hits[0].page, matchedBy, warning: null };
+        if (hits.length > 1) {
+          const candidates = hits.map((m) => `${m.handle} "${m.title}" ${m.url}`).join('; ');
+          throw tabStateError(
+            'TAB_AMBIGUOUS',
+            `"${q}" matches ${hits.length} tabs: ${candidates}. Use a stable handle or a more specific query.`,
+          );
+        }
+      }
+      throw tabStateError('TAB_NOT_FOUND', `No tab matched "${q}". Run tabs to list open tabs.`);
+    } finally {
+      endOperation();
+    }
+  }
+
   /**
    * Resolve the page a command should act on WITHOUT changing the active tab.
-   * No `tab` → the persistent active page. With `tab` → exact stable handle
-   * (case-insensitive), then exact name. Throws TAB_NOT_FOUND otherwise.
+   * No `tab` → the persistent active page. With `tab` → the full soft-matching
+   * tiers of resolveTabTarget(). Throws TAB_NOT_FOUND / TAB_AMBIGUOUS.
    */
-  function resolveCommandPage({ tab } = {}) {
+  async function resolveCommandPage({ tab } = {}) {
     if (tab == null || String(tab).trim() === '') {
       return resolveActivePage(getContext());
     }
-    const query = String(tab).trim();
+    const target = await resolveTabTarget(tab);
+    return target.page;
+  }
 
-    if (/^t\d+$/i.test(query)) {
-      const wanted = query.toLowerCase();
-      const hit = listStablePages().find((row) => row.handle === wanted);
-      if (hit) return hit.page;
+  /**
+   * Open a new page (optionally navigating it) and make it the active tab.
+   * Restriction gating (noNewTabs/manual) is the caller's responsibility —
+   * this runtime stays import-free and mechanical. On navigation failure the
+   * page is closed (never leaks a blank orphan tab) and the error propagates.
+   */
+  async function openNewPage({ url = '', timeout = 30000 } = {}) {
+    await ensureBrowser();
+    beginOperation();
+    try {
+      const ctx = getContext();
+      const page = await ctx.newPage();
+      setupConsoleCapture(page);
+      if (url) {
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+        } catch (err) {
+          try { await page.close(); } catch { /* already closed */ }
+          throw err;
+        }
+      }
+      setActivePage(page);
+      return page;
+    } finally {
+      endOperation();
     }
-
-    const named = getNamedPage(query);
-    if (named) return named;
-
-    throw tabStateError('TAB_NOT_FOUND', `No tab matched "${query}". Run tabs to list open tabs.`);
   }
 
   /**
@@ -529,7 +664,10 @@ export function createBrowserSessionRuntime(deps = {}) {
     listPageNames,
     getStablePageHandle,
     listStablePages,
+    listTabRows,
+    resolveTabTarget,
     resolveCommandPage,
+    openNewPage,
     getAgentPreferencesForSession,
     getBrowserforceRestrictionsForSession,
     reset,
