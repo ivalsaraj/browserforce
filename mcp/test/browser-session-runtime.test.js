@@ -405,6 +405,33 @@ test('named tab conflicts: duplicate names fail without replace, move with repla
   assert.equal(p1.isClosed(), false, 'the previously named page stays open');
 });
 
+test('tab names must be identifier-like and never take the stable-handle shape', () => {
+  const p1 = makeTabPage();
+  const runtime = makeTabRuntime([p1]);
+
+  const badName = (fn) => assert.throws(fn, (err) => err.code === 'BAD_TAB_NAME');
+
+  badName(() => runtime.setNamedPage('my tab', p1));      // spaces
+  badName(() => runtime.setNamedPage('2docs', p1));       // leading digit
+  badName(() => runtime.setNamedPage('docs.dev', p1));    // punctuation
+  badName(() => runtime.setNamedPage('', p1));            // empty
+  // t<N> would be shadowed forever: resolveTabTarget matches handles first.
+  badName(() => runtime.setNamedPage('t2', p1));
+  badName(() => runtime.setNamedPage('T15', p1));
+
+  // Valid shapes still work, including the documented hyphenated style.
+  runtime.setNamedPage('api-docs', p1);
+  assert.equal(runtime.getNamedPage('api-docs'), p1);
+  runtime.setNamedPage('_scratch', p1);
+  runtime.setNamedPage('tab2', p1); // starts with t but not t<N> — allowed
+
+  // rename goes through the same validator.
+  badName(() => runtime.renamePageName('api-docs', 't3'));
+  badName(() => runtime.renamePageName('api-docs', 'bad name'));
+  runtime.renamePageName('api-docs', 'docs-v2');
+  assert.equal(runtime.getNamedPage('docs-v2'), p1);
+});
+
 test('forgetPageName removes the mapping and reports whether it existed', () => {
   const p1 = makeTabPage();
   const runtime = makeTabRuntime([p1]);

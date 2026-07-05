@@ -370,6 +370,24 @@ describe('tab commands: tabs / use / open / rename / forget', () => {
     assert.equal(pages[0].isClosed(), false, 'the previously named tab stays open');
   });
 
+  it('open --as and rename reject non-identifier and reserved t<N> names with teaching errors', async () => {
+    const { runtime, run, pages } = tabRuntimeEnv({ pages: [] });
+
+    const badName = (promise) => assert.rejects(promise, (err) => err instanceof BrowserforceCommandError
+      && err.code === 'BAD_TAB_NAME'
+      && /identifier-like|reserved/.test(err.message)
+      && /docs/.test(err.suggestion));
+
+    await badName(run('open https://example.com --as "my tab"'));
+    await badName(run('open https://example.com --as t2'));
+    assert.equal(pages.length, 0, 'invalid names never create an orphan tab');
+
+    await run('open https://example.com --as docs');
+    await badName(run('rename docs t9'));
+    await badName(run('rename docs "bad name"'));
+    assert.equal(runtime.getNamedPage('docs'), pages[0], 'failed rename leaves the old name in place');
+  });
+
   it('open respects noNewTabs/manual restrictions without creating a page', async () => {
     for (const restrictions of [{ noNewTabs: true }, { mode: 'manual' }]) {
       const { run, pages } = tabRuntimeEnv({ pages: [fakePage()], restrictions });

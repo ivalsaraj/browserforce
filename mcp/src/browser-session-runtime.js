@@ -412,14 +412,39 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
   }
 
+  // Canonical tab-name validator — the ONLY gate for names entering
+  // namedPages (setNamedPage and renamePageName both route through it).
+  // Names must be identifier-like (plan requirement) and must never take the
+  // stable-handle shape t<N>: resolveTabTarget() resolves handles BEFORE
+  // names, so a tab literally named "t2" would be permanently unreachable.
+  const TAB_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+  const STABLE_HANDLE_SHAPE = /^t\d+$/i;
+
+  function assertValidTabName(name) {
+    const key = String(name ?? '').trim();
+    if (!key) throw tabStateError('BAD_TAB_NAME', 'Tab name must be a non-empty string.');
+    if (!TAB_NAME_PATTERN.test(key)) {
+      throw tabStateError(
+        'BAD_TAB_NAME',
+        `Invalid tab name "${key}". Names must be identifier-like: start with a letter or underscore, then letters, digits, hyphens, or underscores (e.g. docs, api-docs).`,
+      );
+    }
+    if (STABLE_HANDLE_SHAPE.test(key)) {
+      throw tabStateError(
+        'BAD_TAB_NAME',
+        `Invalid tab name "${key}": t<number> is reserved for stable tab handles. Pick a different name (e.g. docs).`,
+      );
+    }
+    return key;
+  }
+
   /**
    * Assign a user-facing name to a page. Names are unique: reassigning an
    * in-use name requires `replace: true` (which moves the name and leaves the
    * previously named page open and unnamed).
    */
   function setNamedPage(name, page, { replace = false } = {}) {
-    const key = String(name ?? '').trim();
-    if (!key) throw tabStateError('BAD_TAB_NAME', 'Tab name must be a non-empty string.');
+    const key = assertValidTabName(name);
     if (!isUsablePage(page)) throw tabStateError('TAB_NOT_USABLE', 'Cannot name a closed page.');
     pruneNamedPages();
     const existing = namedPages.get(key);
@@ -445,8 +470,7 @@ export function createBrowserSessionRuntime(deps = {}) {
   /** Move a name to a new label. Colliding with an existing name requires replace. */
   function renamePageName(oldName, newName, { replace = false } = {}) {
     const from = String(oldName ?? '').trim();
-    const to = String(newName ?? '').trim();
-    if (!to) throw tabStateError('BAD_TAB_NAME', 'New tab name must be a non-empty string.');
+    const to = assertValidTabName(newName);
     const page = getNamedPage(from);
     if (!page) throw tabStateError('TAB_NAME_NOT_FOUND', `No tab named "${from}".`);
     if (from === to) return { name: to, replaced: false };
@@ -739,6 +763,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     runCommand,
     setActivePage,
     getActivePage,
+    assertValidTabName,
     setNamedPage,
     getNamedPage,
     renamePageName,

@@ -266,7 +266,7 @@ const TAB_ERROR_SUGGESTIONS = {
   TAB_NOT_FOUND: 'Run "tabs" to list open tabs and their stable handles.',
   TAB_AMBIGUOUS: 'Use a stable t<N> handle or a more specific query.',
   TAB_NOT_USABLE: 'That tab is closed. Run "tabs" to list open tabs.',
-  BAD_TAB_NAME: HELP_SUGGESTION,
+  BAD_TAB_NAME: 'Use an identifier-like name such as docs or api-docs (t<N> is reserved for handles).',
 };
 
 function wrapTabStateError(err) {
@@ -402,12 +402,20 @@ const VERB_EXECUTORS = {
         suggestion: 'Attach a tab with the BrowserForce extension, then target it with "tabs" and "use".',
       });
     }
-    // Name-conflict preflight so a losing open never leaves an orphan tab.
-    if (name && runtime.getNamedPage(name) && !replace) {
-      throw new BrowserforceCommandError(`Tab name "${name}" is already in use.`, {
-        code: 'TAB_NAME_IN_USE',
-        suggestion: 'Pass --replace to move the name to the new tab.',
-      });
+    // Name preflights so a losing open never leaves an orphan tab: shape
+    // first (identifier-like, t<N> reserved), then uniqueness.
+    if (name) {
+      try {
+        runtime.assertValidTabName(name);
+      } catch (err) {
+        throw wrapTabStateError(err);
+      }
+      if (runtime.getNamedPage(name) && !replace) {
+        throw new BrowserforceCommandError(`Tab name "${name}" is already in use.`, {
+          code: 'TAB_NAME_IN_USE',
+          suggestion: 'Pass --replace to move the name to the new tab.',
+        });
+      }
     }
 
     try {

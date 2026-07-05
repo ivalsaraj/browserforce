@@ -877,6 +877,22 @@ describe('CLI session daemon', () => {
       assert.equal(named.length, 1, 'exactly one tab holds the name after --replace');
       assert.equal(named[0].url, 'https://newer.test/');
     });
+
+    it('invalid tab names are rejected over the wire with the teaching suggestion', async () => {
+      const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+
+      for (const bad of ['my tab', 't2']) {
+        const fail = await execFail(['open', 'https://invalid-name.test/', '--as', bad, '--json']);
+        assert.notEqual(fail.code, 0);
+        const resp = JSON.parse(fail.stdout);
+        assert.equal(resp.success, false);
+        assert.match(resp.error, /identifier-like|reserved/);
+        assert.match(resp.error, /api-docs|docs/, 'the wire error keeps the teaching suggestion');
+      }
+
+      const after = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(after.length, before.length, 'rejected names never created a tab');
+    });
   });
 });
 
