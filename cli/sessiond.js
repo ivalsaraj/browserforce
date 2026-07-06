@@ -43,6 +43,7 @@ import {
   BrowserforceCommandError,
 } from '../mcp/src/browserforce-command-registry.js';
 import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
+import { installProcessCrashGuard } from '../mcp/src/process-crash-guard.js';
 
 const HOST = '127.0.0.1';
 const SESSIOND_PORT_RANGE = { rangeStart: 19340, rangeEnd: 19380 };
@@ -350,6 +351,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // When spawned detached with a piped stderr, the parent closes the read end
   // after startup; swallow the resulting EPIPE so the daemon keeps running.
   process.stderr.on('error', () => {});
+  // Real daemon only — programmatic startSessiond() (tests) keeps Node's
+  // default crash semantics so test processes still fail loudly. User snippet
+  // code runs in this process too (runCommand → runCode); a detached
+  // rejection must log and survive, never kill the daemon.
+  installProcessCrashGuard({ logPrefix: '[bf-sessiond]' });
   startSessiond().catch((err) => {
     try { process.stderr.write(`[bf-sessiond] Fatal: ${err?.message || err}\n`); } catch { /* stderr gone */ }
     process.exit(1);

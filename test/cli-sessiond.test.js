@@ -1159,3 +1159,18 @@ describe('ref normalization (CLI input aliases)', () => {
     assert.equal(normalizeRef(''), '');
   });
 });
+
+describe('sessiond crash guard contract', () => {
+  it('daemon entrypoint installs the process crash guard', async () => {
+    const source = await fs.readFile(SESSIOND, 'utf8');
+    assert.ok(
+      source.includes("from '../mcp/src/process-crash-guard.js'"),
+      'sessiond imports the crash guard'
+    );
+    const directRunBlock = source.slice(source.indexOf('if (process.argv[1]'));
+    assert.ok(
+      /installProcessCrashGuard\(\{\s*logPrefix: '\[bf-sessiond\]'/.test(directRunBlock),
+      'guard installs in the direct-run (real daemon) block — programmatic startSessiond() in tests must keep default crash semantics'
+    );
+  });
+});

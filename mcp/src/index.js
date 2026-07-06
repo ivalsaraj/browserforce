@@ -30,6 +30,7 @@ import {
   listHelpSections,
   HELP_SECTION_NAMES,
 } from './help-docs.js';
+import { installProcessCrashGuard } from './process-crash-guard.js';
 
 // ─── Browser Session Runtime ─────────────────────────────────────────────────
 // Browser connection, persistent userState, idle-disconnect lifecycle, console
@@ -394,6 +395,12 @@ async function main() {
   await server.connect(transport);
   process.stderr.write('[bf-mcp] MCP server running\n');
 }
+
+// User exec/eval snippets can leave detached promises behind; their later
+// rejections must never kill the server (Node 22 default is a fatal crash —
+// every window's MCP connection dies and reset cannot recover). Logs to
+// stderr only: stdout is the MCP stdio transport.
+installProcessCrashGuard({ logPrefix: '[bf-mcp]' });
 
 main().catch((err) => {
   process.stderr.write(`[bf-mcp] Fatal: ${err.message}\n`);

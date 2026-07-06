@@ -247,6 +247,26 @@ command strings), **`exec`** (raw JS escape hatch — the tool formerly named
   the relay-reported tab count (`/extension/status`) or a stable-count settle,
   bounded by a 5s timeout.
 
+### Process Crash Guard (MCP server + sessiond)
+
+Both long-lived servers that run user snippet code install
+`installProcessCrashGuard()` (`mcp/src/process-crash-guard.js`): a detached
+promise rejection or a stray sync throw from user exec/eval code must log and
+survive, never kill the process (Node 22 default kills it — the a0eab22b
+outage: every MCP client got "Not connected" and `reset` could not recover
+because reset runs inside the dead process).
+
+- **Rule**: The guard writes to **stderr only** — stdout is the MCP stdio
+  transport. Never remove the guard "for cleanliness", never add a
+  swallow-everything variant to short-lived CLIs.
+- **Rule**: sessiond installs it in the **direct-run block only** so
+  programmatic `startSessiond()` in tests keeps Node's default crash
+  semantics (test processes must still fail loudly).
+- **Testing gotcha**: `node:test` intercepts `unhandledRejection`/
+  `uncaughtException` and fails the running test even when listeners exist —
+  guard behavior must be tested in spawned subprocesses with REAL events,
+  never via `process.emit()`.
+
 ### Execute Timeout Cancellation
 
 `runCode()` is the single execution boundary for the MCP `exec` tool (formerly `execute`), the `browserforce` command tool's canned snippets, and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.

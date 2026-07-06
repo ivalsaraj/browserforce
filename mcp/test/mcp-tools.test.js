@@ -364,6 +364,22 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('MCP server installs the process crash guard before serving tools', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    assert.ok(
+      source.includes("from './process-crash-guard.js'"),
+      'index.js imports the crash guard'
+    );
+    const installIdx = source.search(/installProcessCrashGuard\(\{\s*logPrefix: '\[bf-mcp\]'/);
+    const mainCallIdx = source.indexOf('main().catch');
+    assert.ok(installIdx !== -1, 'index.js installs the guard with the [bf-mcp] prefix');
+    assert.ok(mainCallIdx !== -1, 'main().catch entrypoint exists');
+    assert.ok(installIdx < mainCallIdx, 'guard installs BEFORE the server entrypoint runs');
+  });
+
   it('browserforce responds over JSON-RPC: help succeeds, bad commands teach without reset hints', async () => {
     const proc = spawn(process.execPath, ['src/index.js'], {
       cwd: MCP_ROOT,
