@@ -320,6 +320,25 @@ Backend policy (`mcp/src/backend-selection.js`, negotiated in
   `skills get core` redirect from the model. Runtime skill content lives in
   `skill-data/` and is served by `browserforce skills get|list|path`.
 
+### Eval Command-String Parsing (raw remainder)
+
+In a command STRING (MCP `browserforce` tool, `run "eval ..."`), the `eval`
+verb's code is the RAW remainder after the verb — never tokenized. The
+shell-style tokenizer strips quotes and collapses whitespace, which silently
+rewrites JS (`getByRole('button')` became `getByRole(button)` →
+`ReferenceError` → the a0eab22b server crash).
+
+- **Rule**: `parseEvalRemainder()` (`mcp/src/browserforce-command-registry.js`)
+  takes the remainder verbatim (quotes/newlines preserved). `--tab` is
+  recognized at the START of the remainder only — trailing extraction on raw
+  code is unsupported by design (code may legitimately contain `--tab`).
+- **Rule**: Legacy fully-quoted forms keep tokenized semantics ONLY when the
+  remainder is one quoted group + optional trailing `--tab` — exactly what the
+  CLI direct-verb builder (`bin.js` `quoteCommandToken()`) emits. A closing
+  quote followed by anything else (`'text'.length`) means raw code.
+- **Rule**: Never re-tokenize an argument that is source code — carry it
+  verbatim from the surface that received it.
+
 ## Security Rules
 
 - Relay binds to `127.0.0.1` ONLY. Never `0.0.0.0`.
