@@ -1940,6 +1940,44 @@ describe('Auto-attach Flow', () => {
     }
   });
 
+  it('exposes lastCommandAt/idleMs for tabs with real activity in /attached-tabs', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    provenanceFakeExtension(ext, { tabId: 970, tabOrigin: undefined, attachCommands: [] });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+
+      const before = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tabBefore = before.body.tabs.find((t) => t.tabId === 970);
+      assert.equal(tabBefore?.lastCommandAt, undefined, 'no real activity yet -> no lastCommandAt');
+
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+        sessionId: attachedEvt.params.sessionId,
+      }));
+      await sleep(200);
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 970);
+      assert.ok(Number.isInteger(tab?.lastCommandAt), 'lastCommandAt must be a timestamp');
+      assert.ok(tab.idleMs >= 0, 'idleMs must be a non-negative number');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
   it('tabs without listTabs origin still become relay-attached (old-extension compat)', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },

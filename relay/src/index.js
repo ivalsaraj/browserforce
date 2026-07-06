@@ -760,6 +760,11 @@ class RelayServer {
       // older extension messages that never sent window metadata.
       const windowId = integerWindowId(target.windowId ?? target.targetInfo?.windowId);
       if (windowId !== undefined) info.windowId = windowId;
+      // Real (non-init) activity clock — answers "why didn't my tab auto-close?".
+      if (Number.isInteger(target.lastCommandAt)) {
+        info.lastCommandAt = target.lastCommandAt;
+        info.idleMs = Date.now() - target.lastCommandAt;
+      }
       return info;
     });
   }
@@ -1741,10 +1746,14 @@ class RelayServer {
         // affinity, so later created tabs land in the same window even after
         // the user changes Chrome focus.
         this._seedAgentWindowAffinity(clientId, target);
+        target.lastCommandAt = Date.now();
         target._triggerMethod = method;
         await this._ensureDebuggerAttached(target, sessionId);
       } else if (!INIT_ONLY_METHODS.has(method)) {
         this._seedAgentWindowAffinity(clientId, target);
+        // Real-activity clock for /attached-tabs observability (init storm
+        // excluded, mirroring the extension's passive-flag idle semantics).
+        target.lastCommandAt = Date.now();
       }
       this._logCdp({
         direction: 'to-extension',
