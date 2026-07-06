@@ -294,7 +294,8 @@ async function executeCommand(msg) {
     case 'closeTab':
       return closeTab(msg.params);
     case 'cdpCommand':
-      tabLastActivity.set(msg.params.tabId, Date.now());
+      // Passive = relay-tagged init-storm command; must not reset the idle clock.
+      if (!msg.params.passive) tabLastActivity.set(msg.params.tabId, Date.now());
       return cdpCommand(msg.params);
     case 'getRestrictions':
       return new Promise((resolve) => {

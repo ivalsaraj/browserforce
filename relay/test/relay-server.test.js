@@ -1873,6 +1873,73 @@ describe('Auto-attach Flow', () => {
     }
   });
 
+  it('tags init-only cdpCommands as passive so the extension does not bump idle timers', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const cdpCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 960, windowId: 11, url: 'https://idle.example', title: 'Idle', active: false }] },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: msg.params.tabId,
+            targetId: `real-target-${msg.params.tabId}`,
+            targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'Idle', url: 'https://idle.example', windowId: 11 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        cdpCommands.push(msg.params);
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      }
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+      const sessionId = attachedEvt.params.sessionId;
+
+      // Real command: lazy-attaches and must count as activity.
+      cdp.send(JSON.stringify({ id: 2, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId }));
+      await sleep(200);
+      // Init-only command on the now-attached tab: forwarded, but passive.
+      cdp.send(JSON.stringify({ id: 3, method: 'Runtime.enable', params: {}, sessionId }));
+      await sleep(200);
+
+      const evaluate = cdpCommands.find((c) => c.method === 'Runtime.evaluate');
+      assert.ok(evaluate, 'Runtime.evaluate must be forwarded');
+      assert.equal(evaluate.passive, undefined, 'real commands must not be tagged passive');
+      const runtimeEnable = cdpCommands.find((c) => c.method === 'Runtime.enable');
+      assert.ok(runtimeEnable, 'Runtime.enable must be forwarded on an attached tab');
+      assert.equal(runtimeEnable.passive, true, 'init-only commands must be tagged passive');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
   it('tabs without listTabs origin still become relay-attached (old-extension compat)', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },

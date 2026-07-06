@@ -41,3 +41,7 @@ test('the bf-reconnect alarm also sweeps inactive tabs', () => {
 test('listTabs surfaces agent-created provenance for hydrated tabs', () => {
   assert.match(bg, /origin: agentCreatedTabs\.has\(t\.id\) \? 'agent-created' : undefined/);
 });
+
+test('passive cdpCommands do not bump tabLastActivity', () => {
+  assert.match(bg, /if \(!msg\.params\.passive\) tabLastActivity\.set\(msg\.params\.tabId, Date\.now\(\)\)/);
+});

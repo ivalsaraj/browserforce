@@ -1757,11 +1757,15 @@ class RelayServer {
           tabId: target.tabId,
         },
       });
-      return this._sendToExt('cdpCommand', {
+      const payload = {
         tabId: target.tabId,
         method,
         params: params || {},
-      });
+      };
+      // Init storm (Playwright re-sends ~40 init commands per reconnect) must
+      // not reset the extension's per-tab idle clock, or auto-close never fires.
+      if (INIT_ONLY_METHODS.has(method)) payload.passive = true;
+      return this._sendToExt('cdpCommand', payload);
     }
 
     // Alias session: an explicit newCDPSession() re-attach to an already-attached
@@ -1796,11 +1800,13 @@ class RelayServer {
           aliasOf: aliasPrimarySessionId,
         },
       });
-      return this._sendToExt('cdpCommand', {
+      const aliasPayload = {
         tabId: primaryTarget.tabId,
         method,
         params: params || {},
-      });
+      };
+      if (INIT_ONLY_METHODS.has(method)) aliasPayload.passive = true;
+      return this._sendToExt('cdpCommand', aliasPayload);
     }
 
     // Child session (iframe / OOPIF)
@@ -1825,12 +1831,14 @@ class RelayServer {
           parentSessionId,
         },
       });
-      return this._sendToExt('cdpCommand', {
+      const childPayload = {
         tabId: child.tabId,
         method,
         params: params || {},
         childSessionId: sessionId,
-      });
+      };
+      if (INIT_ONLY_METHODS.has(method)) childPayload.passive = true;
+      return this._sendToExt('cdpCommand', childPayload);
     }
 
     throw new Error(`Session '${sessionId}' not found`);
