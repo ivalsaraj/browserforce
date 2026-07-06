@@ -364,6 +364,14 @@ describe('Tool Definitions', () => {
     );
   });
 
+  it('exec handler appends the fire-and-forget IIFE hint', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    assert.ok(source.includes('fireAndForgetIifeHint'), 'exec handler consults the IIFE hint helper');
+  });
+
   it('MCP server installs the process crash guard before serving tools', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),

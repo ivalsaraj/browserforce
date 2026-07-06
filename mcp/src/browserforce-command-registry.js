@@ -808,5 +808,23 @@ export async function executeBrowserforceCommand({ command, runtime, timeout } =
     runtime,
     timeout: resolveTimeout(timeout),
   });
-  return { data, warning: null, text: renderBrowserforceCommandText(verb, data) };
+  const warning = verb === 'eval' ? fireAndForgetIifeHint(body.code, data) : null;
+  return { data, warning, text: renderBrowserforceCommandText(verb, data) };
+}
+
+/**
+ * Detect the fire-and-forget foot-gun: a snippet whose entire body is a
+ * top-level `(async () => { ... })()` expression statement. The exec wrapper
+ * awaits only the completion value — a non-returned IIFE runs DETACHED, the
+ * tool reports `undefined`, and a later rejection is invisible to the agent
+ * (and, before the process crash guard, fatal to the server). Narrow by
+ * design: only the observed shape triggers, so normal `await ...;` snippets
+ * that legitimately produce undefined stay hint-free.
+ */
+export function fireAndForgetIifeHint(code, result) {
+  if (result !== undefined) return null;
+  const trimmed = String(code ?? '').trim();
+  if (!/^\(\s*async\b/.test(trimmed)) return null;
+  if (!/\)\s*\(\s*\)\s*;?$/.test(trimmed)) return null;
+  return 'Result was undefined: the top-level async IIFE ran detached (fire-and-forget). Prefix it with "return" to await its value and surface its errors.';
 }

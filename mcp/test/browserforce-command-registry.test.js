@@ -10,6 +10,7 @@ import {
   executeBrowserforceCommand,
   executeBrowserforceVerb,
   normalizeRef,
+  fireAndForgetIifeHint,
   BrowserforceCommandError,
 } from '../src/browserforce-command-registry.js';
 import { createBrowserSessionRuntime } from '../src/browser-session-runtime.js';
@@ -987,6 +988,39 @@ describe('executeBrowserforceCommand → runtime.runCommand snippets', () => {
     assert.match(data, /snapshot/);
     assert.match(data, /click <ref>/);
     assert.equal(runtime.calls.length, 0);
+  });
+
+  describe('fireAndForgetIifeHint', () => {
+    it('hints when a top-level async IIFE returned undefined', () => {
+      const code = '(async () => { await page.click("x"); })()';
+      assert.ok(fireAndForgetIifeHint(code, undefined));
+    });
+
+    it('stays silent when the result is defined', () => {
+      assert.equal(fireAndForgetIifeHint('(async () => 1)()', 42), null);
+    });
+
+    it('stays silent for non-IIFE code that returns undefined', () => {
+      assert.equal(fireAndForgetIifeHint('await page.click("x");', undefined), null);
+    });
+
+    it('executeBrowserforceCommand surfaces the hint as the eval warning', async () => {
+      const runtime = { async runCommand() { return undefined; } };
+      const { warning } = await executeBrowserforceCommand({
+        command: 'eval (async () => { await page.reload(); })()',
+        runtime,
+      });
+      assert.ok(warning && warning.includes('return'));
+    });
+
+    it('eval with a defined result has no warning', async () => {
+      const runtime = { async runCommand() { return 'ok'; } };
+      const { warning } = await executeBrowserforceCommand({
+        command: 'eval return "ok"',
+        runtime,
+      });
+      assert.equal(warning, null);
+    });
   });
 
   it('validation failures throw structured errors without reset hints', async () => {

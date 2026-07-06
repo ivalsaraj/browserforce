@@ -17,6 +17,7 @@ import { createBrowserSessionRuntime } from './browser-session-runtime.js';
 import {
   parseBrowserforceCommand,
   executeBrowserforceCommand,
+  fireAndForgetIifeHint,
   BrowserforceCommandError,
 } from './browserforce-command-registry.js';
 import {
@@ -233,6 +234,8 @@ function registerExecTool(skillAppendix = '') {
           const result = await runCode(code, execCtx, timeout);
           const formatted = formatResult(result);
           const content = Array.isArray(formatted) ? [...formatted] : [formatted];
+          const iifeHint = fireAndForgetIifeHint(code, result);
+          if (iifeHint) content.push({ type: 'text', text: `[HINT: ${iifeHint}]` });
           if (pendingUpdate && !updateNoticeSent && content[0]?.type === 'text') {
             updateNoticeSent = true;
             content.push({ type: 'text', text: `[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]` });
