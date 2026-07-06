@@ -316,7 +316,10 @@ describe('CLI install-extension', () => {
 
     const warning = await new Promise((resolve, reject) => {
       const child = spawn('node', ['bin.js', 'serve'], {
-        env: { ...process.env, BF_EXT_DIR: staleDir, RELAY_PORT: String(getRandomPort()) },
+        // HOME → temp dir: `serve` runs a production relay that writes
+        // ~/.browserforce/cdp-url; without isolation this test clobbers the
+        // real relay's URL file on every full-suite run (AGENTS gotcha #6).
+        env: { ...process.env, BF_EXT_DIR: staleDir, RELAY_PORT: String(getRandomPort()), HOME: staleDir },
       });
       let stderr = '';
       const timer = setTimeout(() => {
@@ -350,7 +353,8 @@ describe('CLI install-extension', () => {
 
     const result = await new Promise((resolve) => {
       const child = spawn('node', ['bin.js', 'serve'], {
-        env: { ...process.env, BF_EXT_DIR: freshDir, RELAY_PORT: String(getRandomPort()) },
+        // HOME isolation: see the stale-VERSION serve test above.
+        env: { ...process.env, BF_EXT_DIR: freshDir, RELAY_PORT: String(getRandomPort()), HOME: freshDir },
       });
       let stderr = '';
       // Give it 1.5s to produce any warning, then declare "no warning"

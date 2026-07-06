@@ -14,8 +14,11 @@ export function isBrowserForceExecutePayload(payload = {}) {
     payload.tool,
   ]) || '').trim().toLowerCase();
 
+  // `exec` is the current raw-Playwright tool name; `execute` is kept for
+  // legacy timeline events recorded before the rename.
+  if (name === 'browserforce:exec' || name === 'mcp__browserforce__exec') return true;
   if (name === 'browserforce:execute' || name === 'mcp__browserforce__execute') return true;
-  if (name !== 'execute') return false;
+  if (name !== 'exec' && name !== 'execute') return false;
 
   const args = payload?.args && typeof payload.args === 'object' ? payload.args : null;
   if (args && typeof args.code === 'string') return true;
@@ -23,6 +26,24 @@ export function isBrowserForceExecutePayload(payload = {}) {
 
   const rawArgs = String(firstString([payload.arguments, payload.input]) || '').trim();
   return /"code"\s*:/.test(rawArgs);
+}
+
+export function isBrowserforceCommandPayload(payload = {}) {
+  const name = String(firstString([
+    payload.name,
+    payload.toolName,
+    payload.tool,
+  ]) || '').trim().toLowerCase();
+
+  if (name === 'browserforce:command' || name === 'mcp__browserforce__browserforce') return true;
+  if (name !== 'browserforce') return false;
+
+  const args = payload?.args && typeof payload.args === 'object' ? payload.args : null;
+  if (args && typeof args.command === 'string') return true;
+  if (typeof payload.command === 'string') return true;
+
+  const rawArgs = String(firstString([payload.arguments, payload.input]) || '').trim();
+  return /"command"\s*:/.test(rawArgs);
 }
 
 export function isBrowserForceResetPayload(payload = {}) {
@@ -49,9 +70,24 @@ export function normalizeToolLabel(label, payload = {}) {
 
   if (
     isBrowserForceExecutePayload(payload)
+    && (normalized === 'exec' || normalized === 'mcp__browserforce__exec' || normalized === 'browserforce:exec')
+  ) {
+    return 'BrowserForce:exec';
+  }
+
+  // Legacy label for timeline events recorded before the execute → exec rename.
+  if (
+    isBrowserForceExecutePayload(payload)
     && (normalized === 'execute' || normalized === 'mcp__browserforce__execute' || normalized === 'browserforce:execute')
   ) {
     return 'BrowserForce:execute';
+  }
+
+  if (
+    isBrowserforceCommandPayload(payload)
+    && (normalized === 'browserforce' || normalized === 'mcp__browserforce__browserforce' || normalized === 'browserforce:command')
+  ) {
+    return 'BrowserForce:command';
   }
 
   if (

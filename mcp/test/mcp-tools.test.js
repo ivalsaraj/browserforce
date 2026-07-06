@@ -117,7 +117,18 @@ describe('Tool Definitions', () => {
     assert.equal(result, 'function function');
   });
 
-  it('registers exactly 3 tools: execute, help, reset', () => {
+  // Extract a tool's registration block (description + schema, up to the async
+  // handler) anchored on the server.tool() call — NOT a bare string split,
+  // because names like 'browserforce' also appear as the McpServer name.
+  function toolRegistrationBlock(source, name) {
+    const match = source.match(new RegExp(`server\\.tool\\(\\s*'${name}',`));
+    if (!match) return '';
+    const rest = source.slice(match.index + match[0].length);
+    const end = rest.indexOf('async (');
+    return end === -1 ? rest : rest.slice(0, end);
+  }
+
+  it('registers exactly 4 tools: browserforce, exec, help, reset', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
@@ -130,8 +141,54 @@ describe('Tool Definitions', () => {
       toolNames.push(match[1]);
     }
 
-    assert.equal(toolNames.length, 3, `Should have exactly 3 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
-    assert.deepEqual(toolNames.sort(), ['execute', 'help', 'reset']);
+    assert.equal(toolNames.length, 4, `Should have exactly 4 tools, found ${toolNames.length}: ${toolNames.join(', ')}`);
+    assert.deepEqual(toolNames.sort(), ['browserforce', 'exec', 'help', 'reset']);
+  });
+
+  it('does not advertise the old execute tool by default', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    assert.doesNotMatch(
+      source,
+      /server\.tool\(\s*['"]execute['"]/,
+      'execute must not be advertised by default (renamed to exec)'
+    );
+  });
+
+  it('browserforce tool accepts a command string and optional timeout', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const bfBlock = toolRegistrationBlock(source, 'browserforce');
+    assert.ok(bfBlock, 'browserforce tool should be registered');
+    assert.ok(bfBlock.includes('command:'), 'browserforce should have a command param');
+    assert.ok(bfBlock.includes('z.string()'), 'command should be a string');
+    assert.ok(bfBlock.includes('timeout:'), 'browserforce should have a timeout param');
+    assert.ok(bfBlock.includes('z.number().optional()'), 'timeout should be an optional number');
+  });
+
+  it('exec tool keeps the raw execution shape: code, timeout, intent', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+
+    const execBlock = toolRegistrationBlock(source, 'exec');
+    assert.ok(execBlock, 'exec tool should be registered');
+    assert.ok(execBlock.includes('code:'), 'exec should have a code param');
+    assert.ok(execBlock.includes('z.string()'), 'code should be a string');
+    assert.ok(execBlock.includes('timeout:'), 'exec should have a timeout param');
+    assert.ok(execBlock.includes('z.number().optional()'), 'timeout should be an optional number');
+    assert.ok(execBlock.includes('intent:'), 'exec should keep the intent param');
+    assert.ok(
+      execBlock.includes("z.enum(['inspect', 'open', 'auto'])"),
+      'intent should keep the inspect/open/auto enum'
+    );
   });
 
   it('tools have non-empty descriptions', () => {
@@ -160,8 +217,8 @@ describe('Tool Definitions', () => {
     assert.ok(source.includes('force'), 'help should support forcing repeated section reads');
     const helpIdx = source.indexOf("'help'");
     assert.ok(helpIdx !== -1, 'help tool should exist');
-    const helpEnd = source.indexOf('\n);\n\n// ─── Execute Tool Prompt', helpIdx);
-    assert.ok(helpEnd !== -1, 'help tool should be registered before execute prompt');
+    const helpEnd = source.indexOf('\n);\n\n// ─── Exec Tool Prompt', helpIdx);
+    assert.ok(helpEnd !== -1, 'help tool should be registered before the exec prompt');
     const helpBlock = source.slice(helpIdx, helpEnd);
     assert.doesNotMatch(helpBlock, /ensureBrowser/);
     assert.doesNotMatch(helpBlock, /beginBrowserOperation/);
@@ -221,15 +278,146 @@ describe('Tool Definitions', () => {
     }
   });
 
+  // Extract the full browserforce handler block (registration + async handler)
+  // for source-contract assertions.
+  function browserforceHandlerBlock(source) {
+    const start = source.indexOf('function registerBrowserforceTool()');
+    assert.ok(start !== -1, 'registerBrowserforceTool should exist');
+    const end = source.indexOf("server.tool(\n  'reset'", start);
+    assert.ok(end !== -1, 'browserforce handler block should end before the reset tool');
+    return source.slice(start, end);
+  }
+
+  it('browserforce handler delegates to the shared registry with the MCP runtime', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const block = browserforceHandlerBlock(source);
+
+    assert.ok(
+      /executeBrowserforceCommand\(\{ command, runtime, timeout \}\)/.test(block),
+      'handler must call executeBrowserforceCommand with the shared MCP runtime (same userState as exec)'
+    );
+    assert.ok(block.includes('preflightAttachedPageBeforeCdp'), 'handler runs the same preflight as exec');
+    assert.ok(block.includes("verb === 'open' ? 'open' : 'inspect'"), 'open command maps to open intent, everything else inspects');
+  });
+
+  it('browserforce handler never touches raw Playwright page/locator APIs', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const block = browserforceHandlerBlock(source);
+
+    for (const forbidden of ['.locator(', '.click(', '.newPage(', '.goto(', 'page.', 'getPages()']) {
+      assert.ok(
+        !block.includes(forbidden),
+        `browserforce handler must not call raw Playwright APIs (found "${forbidden}") — all actions go through the guarded registry/runtime boundary`
+      );
+    }
+  });
+
+  it('command path source contract: handler → registry → runtime.runCommand → runCode', () => {
+    const indexSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const registrySource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browserforce-command-registry.js'),
+      'utf8'
+    );
+    const runtimeSource = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/browser-session-runtime.js'),
+      'utf8'
+    );
+
+    assert.ok(browserforceHandlerBlock(indexSource).includes('executeBrowserforceCommand('), 'handler calls the registry');
+    assert.ok(/runtime\.runCommand\(/.test(registrySource), 'registry executes through runtime.runCommand()');
+    // Strip comments (they legitimately mention the forbidden APIs when
+    // documenting this exact rule) before checking for real usage.
+    const registryCode = registrySource.replace(/^\s*\/\/.*$/gm, '');
+    assert.ok(
+      !/new Function\(|globalThis\.eval\(|\bvm\./.test(registryCode),
+      'registry never builds executable code outside the guarded boundary'
+    );
+    assert.ok(/await runCode\(code, execCtx, timeout\)/.test(runtimeSource), 'runtime.runCommand runs through the guarded runCode() boundary');
+  });
+
+  it('browserforce handler formats command errors with Suggestion lines and gated reset hints', () => {
+    const source = readFileSync(
+      join(import.meta.url.replace('file://', ''), '../../src/index.js'),
+      'utf8'
+    );
+    const block = browserforceHandlerBlock(source);
+
+    const commandErrorFn = block.slice(
+      block.indexOf('const commandErrorResponse'),
+      block.indexOf('// Parse first'),
+    );
+    assert.ok(commandErrorFn.includes('isError: true'), 'command errors are isError responses');
+    assert.ok(commandErrorFn.includes('Suggestion: '), 'command errors render an explicit Suggestion line');
+    assert.ok(commandErrorFn.includes('err.suggestion'), 'command errors surface the structured suggestion');
+    assert.ok(
+      commandErrorFn.includes("err.resetHintAllowed === true ? RESET_HINT : ''"),
+      'reset guidance is appended ONLY when resetHintAllowed === true'
+    );
+  });
+
+  it('browserforce responds over JSON-RPC: help succeeds, bad commands teach without reset hints', async () => {
+    const proc = spawn(process.execPath, ['src/index.js'], {
+      cwd: MCP_ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        BF_CDP_URL: 'ws://127.0.0.1:9/cdp?token=test',
+      },
+    });
+    const send = createRpcClient(proc);
+
+    try {
+      await send('initialize', {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'browserforce-tool-test', version: '1.0.0' },
+      });
+      proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+
+      // Real handler path: the help command needs no browser and returns the
+      // shared command help text.
+      const helpResult = await send('tools/call', {
+        name: 'browserforce',
+        arguments: { command: 'help' },
+      });
+      const helpText = helpResult.content?.[0]?.text || '';
+      assert.match(helpText, /open <url>/, 'command help lists open');
+      assert.match(helpText, /click <ref>/, 'command help lists click');
+      assert.notEqual(helpResult.isError, true);
+
+      // Unknown commands fail as teaching errors, not reset-hinted crashes.
+      const badResult = await send('tools/call', {
+        name: 'browserforce',
+        arguments: { command: 'bogus-command' },
+      });
+      assert.equal(badResult.isError, true);
+      const badText = badResult.content?.[0]?.text || '';
+      assert.match(badText, /Unknown command: bogus-command/);
+      assert.match(badText, /help/i, 'teaching error suggests help');
+      assert.ok(!badText.includes('HINT'), 'no reset hint for command errors');
+    } finally {
+      proc.kill('SIGTERM');
+    }
+  });
+
   it('execute prompt is small and starts with the help gate plus tab rules', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
-    // EXECUTE_PROMPT is defined as a const above server.tool('execute', EXECUTE_PROMPT, ...)
+    // EXECUTE_PROMPT is defined as a const above server.tool('exec', EXECUTE_PROMPT, ...)
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     assert.ok(promptBlock.length < 2000, `EXECUTE_PROMPT block is ${promptBlock.length} chars`);
@@ -243,7 +431,7 @@ describe('Tool Definitions', () => {
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     assert.ok(promptBlock.includes('getBrowserforceStatus()'), 'should use the relay status helper for attached-tab metadata');
@@ -260,7 +448,7 @@ describe('Tool Definitions', () => {
       'utf8'
     );
     const promptStart = source.indexOf('const EXECUTE_PROMPT');
-    const promptEnd = source.indexOf('`;\n\nfunction registerExecuteTool', promptStart) + 2;
+    const promptEnd = source.indexOf('`;\n\nfunction registerExecTool', promptStart) + 2;
     const promptBlock = source.slice(promptStart, promptEnd);
 
     for (const header of [
@@ -273,17 +461,17 @@ describe('Tool Definitions', () => {
     }
   });
 
-  it('execute tool has code and optional timeout params', () => {
+  it('exec tool has code and optional timeout params', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
 
-    const execBlock = source.split("'execute'")[1]?.split('server.tool(')[0] || '';
-    assert.ok(execBlock.includes('z.string()'), 'execute should have a string param (code)');
-    assert.ok(execBlock.includes('z.number().optional()'), 'execute should have an optional number param (timeout)');
-    assert.ok(execBlock.includes('code:'), 'execute should have code param');
-    assert.ok(execBlock.includes('timeout:'), 'execute should have timeout param');
+    const execBlock = source.split("'exec'")[1]?.split('server.tool(')[0] || '';
+    assert.ok(execBlock.includes('z.string()'), 'exec should have a string param (code)');
+    assert.ok(execBlock.includes('z.number().optional()'), 'exec should have an optional number param (timeout)');
+    assert.ok(execBlock.includes('code:'), 'exec should have code param');
+    assert.ok(execBlock.includes('timeout:'), 'exec should have timeout param');
   });
 
   it('reset tool has no params', () => {
@@ -438,30 +626,29 @@ describe('Tool Definitions', () => {
     assert.equal((source.match(/chromium\.connectOverCDP/g) || []).length, 1, 'CDP connect should stay centralized inside ensureBrowser');
   });
 
-  it('execute catches CodeExecutionTimeoutError and omits the reset hint on timeout', () => {
+  it('exec catches CodeExecutionTimeoutError and omits the reset hint on timeout', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+    const execHandler = (source.split("'exec'")[1] || '').split('server.tool(')[0];
 
-    assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'execute should detect timeout errors');
-    assert.ok(execHandler.includes("const hint = isTimeout ? ''"), 'timeout errors should produce an empty hint (no reset suggestion)');
+    assert.ok(execHandler.includes('err instanceof CodeExecutionTimeoutError'), 'exec should detect timeout errors');
     assert.ok(
-      execHandler.indexOf("isTimeout ? ''") < execHandler.indexOf('[HINT: Call reset only'),
-      'the reset hint must live in the non-timeout branch only'
+      execHandler.includes("const hint = isTimeout ? '' : RESET_HINT"),
+      'timeout errors produce an empty hint; the reset hint lives in the non-timeout branch only'
     );
   });
 
-  it('execute routes code through the shared runCode boundary with no extra timeout race', () => {
+  it('exec routes code through the shared runCode boundary with no extra timeout race', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-    const execHandler = (source.split("'execute'")[1] || '').split('server.tool(')[0];
+    const execHandler = (source.split("'exec'")[1] || '').split('server.tool(')[0];
 
-    assert.ok(execHandler.includes('await runCode(code, execCtx, timeout)'), 'execute should delegate to the shared runCode boundary');
-    assert.ok(!execHandler.includes('Promise.race'), 'execute must not add its own timeout race around runCode');
+    assert.ok(execHandler.includes('await runCode(code, execCtx, timeout)'), 'exec should delegate to the shared runCode boundary');
+    assert.ok(!execHandler.includes('Promise.race'), 'exec must not add its own timeout race around runCode');
   });
 
   it('runCode owns the single timeout boundary that aborts the run', () => {
@@ -533,12 +720,12 @@ describe('Tool Definitions', () => {
     assert.doesNotMatch(connectBlock, /fetch\(`?\$\{?baseUrl\}?\/`?/);
   });
 
-  it('execute schema includes an explicit attached-page intent', () => {
+  it('exec schema includes an explicit attached-page intent', () => {
     const source = readFileSync(
       join(import.meta.url.replace('file://', ''), '../../src/index.js'),
       'utf8'
     );
-    const execBlock = source.split("'execute'")[1]?.split('async ({ code')[0] || '';
+    const execBlock = source.split("'exec'")[1]?.split('async ({ code')[0] || '';
     assert.match(execBlock, /intent:\s*z\.enum\(\['inspect', 'open', 'auto'\]\)\.optional\(\)/);
   });
 

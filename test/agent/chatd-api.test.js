@@ -1161,12 +1161,12 @@ test('POST /v1/runs routes active Google Sheets tabs to Sheets plugin helpers fi
     assert.match(prompt, /Enabled BrowserForce plugins:/);
     assert.match(prompt, /google-sheets/);
     assert.match(prompt, /Active tab matches the google-sheets plugin/i);
-    assert.match(prompt, /BrowserForce:execute/i);
+    assert.match(prompt, /BrowserForce:exec/i);
     assert.match(prompt, /pluginHelp\('google-sheets'\)/);
     assert.match(prompt, /state\.page = await getBrowserforcePageForTab\(\); return await gs__summarizeSheet\(\{ maxRows: 25 \}\);/);
     assert.match(prompt, /without passing page\/context\/state arguments/i);
     assert.match(prompt, /Do not inspect BrowserForce source files, run rg\/sed\/cat/i);
-    assert.match(prompt, /Limit normal Sheets read\/summary\/edit requests to two BrowserForce:execute attempts/i);
+    assert.match(prompt, /Limit normal Sheets read\/summary\/edit requests to two BrowserForce:exec attempts/i);
     assert.match(prompt, /do not silently fall back to Drive, export, CSV, or web search/i);
   } finally {
     await daemon.stop();

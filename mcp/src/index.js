@@ -1,5 +1,6 @@
 // BrowserForce — MCP Server
-// 3-tool architecture: execute (run Playwright code) + help (docs) + reset (reconnect)
+// 4-tool architecture: browserforce (high-level commands) + exec (raw
+// Playwright code) + help (docs) + reset (reconnect).
 // Connects to the relay via Playwright's CDP client.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -13,6 +14,11 @@ import {
   BrowserForceMcpError, shouldCreateImplicitStartupPage,
 } from './exec-engine.js';
 import { createBrowserSessionRuntime } from './browser-session-runtime.js';
+import {
+  parseBrowserforceCommand,
+  executeBrowserforceCommand,
+  BrowserforceCommandError,
+} from './browserforce-command-registry.js';
 import {
   preflightAttachedPageBeforeCdp,
   formatBrowserForceMcpError,
@@ -84,6 +90,14 @@ const runtime = createBrowserSessionRuntime({
   getRelayHttpUrl,
   idleDisconnectMs: IDLE_BROWSER_DISCONNECT_MS,
   onConnected: () => process.stderr.write('[bf-mcp] Connected to relay\n'),
+  // Execution deps for runtime.runCommand() (the browserforce command tool).
+  // Plugin deps are LAZY accessors: this runtime is constructed at module
+  // scope, before main() awaits loadPluginRuntime(), so the accessors read the
+  // loaded plugin runtime at command time (same helpers as the exec tool).
+  buildExecContext,
+  runCode,
+  pluginHelpers: () => pluginRuntime.helpers,
+  pluginSkillRuntime: () => pluginRuntime.skillRuntime,
 });
 
 const {
@@ -103,7 +117,7 @@ const {
 let pluginRuntime = emptyPluginRuntime();
 
 // ─── Update State ────────────────────────────────────────────────────────────
-// Checked once at startup; notice injected into first execute response only.
+// Checked once at startup; notice injected into first exec response only.
 
 let pendingUpdate = null;    // { current, latest } or null
 let updateNoticeSent = false;
@@ -153,9 +167,9 @@ server.tool(
   },
 );
 
-// ─── Execute Tool Prompt ───────────────────────────────────────────────────
+// ─── Exec Tool Prompt ────────────────────────────────────────────────────────
 
-const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome.
+const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome. Escape hatch — prefer the browserforce command tool for simple browser work.
 
 HELP GATE:
 Read each needed help section once per MCP session.
@@ -170,12 +184,17 @@ TAB RULES:
 Use state.page for ongoing work. Use intent:'open' only when the user asked to open/navigate.
 For details call help(section).`;
 
-function registerExecuteTool(skillAppendix = '') {
+// Reset guidance — appended ONLY to connection/internal failures. Command
+// errors (stale refs, tab lookups, selector/action failures, parse errors)
+// must never carry it: agents over-reset, and reset destroys session state.
+const RESET_HINT = '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
+
+function registerExecTool(skillAppendix = '') {
   server.tool(
-    'execute',
+    'exec',
     EXECUTE_PROMPT + skillAppendix,
     {
-      code: z.string().describe('JavaScript to run in BrowserForce execute scope. Use getBrowserforceStatus() for tab metadata; getBrowserforcePageForTab() to inspect an attached tab.'),
+      code: z.string().describe('JavaScript to run in BrowserForce exec scope. Use getBrowserforceStatus() for tab metadata; getBrowserforcePageForTab() to inspect an attached tab.'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
       intent: z.enum(['inspect', 'open', 'auto']).optional()
         .describe('Use inspect for current/attached-tab work; use open only when the user explicitly asked to open/navigate. Defaults to inspect.'),
@@ -195,7 +214,10 @@ function registerExecuteTool(skillAppendix = '') {
         const agentPreferences = await getAgentPreferencesForSession();
         const ctx = getContext();
         const pages = ctx.pages();
-        let page = pages[0] || null;
+        // Shared active tab: the raw top-level `page` must agree with the
+        // browserforce command tool (state.page set by use/open), not silently
+        // rebind to pages[0] — on real Chrome that is an arbitrary user tab.
+        let page = runtime.getActivePage() || pages[0] || null;
 
         if (!page && shouldCreateImplicitStartupPage(browserforceRestrictions)) {
           page = await ctx.newPage();
@@ -217,7 +239,7 @@ function registerExecuteTool(skillAppendix = '') {
           return { content };
         } catch (err) {
           const isTimeout = err instanceof CodeExecutionTimeoutError;
-          const hint = isTimeout ? '' : '\n\n[HINT: Call reset only for connection/internal failures (relay disconnect, page/context closed, Playwright internal/assertion issues). For normal selector/logic errors, fix and retry without reset.]';
+          const hint = isTimeout ? '' : RESET_HINT;
           return {
             content: [{ type: 'text', text: `Error: ${err.message}${hint}` }],
             isError: true,
@@ -233,6 +255,84 @@ function registerExecuteTool(skillAppendix = '') {
         endBrowserOperation();
       }
     }
+  );
+}
+
+// ─── BrowserForce Command Tool ───────────────────────────────────────────────
+// High-level command surface. The handler is a thin transport shim: parse for
+// intent, run the exec-style preflight, then delegate to the shared registry —
+// browserforce MCP handler → executeBrowserforceCommand() → runtime.runCommand()
+// → runCode(). It never calls raw Playwright page/locator methods itself.
+
+function registerBrowserforceTool() {
+  server.tool(
+    'browserforce',
+    'Run high-level BrowserForce commands. Use this first for browser work: tabs, use, open, snapshot, click, fill, press, wait, get, eval. Use exec only when this command cannot express the task.',
+    {
+      command: z.string().describe('CLI-compatible command string, e.g. "snapshot", "click @e2", "open https://example.com --as docs". Run the "help" command to list all commands.'),
+      timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),
+    },
+    async ({ command, timeout = 30000 }) => {
+      const commandErrorResponse = (err) => {
+        // Structured command errors teach the next step. Reset guidance is
+        // appended ONLY when the error explicitly allows it (connection or
+        // internal failures) — never for selector/stale-ref/tab/parse errors.
+        const suggestion = err.suggestion ? `\nSuggestion: ${err.suggestion}` : '';
+        const hint = err.resetHintAllowed === true ? RESET_HINT : '';
+        return {
+          content: [{ type: 'text', text: `Error: ${err.message}${suggestion}${hint}` }],
+          isError: true,
+        };
+      };
+
+      // Parse first: a bad command string should fail fast with the teaching
+      // error before any preflight or connection work happens.
+      let verb;
+      try {
+        verb = parseBrowserforceCommand(command).verb;
+      } catch (err) {
+        if (err instanceof BrowserforceCommandError) return commandErrorResponse(err);
+        throw err;
+      }
+
+      // `help` is pure text — no preflight, no browser, no connection.
+      if (verb === 'help') {
+        const { text } = await executeBrowserforceCommand({ command, runtime, timeout });
+        return { content: [{ type: 'text', text }] };
+      }
+
+      try {
+        beginBrowserOperation();
+        // Same attached-page/open-intent preflight as the exec tool: the open
+        // command is an explicit "open" intent; everything else inspects.
+        await preflightAttachedPageBeforeCdp({
+          intent: verb === 'open' ? 'open' : 'inspect',
+          fetchBrowserforceRestrictions: getBrowserforceRestrictionsForSession,
+        });
+
+        const { text, warning } = await executeBrowserforceCommand({ command, runtime, timeout });
+        const body = warning ? `⚠ ${warning}\n${text}` : text;
+        return { content: [{ type: 'text', text: body }] };
+      } catch (err) {
+        if (err instanceof BrowserForceMcpError) {
+          return formatBrowserForceMcpError(err);
+        }
+        if (err instanceof BrowserforceCommandError) {
+          return commandErrorResponse(err);
+        }
+        if (err instanceof CodeExecutionTimeoutError) {
+          return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+        }
+        // Connection/internal failures — the only class where reset guidance
+        // is appropriate.
+        return {
+          content: [{ type: 'text', text: `Error: ${err.message}${RESET_HINT}` }],
+          isError: true,
+        };
+      } finally {
+        endBrowserOperation();
+      }
+    },
   );
 }
 
@@ -283,10 +383,11 @@ async function initPlugins() {
 
 async function main() {
   await initPlugins();
-  registerExecuteTool(pluginRuntime.appendix);
+  registerBrowserforceTool();
+  registerExecTool(pluginRuntime.appendix);
   await ensureRelay();
 
-  // Fire update check in background — result stored in pendingUpdate for execute handler
+  // Fire update check in background — result stored in pendingUpdate for exec handler
   checkForUpdate().then(info => { pendingUpdate = info; }).catch(() => {});
 
   const transport = new StdioServerTransport();

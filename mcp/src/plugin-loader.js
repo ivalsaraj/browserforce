@@ -286,7 +286,7 @@ export function buildPluginHelpers(plugins) {
 }
 
 /**
- * Build the SKILL.md appendix to append to the execute tool prompt.
+ * Build the SKILL.md appendix to append to the exec tool prompt.
  * Includes plugins that provide either non-empty SKILL.md content or parsed
  * frontmatter metadata.
  */

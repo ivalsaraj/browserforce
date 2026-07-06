@@ -52,20 +52,31 @@ function makeFakeLocator(selector, frameChain = []) {
     frameLocator(sel) { return { locator: (s) => makeFakeLocator(s, [...frameChain, sel]) }; },
     async evaluate() {},
     async click() { record({ action: 'click', selector }); },
+    async hover() { record({ action: 'hover', selector }); },
     async fill(value) { record({ action: 'fill', selector, value }); },
     async type(value) { record({ action: 'type', selector, value }); },
     async pressSequentially(value) { record({ action: 'type', selector, value }); },
     async press(key) { record({ action: 'press', selector, key }); },
     async textContent() { return 'Submit'; },
     async innerText() { return 'Submit'; },
+    async innerHTML() { return '<span>Submit</span>'; },
   };
 }
 
-function makeFakePage(ctx) {
+function makeFakePage(ctx, { url = 'https://fake.test/', title = 'Fake' } = {}) {
+  let currentUrl = url;
+  let currentTitle = title;
   const page = {
     isClosed: () => false,
-    url: () => 'https://fake.test/',
-    title: async () => 'Fake',
+    url: () => currentUrl,
+    title: async () => currentTitle,
+    // `open` navigates new pages; title tracks the hostname so `tabs` rows are
+    // distinguishable in many-tab CLI stress tests.
+    goto: async (next) => {
+      currentUrl = next;
+      try { currentTitle = `Fake ${new URL(next).hostname}`; } catch { /* keep title */ }
+      record({ action: 'goto', url: next });
+    },
     locator: (sel) => makeFakeLocator(sel),
     frameLocator: (sel) => ({ locator: (s) => makeFakeLocator(s, [sel]) }),
     context: () => ctx,
@@ -95,13 +106,21 @@ function makeFakePage(ctx) {
 }
 
 function makeFakeContext() {
+  const pages = [];
   const ctx = {
     on: () => {},
     off: () => {},
     newCDPSession: async () => makeFakeCdp(),
+    pages: () => pages,
+    // `open` support: new pages start blank and take their URL from goto().
+    newPage: async () => {
+      const page = makeFakePage(ctx, { url: 'about:blank', title: 'New Tab' });
+      pages.push(page);
+      record({ action: 'newPage' });
+      return page;
+    },
   };
-  const page = makeFakePage(ctx);
-  ctx.pages = () => [page];
+  pages.push(makeFakePage(ctx));
   return ctx;
 }
 

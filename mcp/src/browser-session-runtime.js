@@ -67,11 +67,17 @@ export function createBrowserSessionRuntime(deps = {}) {
     // Execution boundary deps (injected so the runtime stays decoupled from
     // exec-engine and unit-testable). runCommand is the single place CLI atomic
     // verbs run user snippets — always through runCode()'s guarded boundary.
+    // Plugin deps may be plain objects (sessiond wires them after plugin load)
+    // OR functions (lazy accessors, resolved at runCommand() time) — the MCP
+    // server constructs the runtime at module scope BEFORE loadPluginRuntime()
+    // finishes, so it passes accessors that read the loaded plugin runtime.
     buildExecContext = null,
     runCode = null,
     pluginHelpers = {},
     pluginSkillRuntime = {},
   } = deps;
+
+  const resolveDep = (dep) => (typeof dep === 'function' ? dep() : dep) || {};
 
   const doFetch = fetchImpl || globalThis.fetch;
 
@@ -98,6 +104,25 @@ export function createBrowserSessionRuntime(deps = {}) {
   // ─── Cached Preferences / Restrictions ─────────────────────────────────────
   let cachedAgentPreferences = null;
   let cachedBrowserforceRestrictions = null;
+
+  // ─── Tab identity state ──────────────────────────────────────────────────────
+  // Named tabs (user-assigned labels) live beside — never inside — the active
+  // tab so naming/forgetting a tab can never move the session focus. Stable
+  // handles (t1, t2, ...) are keyed by page identity in a WeakMap: they are
+  // assigned once per page in first-listed order and NEVER renumber when other
+  // tabs close or when the page's URL/title changes.
+  const namedPages = new Map(); // name → page
+  let stableHandles = new WeakMap(); // page → 't<N>'
+  let nextStableHandleNumber = 1;
+
+  // Structured tab-state failure. The runtime stays import-free (see header),
+  // so it throws plain Errors with a stable `code`; the command registry maps
+  // codes to agent-facing BrowserforceCommandError suggestions.
+  function tabStateError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+  }
 
   function getContext() {
     if (!browser?.isConnected()) throw new Error('Not connected to relay. Is the relay running?');
@@ -192,8 +217,50 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   async function waitForInitialPageDiscovery(ctx, { timeoutMs = initialPageDiscoveryTimeoutMs } = {}) {
     const started = Date.now();
-    while (ctx.pages().length === 0 && Date.now() - started < timeoutMs) {
-      await new Promise((resolve) => setTimeoutImpl(resolve, initialPageDiscoveryPollMs));
+    // Target discovery STREAMS on the relay bridge: with 100+ real tabs the
+    // first page appears immediately but the full set arrives over seconds,
+    // with irregular gaps while Playwright initializes each page. Returning
+    // early made tabs/use act on a partial list (a not-yet-discovered tab
+    // soft-matched as TAB_NOT_FOUND). Two exit conditions, bounded by
+    // timeoutMs:
+    //   1. Exact: the relay's /extension/status reports how many tab targets
+    //      exist — return as soon as Playwright has discovered them all.
+    //   2. Heuristic (relay unreachable — managed backend, tests): count is
+    //      non-zero and stable for several consecutive polls.
+    // Polls use REAL timers (not the injectable setTimeoutImpl): this is an
+    // internal wait, and fake-clock tests inject timers that never fire on
+    // their own — an injected poll timer would deadlock ensureBrowser.
+    let expectedCount = 0;
+    try {
+      const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
+      if (relayHttpUrl) {
+        const response = await doFetch(`${relayHttpUrl}/extension/status`, {
+          signal: AbortSignal.timeout(1500),
+        });
+        if (response.ok) {
+          const body = await response.json();
+          if (Array.isArray(body?.attachedTabs)) expectedCount = body.attachedTabs.length;
+        }
+      }
+    } catch { /* no relay on this backend — fall back to settle heuristic */ }
+
+    // 6 polls ≈ 600ms of no growth. Playwright's streamed page inits can gap
+    // a few hundred ms on the relay bridge; shorter windows settled early and
+    // produced partial tab lists when the exact-count fetch was unavailable.
+    const settlePolls = 6;
+    let lastCount = -1;
+    let stablePolls = 0;
+    while (Date.now() - started < timeoutMs) {
+      const count = ctx.pages().length;
+      if (expectedCount > 0 && count >= expectedCount) return;
+      if (count > 0 && count === lastCount) {
+        stablePolls += 1;
+        if (stablePolls >= settlePolls) return;
+      } else {
+        stablePolls = 0;
+      }
+      lastCount = count;
+      await new Promise((resolve) => globalThis.setTimeout(resolve, initialPageDiscoveryPollMs));
     }
   }
 
@@ -301,14 +368,324 @@ export function createBrowserSessionRuntime(deps = {}) {
     return first;
   }
 
+  // ─── Tab identity APIs ───────────────────────────────────────────────────────
+
+  /** Pin `page` as the persistent active tab (state.page). */
+  function setActivePage(page) {
+    if (!isUsablePage(page)) {
+      throw tabStateError('TAB_NOT_USABLE', 'Cannot activate a closed page.');
+    }
+    userState.page = page;
+    return page;
+  }
+
+  /** Current active tab, or null. Closed handles are dropped, never returned. */
+  function getActivePage() {
+    const current = userState.page;
+    if (isUsablePage(current)) return current;
+    if (current) userState.page = null;
+    return null;
+  }
+
+  /** Stable `t<N>` handle for a page — assigned once, permanent for the page. */
+  function getStablePageHandle(page) {
+    if (!page) return null;
+    let handle = stableHandles.get(page);
+    if (!handle) {
+      handle = `t${nextStableHandleNumber}`;
+      nextStableHandleNumber += 1;
+      stableHandles.set(page, handle);
+    }
+    return handle;
+  }
+
+  /** All open pages with their stable handles, in current context order. */
+  function listStablePages() {
+    return getPages()
+      .filter((page) => isUsablePage(page))
+      .map((page) => ({ handle: getStablePageHandle(page), page }));
+  }
+
+  function pruneNamedPages() {
+    for (const [name, page] of namedPages) {
+      if (!isUsablePage(page)) namedPages.delete(name);
+    }
+  }
+
+  // Canonical tab-name validator — the ONLY gate for names entering
+  // namedPages (setNamedPage and renamePageName both route through it).
+  // Names must be identifier-like (plan requirement) and must never take the
+  // stable-handle shape t<N>: resolveTabTarget() resolves handles BEFORE
+  // names, so a tab literally named "t2" would be permanently unreachable.
+  const TAB_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+  const STABLE_HANDLE_SHAPE = /^t\d+$/i;
+
+  function assertValidTabName(name) {
+    const key = String(name ?? '').trim();
+    if (!key) throw tabStateError('BAD_TAB_NAME', 'Tab name must be a non-empty string.');
+    if (!TAB_NAME_PATTERN.test(key)) {
+      throw tabStateError(
+        'BAD_TAB_NAME',
+        `Invalid tab name "${key}". Names must be identifier-like: start with a letter or underscore, then letters, digits, hyphens, or underscores (e.g. docs, api-docs).`,
+      );
+    }
+    if (STABLE_HANDLE_SHAPE.test(key)) {
+      throw tabStateError(
+        'BAD_TAB_NAME',
+        `Invalid tab name "${key}": t<number> is reserved for stable tab handles. Pick a different name (e.g. docs).`,
+      );
+    }
+    return key;
+  }
+
+  /**
+   * Assign a user-facing name to a page. Names are unique: reassigning an
+   * in-use name requires `replace: true` (which moves the name and leaves the
+   * previously named page open and unnamed).
+   */
+  function setNamedPage(name, page, { replace = false } = {}) {
+    const key = assertValidTabName(name);
+    if (!isUsablePage(page)) throw tabStateError('TAB_NOT_USABLE', 'Cannot name a closed page.');
+    pruneNamedPages();
+    const existing = namedPages.get(key);
+    if (existing && existing !== page && !replace) {
+      throw tabStateError('TAB_NAME_IN_USE', `Tab name "${key}" is already in use.`);
+    }
+    namedPages.set(key, page);
+    return { name: key, replaced: !!existing && existing !== page };
+  }
+
+  /** Page for a name, or null. Names pointing at closed pages are pruned. */
+  function getNamedPage(name) {
+    const key = String(name ?? '').trim();
+    const page = namedPages.get(key);
+    if (!page) return null;
+    if (!isUsablePage(page)) {
+      namedPages.delete(key);
+      return null;
+    }
+    return page;
+  }
+
+  /** Move a name to a new label. Colliding with an existing name requires replace. */
+  function renamePageName(oldName, newName, { replace = false } = {}) {
+    const from = String(oldName ?? '').trim();
+    const to = assertValidTabName(newName);
+    const page = getNamedPage(from);
+    if (!page) throw tabStateError('TAB_NAME_NOT_FOUND', `No tab named "${from}".`);
+    if (from === to) return { name: to, replaced: false };
+    const existing = getNamedPage(to);
+    if (existing && !replace) {
+      throw tabStateError('TAB_NAME_IN_USE', `Tab name "${to}" is already in use.`);
+    }
+    namedPages.delete(from);
+    namedPages.set(to, page);
+    return { name: to, replaced: !!existing };
+  }
+
+  /** Remove a name mapping. Returns whether the name existed. */
+  function forgetPageName(name) {
+    return namedPages.delete(String(name ?? '').trim());
+  }
+
+  /** All live name → page mappings (closed pages pruned). */
+  function listPageNames() {
+    pruneNamedPages();
+    return [...namedPages.entries()].map(([name, page]) => ({ name, page }));
+  }
+
+  function nameForPage(page) {
+    for (const [name, candidate] of namedPages) {
+      if (candidate === page) return name;
+    }
+    return null;
+  }
+
+  /**
+   * Structured rows for every open tab — the single builder behind `tabs` on
+   * ALL surfaces (sessiond JSON, CLI --json, MCP text rendering), so stable
+   * handles can never exist in one output and not another.
+   */
+  // Bounded page.title() read. On the real relay bridge, title() NEVER resolves
+  // for a tab whose debugger was never lazily attached: Playwright waits for an
+  // execution context, but the relay synthetically acked Runtime.enable while
+  // the tab was unattached (INIT_ONLY_METHODS), so no context is ever announced
+  // — and title() sends no CDP command that would trigger the lazy attach.
+  // With dozens of real tabs, one unbounded title() hangs `tabs`/`use` forever.
+  // Bound the read and fall back to '' — the URL remains the row's identifier.
+  async function pageTitleBounded(page, ms = 1000) {
+    let timer;
+    try {
+      return await Promise.race([
+        page.title(),
+        new Promise((resolve) => { timer = setTimeoutImpl(() => resolve(''), ms); }),
+      ]) || '';
+    } catch {
+      return ''; // page navigating/closed mid-read
+    } finally {
+      clearTimeoutImpl(timer);
+    }
+  }
+
+  async function listTabRows() {
+    await ensureBrowser();
+    beginOperation();
+    try {
+      // Use resolveActivePage (not getActivePage) so the row marked active is
+      // the tab a subsequent unnamed command would actually target.
+      const active = resolveActivePage(getContext());
+      const stable = listStablePages();
+      // Parallel + bounded: sequential unbounded title reads hang on real
+      // many-tab sessions (see pageTitleBounded).
+      return Promise.all(stable.map(async ({ handle, page }, index) => {
+        const title = await pageTitleBounded(page);
+        let url = '';
+        try { url = page.url(); } catch { /* page closed mid-listing */ }
+        return {
+          handle,
+          index,
+          title,
+          url,
+          active: page === active,
+          name: nameForPage(page),
+        };
+      }));
+    } finally {
+      endOperation();
+    }
+  }
+
+  /**
+   * Soft-match a tab query WITHOUT changing the active tab. Matching tiers:
+   * 1. exact stable handle (`t3`, case-insensitive) — a miss fails immediately
+   *    (a stale handle must never silently soft-match URL/title text),
+   * 2. exact name,
+   * 3. bare integer = 1-based list position (supported, but warns to use the
+   *    stable handle next time),
+   * 4. exact URL,
+   * 5. URL substring,
+   * 6. title substring.
+   * A tier with multiple hits throws TAB_AMBIGUOUS listing candidates — never
+   * silently picks one. Returns `{ page, matchedBy, warning }`.
+   */
+  async function resolveTabTarget(query) {
+    const q = String(query ?? '').trim();
+    if (!q) {
+      throw tabStateError('TAB_NOT_FOUND', 'Empty tab target. Run tabs to list open tabs.');
+    }
+    await ensureBrowser();
+    beginOperation();
+    try {
+      const stable = listStablePages();
+
+      if (/^t\d+$/i.test(q)) {
+        const wanted = q.toLowerCase();
+        const hit = stable.find((row) => row.handle === wanted);
+        if (hit) return { page: hit.page, matchedBy: 'handle', warning: null };
+        throw tabStateError('TAB_NOT_FOUND', `No tab with handle "${wanted}". Run tabs to list open tabs.`);
+      }
+
+      const named = getNamedPage(q);
+      if (named) return { page: named, matchedBy: 'name', warning: null };
+
+      if (/^\d+$/.test(q)) {
+        const row = stable[Number(q) - 1];
+        if (!row) {
+          throw tabStateError('TAB_NOT_FOUND', `No tab at position ${q}. Run tabs to list open tabs.`);
+        }
+        return {
+          page: row.page,
+          matchedBy: 'index',
+          warning: `Selected tab by list position ${q}. Positions shift when tabs close — use the stable handle ${row.handle} next time.`,
+        };
+      }
+
+      // Parallel + bounded title reads: see pageTitleBounded — an unbounded
+      // title() on a never-attached tab hangs forever on the relay bridge.
+      const metas = await Promise.all(stable.map(async (row) => {
+        let url = '';
+        try { url = row.page.url() || ''; } catch { /* closed mid-match */ }
+        const title = await pageTitleBounded(row.page);
+        return { ...row, url, title };
+      }));
+      const lower = q.toLowerCase();
+      const tiers = [
+        ['url', metas.filter((m) => m.url === q)],
+        ['url-substring', metas.filter((m) => m.url.toLowerCase().includes(lower))],
+        ['title-substring', metas.filter((m) => m.title.toLowerCase().includes(lower))],
+      ];
+      for (const [matchedBy, hits] of tiers) {
+        if (hits.length === 1) return { page: hits[0].page, matchedBy, warning: null };
+        if (hits.length > 1) {
+          const candidates = hits.map((m) => `${m.handle} "${m.title}" ${m.url}`).join('; ');
+          throw tabStateError(
+            'TAB_AMBIGUOUS',
+            `"${q}" matches ${hits.length} tabs: ${candidates}. Use a stable handle or a more specific query.`,
+          );
+        }
+      }
+      throw tabStateError('TAB_NOT_FOUND', `No tab matched "${q}". Run tabs to list open tabs.`);
+    } finally {
+      endOperation();
+    }
+  }
+
+  /**
+   * Resolve the page a command should act on WITHOUT changing the active tab.
+   * No `tab` → the persistent active page. With `tab` → the full soft-matching
+   * tiers of resolveTabTarget(). Throws TAB_NOT_FOUND / TAB_AMBIGUOUS.
+   */
+  async function resolveCommandPage({ tab } = {}) {
+    if (tab == null || String(tab).trim() === '') {
+      return resolveActivePage(getContext());
+    }
+    const target = await resolveTabTarget(tab);
+    return target.page;
+  }
+
+  /**
+   * Open a new page (optionally navigating it) and make it the active tab.
+   * Restriction gating (noNewTabs/manual) is the caller's responsibility —
+   * this runtime stays import-free and mechanical. On navigation failure the
+   * page is closed (never leaks a blank orphan tab) and the error propagates.
+   */
+  async function openNewPage({ url = '', timeout = 30000 } = {}) {
+    await ensureBrowser();
+    beginOperation();
+    try {
+      const ctx = getContext();
+      const page = await ctx.newPage();
+      setupConsoleCapture(page);
+      if (url) {
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+        } catch (err) {
+          try { await page.close(); } catch { /* already closed */ }
+          throw err;
+        }
+      }
+      setActivePage(page);
+      return page;
+    } finally {
+      endOperation();
+    }
+  }
+
   /**
    * Run a user snippet against the live session through the guarded runCode()
    * boundary. Ensures the browser is connected, resolves the persistent active
    * page (state.page) so every verb targets the same tab, and counts the work as
    * an active operation so the idle disconnect timer never fires mid-command.
+   *
+   * An optional `page` pins THIS run to an explicit target (a command's --tab
+   * page) WITHOUT touching userState.page: the pin travels to buildExecContext
+   * as `pinnedPage`, so concurrent commands against other tabs stay isolated.
+   * A stale pin fails loudly rather than silently falling back to the active
+   * tab (acting on the wrong tab is worse than failing).
+   *
    * Returns runCode()'s raw result.
    */
-  async function runCommand({ code, timeout = 30000 } = {}) {
+  async function runCommand({ code, timeout = 30000, page: pinnedPage = null } = {}) {
     if (typeof buildExecContext !== 'function' || typeof runCode !== 'function') {
       throw new Error('browser session runtime: buildExecContext and runCode deps are required for runCommand');
     }
@@ -316,16 +693,24 @@ export function createBrowserSessionRuntime(deps = {}) {
     beginOperation();
     try {
       const ctx = getContext();
-      const page = resolveActivePage(ctx);
+      let page;
+      if (pinnedPage) {
+        if (!isUsablePage(pinnedPage)) {
+          throw tabStateError('TAB_NOT_USABLE', 'The target tab was closed before the command ran. Run tabs to list open tabs.');
+        }
+        page = pinnedPage;
+      } else {
+        page = resolveActivePage(ctx);
+      }
       const execCtx = buildExecContext(
         page,
         ctx,
         userState,
-        { consoleLogs, setupConsoleCapture },
-        pluginHelpers,
+        { consoleLogs, setupConsoleCapture, pinnedPage: pinnedPage || null },
+        resolveDep(pluginHelpers),
         await getAgentPreferencesForSession(),
         await getBrowserforceRestrictionsForSession(),
-        pluginSkillRuntime,
+        resolveDep(pluginSkillRuntime),
       );
       return await runCode(code, execCtx, timeout);
     } finally {
@@ -345,6 +730,9 @@ export function createBrowserSessionRuntime(deps = {}) {
     cachedBrowserforceRestrictions = null;
     contextListenerAttached = false;
     consoleLogs.clear();
+    namedPages.clear();
+    stableHandles = new WeakMap();
+    nextStableHandleNumber = 1;
   }
 
   return {
@@ -373,6 +761,20 @@ export function createBrowserSessionRuntime(deps = {}) {
     getContext,
     getPages,
     runCommand,
+    setActivePage,
+    getActivePage,
+    assertValidTabName,
+    setNamedPage,
+    getNamedPage,
+    renamePageName,
+    forgetPageName,
+    listPageNames,
+    getStablePageHandle,
+    listStablePages,
+    listTabRows,
+    resolveTabTarget,
+    resolveCommandPage,
+    openNewPage,
     getAgentPreferencesForSession,
     getBrowserforceRestrictionsForSession,
     reset,

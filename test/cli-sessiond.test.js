@@ -436,6 +436,105 @@ describe('CLI session daemon', () => {
     });
   });
 
+  describe('sessiond endpoint compatibility (registry-backed /command/* envelope contract)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let lock;
+    let base;
+
+    const post = (path, body) => httpFetch('POST', `${base}${path}`, body, lock.token);
+
+    const assertEnvelopeShape = (body) => {
+      assert.deepEqual(
+        Object.keys(body).sort(),
+        ['data', 'error', 'success', 'warning'],
+        'envelope keeps the exact { success, data, error, warning } contract',
+      );
+    };
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      child = spawn('node', [SESSIOND], {
+        cwd: ROOT,
+        env: {
+          ...process.env,
+          BF_SESSIOND_LOCK_PATH: lockPath,
+          BF_BROWSER_BACKEND: 'managed',
+          BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      base = `http://127.0.0.1:${lock.port}`;
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('POST /command/snapshot keeps the envelope contract', async () => {
+      const { status, body } = await post('/command/snapshot', {});
+      assert.equal(status, 200);
+      assertEnvelopeShape(body);
+      assert.equal(body.success, true);
+      assert.equal(body.error, null);
+      assert.equal(body.data.url, 'https://fake.test/');
+      assert.ok(Array.isArray(body.data.refs));
+    });
+
+    it('POST /command/click keeps the envelope contract', async () => {
+      const { status, body } = await post('/command/click', { ref: '@e1' });
+      assert.equal(status, 200);
+      assertEnvelopeShape(body);
+      assert.equal(body.success, true);
+      assert.equal(body.data.clicked, 'e1');
+    });
+
+    it('POST /command/fill keeps the envelope contract', async () => {
+      const { status, body } = await post('/command/fill', { ref: '@e1', text: 'hello' });
+      assert.equal(status, 200);
+      assertEnvelopeShape(body);
+      assert.equal(body.success, true);
+      assert.equal(body.data.filled, 'e1');
+    });
+
+    it('POST /command/hover and get html reach the new registry commands', async () => {
+      const hover = await post('/command/hover', { ref: '@e1' });
+      assert.equal(hover.status, 200);
+      assert.equal(hover.body.success, true);
+      assert.equal(hover.body.data.hovered, 'e1');
+
+      const html = await post('/command/get', { what: 'html', ref: '@e1' });
+      assert.equal(html.status, 200);
+      assert.equal(html.body.success, true);
+      assert.equal(html.body.data.html, '<span>Submit</span>');
+    });
+
+    it('command failures stay HTTP 200 with success:false (envelope, not status)', async () => {
+      const unknownRef = await post('/command/click', { ref: '@e404' });
+      assert.equal(unknownRef.status, 200);
+      assertEnvelopeShape(unknownRef.body);
+      assert.equal(unknownRef.body.success, false);
+      assert.match(unknownRef.body.error, /Unknown ref/);
+
+      const badPress = await post('/command/press', {});
+      assert.equal(badPress.status, 200);
+      assert.equal(badPress.body.success, false);
+      assert.match(badPress.body.error, /press requires a key/);
+    });
+
+    it('unknown verbs still return HTTP 501', async () => {
+      const { status, body } = await post('/command/bogus', {});
+      assert.equal(status, 501);
+      assert.equal(body.success, false);
+      assert.match(body.error, /command not implemented: bogus/);
+    });
+  });
+
   describe('wait/get/eval verbs (real CLI path → sessiond → runCode)', () => {
     const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
     let child;
@@ -517,6 +616,282 @@ describe('CLI session daemon', () => {
       const second = JSON.parse((await evalViaStdin('state.counter = (state.counter || 0) + 1; return state.counter;')).stdout);
       assert.equal(first.data, 1, 'first eval initializes shared state');
       assert.equal(second.data, 2, 'second eval sees state persisted by the daemon session');
+    });
+  });
+
+  describe('direct verbs + run "<command>" share the registry parser (Task 9)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    let child;
+    let lockPath;
+    let env;
+
+    // exec() rejects on non-zero exit; capture the failure instead.
+    async function execFail(args) {
+      try {
+        const { stdout, stderr } = await exec('node', ['bin.js', ...args], { cwd: ROOT, env });
+        return { code: 0, stdout, stderr };
+      } catch (err) {
+        return { code: err.code, stdout: err.stdout || '', stderr: err.stderr || '' };
+      }
+    }
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      // Prime refs so ref commands resolve e1.
+      await exec('node', ['bin.js', 'snapshot', '--json'], { cwd: ROOT, env });
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('run "tabs" reaches the registry and matches the direct verb output exactly', async () => {
+      const direct = (await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout;
+      const viaRun = (await exec('node', ['bin.js', 'run', 'tabs', '--json'], { cwd: ROOT, env })).stdout;
+      assert.equal(viaRun, direct, 'run and direct verbs share output formatting');
+
+      const rows = JSON.parse(direct);
+      assert.ok(Array.isArray(rows), 'tabs --json keeps the pre-registry top-level array shape');
+      const row = rows[0];
+      // Superset contract: old fields kept, registry fields added.
+      assert.equal(row.index, 0);
+      assert.equal(row.title, 'Fake');
+      assert.equal(row.url, 'https://fake.test/');
+      assert.equal(row.handle, 't1');
+      assert.equal(row.active, true);
+      assert.equal(row.name, null);
+    });
+
+    it('human tabs output shows the stable handle + active marker on both paths', async () => {
+      const direct = (await exec('node', ['bin.js', 'tabs'], { cwd: ROOT, env })).stdout;
+      const viaRun = (await exec('node', ['bin.js', 'run', 'tabs'], { cwd: ROOT, env })).stdout;
+      assert.equal(viaRun, direct);
+      assert.match(direct, /\* t1 Fake/);
+    });
+
+    it('run "click @e1" executes through the daemon session', async () => {
+      const resp = JSON.parse((await exec('node', ['bin.js', 'run', 'click @e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(resp.success, true);
+      assert.equal(resp.data.clicked, 'e1');
+    });
+
+    it('new registry verbs are reachable directly: hover, get html, use', async () => {
+      const hover = JSON.parse((await exec('node', ['bin.js', 'hover', '@e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(hover.success, true);
+      assert.equal(hover.data.hovered, 'e1');
+
+      const html = JSON.parse((await exec('node', ['bin.js', 'get', 'html', '@e1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(html.success, true);
+      assert.equal(html.data.html, '<span>Submit</span>');
+
+      const use = JSON.parse((await exec('node', ['bin.js', 'use', 't1', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(use.success, true);
+      assert.equal(use.data.active.handle, 't1');
+    });
+
+    it('eval accepts positional code (not just --stdin)', async () => {
+      const resp = JSON.parse((await exec('node', ['bin.js', 'eval', 'return 6 * 7;', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(resp.success, true);
+      assert.equal(resp.data, 42);
+    });
+
+    it('wait accepts the positional kind form alongside the legacy flag form', async () => {
+      const positional = JSON.parse((await exec('node', ['bin.js', 'wait', 'text', 'saved', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(positional.success, true);
+      assert.equal(positional.data.waited, 'text');
+      assert.equal(positional.data.text, 'saved');
+    });
+
+    it('unknown flags fail loudly on BOTH paths (exit non-zero, no silent swallow)', async () => {
+      const direct = await execFail(['click', '@e1', '--bogus', '--json']);
+      assert.notEqual(direct.code, 0, 'direct verb exits non-zero');
+      const directResp = JSON.parse(direct.stdout);
+      assert.equal(directResp.success, false);
+      assert.match(directResp.error, /Unknown flag --bogus/);
+
+      const viaRun = await execFail(['run', 'click @e1 --bogus', '--json']);
+      assert.notEqual(viaRun.code, 0, 'run path exits non-zero');
+      const runResp = JSON.parse(viaRun.stdout);
+      assert.equal(runResp.success, false);
+      assert.match(runResp.error, /Unknown flag --bogus/);
+    });
+
+    it('missing flag values fail loudly on BOTH paths', async () => {
+      const direct = await execFail(['snapshot', '--tab']);
+      assert.notEqual(direct.code, 0);
+      assert.match(direct.stderr, /Flag --tab requires a value/);
+
+      const viaRun = await execFail(['run', 'snapshot --tab']);
+      assert.notEqual(viaRun.code, 0);
+      assert.match(viaRun.stderr, /Flag --tab requires a value/);
+    });
+
+    it('global CLI flags are never forwarded to the registry parser', async () => {
+      // --timeout (value flag) and --json/--sessiond (booleans) are bin.js-owned:
+      // the registry would reject them as unknown flags if they leaked through.
+      const resp = JSON.parse(
+        (await exec('node', ['bin.js', 'get', 'url', '--timeout', '5000', '--sessiond', '--json'], { cwd: ROOT, env })).stdout
+      );
+      assert.equal(resp.success, true);
+      assert.equal(resp.data.url, 'https://fake.test/');
+    });
+
+    it('quoted multi-word text survives the direct-verb rebuild (fill)', async () => {
+      const resp = JSON.parse(
+        (await exec('node', ['bin.js', 'fill', '@e1', 'hello "quoted" world', '--json'], { cwd: ROOT, env })).stdout
+      );
+      assert.equal(resp.success, true);
+      assert.equal(resp.data.filled, 'e1');
+    });
+
+    it('run requires exactly one command-string argument', async () => {
+      const missing = await execFail(['run']);
+      assert.notEqual(missing.code, 0);
+      assert.match(missing.stderr, /Usage: browserforce run/);
+
+      const extra = await execFail(['run', 'tabs', 'extra']);
+      assert.notEqual(extra.code, 0);
+      assert.match(extra.stderr, /Usage: browserforce run/);
+    });
+
+    it('run "help" prints the command help without needing the daemon', async () => {
+      const { stdout } = await exec('node', ['bin.js', 'run', 'help'], { cwd: ROOT, env });
+      assert.match(stdout, /BrowserForce commands:/);
+      assert.match(stdout, /click <ref> \[--tab name\]/);
+    });
+
+    it('snapshot rejects the old positional tab index with a teaching error', async () => {
+      const res = await execFail(['snapshot', '1', '--json']);
+      assert.notEqual(res.code, 0);
+      const resp = JSON.parse(res.stdout);
+      assert.match(resp.error, /snapshot takes no positional arguments/);
+      assert.match(resp.error, /--tab/);
+    });
+  });
+
+  // ─── Stress: many named tabs + parallel --tab reads over the real wire ─────
+  // (Task 12) One daemon, many tabs opened via the CLI, then concurrent CLI
+  // processes reading different named tabs. Proves handles/names stay stable
+  // and per-run pinning holds across separate CLI invocations.
+  describe('stress: CLI many named tabs + parallel --tab reads (Task 12)', () => {
+    const FAKE_BROWSER = fileURLToPath(new URL('./fixtures/fake-snapshot-browser.mjs', import.meta.url));
+    const TAB_COUNT = 12;
+    let child;
+    let lockPath;
+    let env;
+
+    async function execFail(args) {
+      try {
+        const { stdout, stderr } = await exec('node', ['bin.js', ...args], { cwd: ROOT, env });
+        return { code: 0, stdout, stderr };
+      } catch (err) {
+        return { code: err.code, stdout: err.stdout || '', stderr: err.stderr || '' };
+      }
+    }
+
+    before(async () => {
+      lockPath = tmpLockPath();
+      env = {
+        ...process.env,
+        BF_SESSIOND_LOCK_PATH: lockPath,
+        BF_BROWSER_BACKEND: 'managed',
+        BF_SESSIOND_CONNECT_MODULE: FAKE_BROWSER,
+      };
+      child = spawn('node', [SESSIOND], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const lock = await waitForLock(lockPath);
+      assert.ok(lock, 'sessiond should start with the fake browser backend');
+      // Open TAB_COUNT named tabs through the real CLI `open` path.
+      for (let i = 0; i < TAB_COUNT; i += 1) {
+        await exec('node', ['bin.js', 'open', `https://job-${i}.test/`, '--as', `job-${i}`, '--json'], { cwd: ROOT, env });
+      }
+    });
+
+    after(async () => {
+      try { if (child?.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+      try { await fs.unlink(lockPath); } catch { /* gone */ }
+      try { await fs.unlink(`${lockPath.replace(/\.json$/, '')}-url.json`); } catch { /* gone */ }
+    });
+
+    it('tabs lists every opened tab with unique stable handles and its name', async () => {
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(rows.length, TAB_COUNT + 1, 'the original fixture tab plus every opened tab');
+
+      const handles = rows.map((row) => row.handle);
+      assert.ok(handles.every((h) => /^t\d+$/.test(h)));
+      assert.equal(new Set(handles).size, rows.length, 'handles are unique');
+
+      for (let i = 0; i < TAB_COUNT; i += 1) {
+        const row = rows.find((r) => r.name === `job-${i}`);
+        assert.ok(row, `job-${i} is named in tabs output`);
+        assert.equal(row.url, `https://job-${i}.test/`);
+      }
+      const active = rows.filter((row) => row.active);
+      assert.equal(active.length, 1);
+      assert.equal(active[0].name, `job-${TAB_COUNT - 1}`, 'the last open is the active tab');
+    });
+
+    it('concurrent CLI processes reading different --tab targets each hit their own page', async () => {
+      const targets = [2, 5, 8, 11];
+      const results = await Promise.all(targets.map((i) =>
+        exec('node', ['bin.js', 'get', 'url', '--tab', `job-${i}`, '--json'], { cwd: ROOT, env })
+      ));
+      results.forEach(({ stdout }, idx) => {
+        const resp = JSON.parse(stdout);
+        assert.equal(resp.success, true);
+        assert.equal(resp.data.url, `https://job-${targets[idx]}.test/`, 'each concurrent read landed on its own tab');
+      });
+
+      // Parallel --tab reads never moved the active tab.
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(rows.find((row) => row.active)?.name, `job-${TAB_COUNT - 1}`);
+    });
+
+    it('re-using a taken name fails over the wire until --replace is given', async () => {
+      const conflict = await execFail(['open', 'https://newer.test/', '--as', 'job-3', '--json']);
+      assert.notEqual(conflict.code, 0);
+      const resp = JSON.parse(conflict.stdout);
+      assert.equal(resp.success, false);
+      assert.match(resp.error, /job-3/);
+      assert.match(resp.error, /--replace/);
+
+      const replaced = JSON.parse(
+        (await exec('node', ['bin.js', 'open', 'https://newer.test/', '--as', 'job-3', '--replace', '--json'], { cwd: ROOT, env })).stdout
+      );
+      assert.equal(replaced.success, true);
+      assert.equal(replaced.data.tab.name, 'job-3');
+      assert.equal(replaced.data.tab.url, 'https://newer.test/');
+
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const named = rows.filter((row) => row.name === 'job-3');
+      assert.equal(named.length, 1, 'exactly one tab holds the name after --replace');
+      assert.equal(named[0].url, 'https://newer.test/');
+    });
+
+    it('invalid tab names are rejected over the wire with the teaching suggestion', async () => {
+      const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+
+      for (const bad of ['my tab', 't2']) {
+        const fail = await execFail(['open', 'https://invalid-name.test/', '--as', bad, '--json']);
+        assert.notEqual(fail.code, 0);
+        const resp = JSON.parse(fail.stdout);
+        assert.equal(resp.success, false);
+        assert.match(resp.error, /identifier-like|reserved/);
+        assert.match(resp.error, /api-docs|docs/, 'the wire error keeps the teaching suggestion');
+      }
+
+      const after = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      assert.equal(after.length, before.length, 'rejected names never created a tab');
     });
   });
 });

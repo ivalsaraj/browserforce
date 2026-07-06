@@ -1,9 +1,38 @@
 const HELP_SECTIONS = Object.freeze({
+  commands: {
+    title: 'BrowserForce Commands',
+    summary: 'The primary workflow: high-level commands first, exec only as the escape hatch.',
+    text: `# BrowserForce Commands
+
+Use browserforce first:
+browserforce "tabs"
+browserforce "use t1"
+browserforce "snapshot"
+browserforce "click @e2"
+
+Use exec only when the command layer cannot express the task.
+Use reset only for real connection/session corruption.
+
+Multi-tab work — open named tabs, then target them without switching:
+browserforce "open https://example.com --as docs"
+browserforce "open https://app.heymantle.com --as app"
+browserforce "snapshot --tab app"
+browserforce "snapshot --tab docs"
+browserforce "click @e2 --tab app"
+
+- tabs lists stable t<N> handles, names, and the active marker. Handles never shift when other tabs close — target tabs by handle or name, never by list position.
+- use <t handle|name|text> soft-matches names, handles, and title/url text; ambiguity fails with candidates instead of guessing.
+- Name conflicts fail by default. Use --replace only when you intentionally want to move a name to another tab.
+- Refs (@e1, @e2, ...) come from the latest snapshot of that tab and go stale when the page changes — re-run "snapshot" after navigation or UI changes.
+- Command failures teach the next step (re-snapshot, run "tabs", pass --replace). They are not connection failures: fix and retry, do not reset.
+- Run browserforce "help" to list every command and flag.`,
+  },
   tabs: {
     title: 'Tabs',
     summary: 'Choose existing, manual, and new tabs without creating blanks by accident.',
     text: `# Tabs
 
+- Prefer the command surface for tab work: browserforce "tabs" (stable t<N> handles + names), "use <handle|name|text>", "open <url> --as <name>". The rules below cover exec-scope tab work.
 - For attached/manual/current-tab listing, call getBrowserforceStatus() first; use status.manualAttachedTabs and status.activeManualTargets.
 - Fast path: const status = await getBrowserforceStatus(); return status.manualAttachedTabs;
 - To inspect the attached tab, use: state.page = await getBrowserforcePageForTab();
@@ -55,8 +84,8 @@ const HELP_SECTIONS = Object.freeze({
     text: `# Logs And Debugging
 
 - Debug JS-heavy failures with snapshot({ search }), getLogs({ count }), and focused state.page.evaluate(...).
-- Do not use console.log() or console.error() inside execute snippets; return values instead.
-- If console.* was already used in an execute snippet, inspect captured output with getExecConsoleLogs({ count }).
+- Do not use console.log() or console.error() inside exec snippets; return values instead.
+- If console.* was already used in an exec snippet, inspect captured output with getExecConsoleLogs({ count }).
 - Clear noisy logs with clearLogs() or clearExecConsoleLogs() when starting a fresh debugging pass.
 - Avoid raw HTTP/curl for pages that depend on authenticated browser state or rendered DOM.`,
   },
@@ -66,7 +95,7 @@ const HELP_SECTIONS = Object.freeze({
     text: `# Raw CDP
 
 - Prefer Playwright APIs first.
-- When raw CDP is needed, call getCDPSession({ page: state.page }) or getCDPSession({ page }) from execute scope.
+- When raw CDP is needed, call getCDPSession({ page: state.page }) or getCDPSession({ page }) from exec scope.
 - Do not call page.context().newCDPSession(page) directly; BrowserForce wraps CDP to preserve relay-safe routing.
 - Keep CDP commands scoped to the relevant page and report method names and failure messages when debugging protocol issues.`,
   },
@@ -78,18 +107,19 @@ const HELP_SECTIONS = Object.freeze({
 - Call pluginCatalog() to discover plugin names, helper names, summaries, aliases, and available sections.
 - If the user request clearly matches a plugin capability, call pluginHelp(name, section?) before using that helper.
 - Do not call pluginHelp blindly for every plugin.
-- Plugin helpers are injected into execute scope; built-in BrowserForce helpers always win on name conflicts.`,
+- Plugin helpers are injected into exec scope; built-in BrowserForce helpers always win on name conflicts.`,
   },
   errors: {
     title: 'Errors And Recovery',
     summary: 'Recover from common BrowserForce and page-state failures.',
     text: `# Errors And Recovery
 
+- Command errors teach their own recovery: stale/unknown ref → run browserforce "snapshot" again; unknown tab → run "tabs"; ambiguous tab → use a t<N> handle or name; duplicate name → --replace or another name. These are normal failures — fix and retry, never reset.
 - Page closed: choose another page from context.pages(); create a new one only if restrictions allow it.
 - Element missing: refresh snapshot output and use stable refs, roles, test IDs, or tighter search.
 - Navigation failed: inspect current URL, logs, and snapshot before retrying.
 - BF_NO_ATTACHED_PAGE or BF_NEW_TABS_DISABLED: manual/no-new-tabs mode needs an attached tab or relaxed restrictions.
-- Connection/internal failures: call reset, then reinitialize state.page from context.pages().
+- Connection/internal failures (relay disconnect, browser/context closed) are the ONLY reset cases: call reset, then reinitialize state.page from context.pages().
 - Execute timeout is a cancellation boundary, not just a late error: it aborts BrowserForce-controlled continuations (run timers, guarded helpers, state) so a timed-out snippet cannot mutate state or issue new guarded calls — re-observe the page (snapshot/url) before retrying. Two limits by design: a continuation resuming after awaiting a raw top-level page/context op can still issue one more Chrome command, and a CPU loop after an await may not be interruptible. Do not call reset for ordinary timeouts.`,
   },
   parallel: {
@@ -105,16 +135,16 @@ const HELP_SECTIONS = Object.freeze({
   },
   'cli-session': {
     title: 'CLI Session Daemon',
-    summary: 'Persistent CLI browser session + atomic verbs vs one-shot -e.',
+    summary: 'Persistent CLI browser session + session commands vs one-shot -e.',
     text: `# CLI Session Daemon
 
 - The BrowserForce CLI has two execution paths: a persistent session daemon (sessiond) and one-shot \`-e\`.
-- Session daemon: \`browserforce snapshot --sessiond\` then atomic verbs (click / fill / type / press / wait / get / eval) share one browser session and the snapshot refs across separate CLI invocations.
-- Refs (\`@e1\`, \`e1\`, \`ref=e1\` all normalize to \`e1\`) come from the latest \`snapshot --sessiond\`; they go stale on any page change — re-snapshot before the next ref interaction.
-- Every atomic verb routes through the same guarded runCode() boundary as MCP execute. \`eval --stdin\` runs piped Playwright JS in the session with persistent \`state\` (and \`page\`, \`context\`, \`snapshot()\`, \`locatorForRef()\`).
+- Session commands — \`open\` / \`tabs\` / \`use\` / \`snapshot\` / \`click\` / \`hover\` / \`fill\` / \`type\` / \`press\` / \`wait\` / \`get\` / \`eval\` / \`rename\` / \`forget\` — share one browser session and the snapshot refs across separate CLI invocations. \`browserforce run "<command>"\` runs any command string verbatim (same language as the MCP browserforce tool).
+- Refs (\`@e1\`, \`e1\`, \`ref=e1\` all normalize to \`e1\`) come from the latest \`snapshot\`; they go stale on any page change — re-snapshot before the next ref interaction.
+- Every command routes through the same guarded runCode() boundary as MCP exec. \`eval --stdin\` runs piped Playwright JS in the session with persistent \`state\` (and \`page\`, \`context\`, \`snapshot()\`, \`locatorForRef()\`).
 - One-shot \`-e\` stays independent — no persisted state — for self-contained scripts.
-- Add \`--json\` for a { success, data, error, warning } envelope; verbs exit non-zero on failure.
-- Lifecycle: \`browserforce session start | status | stop\`. The daemon auto-starts on the first verb and idles out after 5 minutes.`,
+- Add \`--json\` for a { success, data, error, warning } envelope; commands exit non-zero on failure (\`tabs --json\` prints the rows array directly).
+- Lifecycle: \`browserforce session start | status | stop\`. The daemon auto-starts on the first command and idles out after 5 minutes.`,
   },
   backends: {
     title: 'Browser Backends',
@@ -130,8 +160,12 @@ const HELP_SECTIONS = Object.freeze({
   },
   examples: {
     title: 'Examples',
-    summary: 'Small patterns for common execute calls.',
+    summary: 'Small patterns for common exec calls.',
     text: `# Examples
+
+Prefer commands for these when possible: browserforce "tabs" / "use t2" /
+"open <url> --as <name>". The exec patterns below are for work the command
+layer cannot express.
 
 Inspect open tabs:
 \`\`\`js
@@ -168,6 +202,7 @@ return await snapshot();
 });
 
 export const HELP_SECTION_NAMES = Object.freeze([
+  'commands',
   'tabs',
   'page-setup',
   'navigation',
