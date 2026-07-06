@@ -763,4 +763,4 @@ Restart the relay from this branch (`pnpm relay`), then reload the extension via
 
 ## Post-Implementation Amendments
 
-(filled by the review loop if plan gaps are found during implementation)
+- **Plan gap (Codex code review round 1, IMPORTANT):** Task 5 specified `lastCommandAt` + affinity seeding only for `_forwardToTab`'s **main-session** path. Real work also flows through explicit `newCDPSession` **alias sessions** (snapshot engine AX fetches) and **OOPIF child sessions** — without seeding there, the agent window could stay unpinned and `/attached-tabs` idle metadata went stale while the tab was actively used. Fix: mirrored the main-path non-init branch in both paths (`_seedAgentWindowAffinity` + `lastCommandAt`), gated on `!INIT_ONLY_METHODS.has(method)` so passive tagging semantics are unchanged. Root cause: the plan treated alias/child paths as pass-through routing and only listed them for `passive` tagging (Task 4), missing that Task 5's "real activity" definition must apply to every forward path. Test: `real commands on an alias session seed affinity and bump lastCommandAt` (failing-first).
