@@ -122,7 +122,7 @@ Chrome kills MV3 service workers after ~30s of inactivity. The relay sends `ping
 
 ### Lazy Debugger Attachment
 
-When the agent sends `Target.setAutoAttach`, the relay responds with `{}` immediately, lists all tabs from the extension, and sends `Target.attachedToTarget` events — but does NOT call `chrome.debugger.attach()` on any tab. The debugger is attached lazily on the first CDP command targeting that tab via `_ensureDebuggerAttached()`. This avoids attaching debuggers to 50+ tabs at once (each consuming Chrome memory and showing the automation infobar). Race-safe via `attachPromise` per target.
+When the agent sends `Target.setAutoAttach`, the relay responds with `{}` immediately, lists all tabs from the extension, and sends `Target.attachedToTarget` events — but does NOT call `chrome.debugger.attach()` on any tab. The debugger is attached lazily on the first CDP command targeting that tab via `_ensureDebuggerAttached()`. This avoids attaching debuggers to 50+ tabs at once (each consuming Chrome memory and showing the automation infobar). Race-safe via `attachPromise` per target. `attachPromise` is cleared in a `finally` — a failed `attachTab` (e.g. frozen tab, extension timeout) must NOT leave a rejected promise on the target, or every later command would instantly re-throw the stale error until relay restart (rediscovery preserves `attachPromise`); clearing lets the next real command retry the attach.
 
 **Location**: `relay/src/index.js`, `_autoAttachAllTabs()`, `_ensureDebuggerAttached()`, `_forwardToTab()`.
 
