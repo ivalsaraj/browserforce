@@ -1794,8 +1794,16 @@ class RelayServer {
         if (INIT_ONLY_METHODS.has(method)) {
           return syntheticInitResponse(method, primaryTarget);
         }
+        this._seedAgentWindowAffinity(clientId, primaryTarget);
+        primaryTarget.lastCommandAt = Date.now();
         primaryTarget._triggerMethod = method;
         await this._ensureDebuggerAttached(primaryTarget, aliasPrimarySessionId);
+      } else if (!INIT_ONLY_METHODS.has(method)) {
+        // Alias sessions (newCDPSession) carry real work — e.g. the snapshot
+        // engine's AX fetches — so they count as activity and seed affinity
+        // exactly like the main-session path.
+        this._seedAgentWindowAffinity(clientId, primaryTarget);
+        primaryTarget.lastCommandAt = Date.now();
       }
       this._logCdp({
         direction: 'to-extension',
@@ -1826,6 +1834,11 @@ class RelayServer {
       const parentTarget = parentSessionId && this.targets.get(parentSessionId);
       if (parentTarget && !parentTarget.debuggerAttached) {
         await this._ensureDebuggerAttached(parentTarget, parentSessionId);
+      }
+      // OOPIF work is real activity on the parent tab.
+      if (parentTarget && !INIT_ONLY_METHODS.has(method)) {
+        this._seedAgentWindowAffinity(clientId, parentTarget);
+        parentTarget.lastCommandAt = Date.now();
       }
       this._logCdp({
         direction: 'to-extension',
