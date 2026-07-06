@@ -1505,6 +1505,9 @@ class RelayServer {
         debuggerAttached: !!existing?.debuggerAttached,
         attachPromise: existing?.attachPromise || null,
         origin: existing?.origin || discoveredOrigin || 'relay-discovered',
+        // Keep the real-activity clock across client-reconnect rediscovery,
+        // or every fresh connect would reset /attached-tabs idleMs to blank.
+        lastCommandAt: existing?.lastCommandAt,
       });
       this.tabToSession.set(tabId, sessionId);
       if (isNewTarget) {

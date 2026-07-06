@@ -2032,6 +2032,49 @@ describe('Auto-attach Flow', () => {
     }
   });
 
+  it('keeps lastCommandAt across client reconnect rediscovery', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    provenanceFakeExtension(ext, { tabId: 975, tabOrigin: undefined, attachCommands: [] });
+    const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    let cdpB;
+    try {
+      const eventsA = [];
+      cdpA.on('message', (data) => eventsA.push(JSON.parse(data.toString())));
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = eventsA.find((m) => m.method === 'Target.attachedToTarget');
+      cdpA.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+        sessionId: attachedEvt.params.sessionId,
+      }));
+      await sleep(200);
+
+      const before = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tabBefore = before.body.tabs.find((t) => t.tabId === 975);
+      assert.ok(Number.isInteger(tabBefore?.lastCommandAt), 'real command sets lastCommandAt');
+
+      // New client connects; _autoAttachAllTabs re-discovers the same tab.
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdpB.on('message', () => {});
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+
+      const after = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tabAfter = after.body.tabs.find((t) => t.tabId === 975);
+      assert.equal(tabAfter?.lastCommandAt, tabBefore.lastCommandAt,
+        'rediscovery must not wipe the real-activity clock');
+    } finally {
+      cdpA.close();
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
   it('tabs without listTabs origin still become relay-attached (old-extension compat)', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },
