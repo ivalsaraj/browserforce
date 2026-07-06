@@ -402,7 +402,7 @@ async function doInstallExtension(quiet) {
   mkdirSync(dest, { recursive: true });
   cpSync(src, dest, { recursive: true });
 
-  // VERSION sentinel — tracks npm package version, NOT manifest.json version (those are separate tracks)
+  // VERSION sentinel tracks the same package version shown by the extension manifest.
   const pkgVersion = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version;
   writeFileSync(join(dest, 'VERSION'), pkgVersion);
 

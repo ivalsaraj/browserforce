@@ -3,6 +3,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const manifest = JSON.parse(fs.readFileSync('extension/manifest.json', 'utf8'));
+const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+
+test('manifest version matches the BrowserForce package version', () => {
+  assert.equal(manifest.version, pkg.version);
+});
 
 test('manifest includes sidePanel permission and default_path', () => {
   assert.ok(manifest.permissions.includes('sidePanel'));

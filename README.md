@@ -73,6 +73,9 @@ pnpm install
 
 ❗ After every BrowserForce update, re-run `browserforce install-extension`, then reload the extension in `chrome://extensions/` (click the ↺ icon next to BrowserForce).
 
+The Chrome extension version is kept in sync with the BrowserForce package
+version shown by the CLI/package metadata.
+
 **If you cloned the repo:**
 
 1. Open `chrome://extensions/` in Chrome

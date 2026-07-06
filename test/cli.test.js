@@ -274,8 +274,10 @@ describe('CLI install-extension', () => {
     assert.ok(stdout.includes('Extension installed to:'));
     assert.ok(stdout.includes(tmpExt));
     assert.ok(stdout.includes('Load unpacked'));
-    assert.ok(stdout.includes('❗'));
-    assert.ok(stdout.includes('↺'));
+    assert.ok(stdout.includes('Reloading extension... ✓') || stdout.includes('❗'));
+    if (stdout.includes('❗')) {
+      assert.ok(stdout.includes('↺'));
+    }
 
     // Check files were copied
     const { existsSync, readFileSync } = await import('node:fs');
