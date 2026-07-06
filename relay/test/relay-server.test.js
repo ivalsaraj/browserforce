@@ -1675,6 +1675,519 @@ describe('Auto-attach Flow', () => {
     ext.close();
     await sleep(100);
   });
+
+  // Fake extension shared by the affinity-across-reconnects tests: echoes the
+  // requested windowId (falling back to 500 for unpinned creates).
+  function affinityFakeExtension(ext, createCommands) {
+    let nextTabId = 420;
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        const tabId = nextTabId++;
+        const windowId = Number.isInteger(msg.params.windowId) ? msg.params.windowId : 500;
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId,
+            windowId,
+            targetId: `real-target-${tabId}`,
+            targetInfo: { targetId: `real-target-${tabId}`, type: 'page', title: '', url: msg.params.url || 'about:blank', windowId },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+  }
+
+  it('window affinity survives reconnect for labeled clients', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    affinityFakeExtension(ext, createCommands);
+    let cdpB;
+    try {
+      // Session A: labeled client creates a tab -> establishes window 500
+      const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=mcp-live`);
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await sleep(200);
+      cdpA.close();
+      await sleep(100);
+
+      // Session B: NEW connection, same label -> must reuse window 500
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=mcp-live`);
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://b.example' } }));
+      await sleep(200);
+
+      assert.equal(createCommands.length, 2);
+      assert.equal(createCommands[0].windowId, undefined, 'first create has no pin yet');
+      assert.equal(createCommands[1].windowId, 500, 'reconnected labeled client reuses the pinned window');
+    } finally {
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('two different labels keep independent window affinity', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    affinityFakeExtension(ext, createCommands);
+    let cdpB;
+    try {
+      const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=agent-one`);
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await sleep(200);
+      cdpA.close();
+      await sleep(100);
+
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=agent-two`);
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://b.example' } }));
+      await sleep(200);
+
+      assert.equal(createCommands.length, 2);
+      assert.equal(createCommands[0].windowId, undefined);
+      assert.equal(createCommands[1].windowId, undefined, 'a different label must not inherit the first label\'s window');
+    } finally {
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('unlabeled clients keep per-connection affinity (cleared on disconnect)', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    affinityFakeExtension(ext, createCommands);
+    let cdpB;
+    try {
+      // Session A: unlabeled client (still gets a DERIVED display label like
+      // 'cdp-client' — derived labels must NOT create durable affinity).
+      const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await sleep(200);
+      cdpA.close();
+      await sleep(100);
+
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://b.example' } }));
+      await sleep(200);
+
+      assert.equal(createCommands.length, 2);
+      assert.equal(createCommands[0].windowId, undefined);
+      assert.equal(createCommands[1].windowId, undefined, 'unlabeled reconnect starts with fresh affinity');
+    } finally {
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  // Fake extension for provenance tests: one discovered tab, records attachTab
+  // payloads, answers cdpCommand. `tabOrigin` simulates a new extension that
+  // surfaces agent-created provenance in listTabs (undefined = old extension).
+  function provenanceFakeExtension(ext, { tabId, tabOrigin, attachCommands }) {
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        const tab = { tabId, windowId: 11, url: 'https://agent.example', title: 'A', active: false };
+        if (tabOrigin) tab.origin = tabOrigin;
+        ext.send(JSON.stringify({ id: msg.id, result: { tabs: [tab] } }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        attachCommands.push(msg.params);
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: msg.params.tabId,
+            targetId: `real-target-${msg.params.tabId}`,
+            targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'A', url: 'https://agent.example', windowId: 11 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      }
+    });
+  }
+
+  it('preserves agent-created provenance through listTabs discovery and lazy attach', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const attachCommands = [];
+    provenanceFakeExtension(ext, { tabId: 950, tabOrigin: 'agent-created', attachCommands });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+
+      // Real (non-init) command triggers the lazy debugger attach.
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+        sessionId: attachedEvt.params.sessionId,
+      }));
+      await sleep(200);
+
+      assert.equal(attachCommands.length, 1, 'lazy attach must reach the extension');
+      assert.equal(attachCommands[0].origin, 'agent-created',
+        'lazy attach must preserve agent-created provenance from discovery');
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 950);
+      assert.equal(tab?.origin, 'agent-created', '/attached-tabs must keep agent-created origin');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('tags init-only cdpCommands as passive so the extension does not bump idle timers', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const cdpCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 960, windowId: 11, url: 'https://idle.example', title: 'Idle', active: false }] },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: msg.params.tabId,
+            targetId: `real-target-${msg.params.tabId}`,
+            targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'Idle', url: 'https://idle.example', windowId: 11 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        cdpCommands.push(msg.params);
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      }
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+      const sessionId = attachedEvt.params.sessionId;
+
+      // Real command: lazy-attaches and must count as activity.
+      cdp.send(JSON.stringify({ id: 2, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId }));
+      await sleep(200);
+      // Init-only command on the now-attached tab: forwarded, but passive.
+      cdp.send(JSON.stringify({ id: 3, method: 'Runtime.enable', params: {}, sessionId }));
+      await sleep(200);
+
+      const evaluate = cdpCommands.find((c) => c.method === 'Runtime.evaluate');
+      assert.ok(evaluate, 'Runtime.evaluate must be forwarded');
+      assert.equal(evaluate.passive, undefined, 'real commands must not be tagged passive');
+      const runtimeEnable = cdpCommands.find((c) => c.method === 'Runtime.enable');
+      assert.ok(runtimeEnable, 'Runtime.enable must be forwarded on an attached tab');
+      assert.equal(runtimeEnable.passive, true, 'init-only commands must be tagged passive');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('exposes lastCommandAt/idleMs for tabs with real activity in /attached-tabs', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    provenanceFakeExtension(ext, { tabId: 970, tabOrigin: undefined, attachCommands: [] });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+
+      const before = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tabBefore = before.body.tabs.find((t) => t.tabId === 970);
+      assert.equal(tabBefore?.lastCommandAt, undefined, 'no real activity yet -> no lastCommandAt');
+
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+        sessionId: attachedEvt.params.sessionId,
+      }));
+      await sleep(200);
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 970);
+      assert.ok(Number.isInteger(tab?.lastCommandAt), 'lastCommandAt must be a timestamp');
+      assert.ok(tab.idleMs >= 0, 'idleMs must be a non-negative number');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('real commands on an alias session seed affinity and bump lastCommandAt', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    provenanceFakeExtension(ext, { tabId: 980, tabOrigin: undefined, attachCommands: [] });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+      const targetId = attachedEvt.params.targetInfo.targetId;
+
+      // Explicit newCDPSession(page) handshake -> alias session for the page.
+      cdp.send(JSON.stringify({ id: 2, method: 'Target.attachToBrowserTarget' }));
+      await sleep(100);
+      const browserSession = events.find((m) => m.id === 2)?.result?.sessionId;
+      assert.ok(browserSession, 'browser session required');
+      cdp.send(JSON.stringify({
+        id: 3,
+        method: 'Target.attachToTarget',
+        params: { targetId, flatten: true },
+        sessionId: browserSession,
+      }));
+      await sleep(100);
+      const alias = events.find((m) => m.id === 3)?.result?.sessionId;
+      assert.ok(alias?.startsWith('bf-alias-'), 'alias session required');
+
+      // Real (non-init) command through the ALIAS session only — e.g. the
+      // snapshot engine's Accessibility.getFullAXTree via newCDPSession.
+      cdp.send(JSON.stringify({
+        id: 4,
+        method: 'Accessibility.getFullAXTree',
+        params: {},
+        sessionId: alias,
+      }));
+      await sleep(200);
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 980);
+      assert.ok(Number.isInteger(tab?.lastCommandAt),
+        'alias-session real command must bump lastCommandAt');
+      assert.ok([...relay.agentWindowByAffinityKey.values()].includes(11),
+        'alias-session real command must seed window affinity');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('keeps lastCommandAt across client reconnect rediscovery', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    provenanceFakeExtension(ext, { tabId: 975, tabOrigin: undefined, attachCommands: [] });
+    const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    let cdpB;
+    try {
+      const eventsA = [];
+      cdpA.on('message', (data) => eventsA.push(JSON.parse(data.toString())));
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = eventsA.find((m) => m.method === 'Target.attachedToTarget');
+      cdpA.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+        sessionId: attachedEvt.params.sessionId,
+      }));
+      await sleep(200);
+
+      const before = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tabBefore = before.body.tabs.find((t) => t.tabId === 975);
+      assert.ok(Number.isInteger(tabBefore?.lastCommandAt), 'real command sets lastCommandAt');
+
+      // New client connects; _autoAttachAllTabs re-discovers the same tab.
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdpB.on('message', () => {});
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+
+      const after = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tabAfter = after.body.tabs.find((t) => t.tabId === 975);
+      assert.equal(tabAfter?.lastCommandAt, tabBefore.lastCommandAt,
+        'rediscovery must not wipe the real-activity clock');
+    } finally {
+      cdpA.close();
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('retries lazy attach after a failed attachTab instead of poisoning the target', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    // attachTab fails once (e.g. frozen tab / extension timeout), then succeeds.
+    let attachAttempts = 0;
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 990, windowId: 11, url: 'https://flaky.example', title: 'Flaky', active: false }] },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        attachAttempts += 1;
+        if (attachAttempts === 1) {
+          ext.send(JSON.stringify({ id: msg.id, error: 'Debugger attach hung (simulated)' }));
+        } else {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: {
+              tabId: msg.params.tabId,
+              targetId: `real-target-${msg.params.tabId}`,
+              targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'Flaky', url: 'https://flaky.example', windowId: 11 },
+              sessionId: msg.params.sessionId,
+            },
+          }));
+        }
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        ext.send(JSON.stringify({ id: msg.id, result: { value: 'ok' } }));
+      }
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+      const sessionId = attachedEvt.params.sessionId;
+
+      // First real command: lazy attach fails -> command must surface the error.
+      cdp.send(JSON.stringify({ id: 2, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId }));
+      await sleep(200);
+      const firstResp = events.find((m) => m.id === 2);
+      assert.ok(firstResp?.error, 'first command must surface the attach failure');
+
+      // Second real command: a fresh attach attempt must be made and succeed —
+      // a rejected attachPromise must NOT permanently poison the target.
+      cdp.send(JSON.stringify({ id: 3, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId }));
+      await sleep(200);
+      const secondResp = events.find((m) => m.id === 3);
+      assert.equal(attachAttempts, 2, 'second command must retry the attach');
+      assert.ok(secondResp?.result, `second command must succeed after retry, got: ${JSON.stringify(secondResp)}`);
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 990);
+      assert.equal(tab?.debuggerAttached, true, 'tab must be attached after the retry');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('tabs without listTabs origin still become relay-attached (old-extension compat)', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const attachCommands = [];
+    provenanceFakeExtension(ext, { tabId: 951, tabOrigin: undefined, attachCommands });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+        sessionId: attachedEvt.params.sessionId,
+      }));
+      await sleep(200);
+
+      assert.equal(attachCommands.length, 1);
+      assert.equal(attachCommands[0].origin, 'relay-attached');
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 951);
+      assert.equal(tab?.origin, 'relay-attached');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
 });
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
@@ -2631,17 +3144,24 @@ describe('manualTabAttached handler', () => {
     await sleep(100);
   });
 
-  it('answers Page.createIsolatedWorld synthetically for already-attached manual tabs', async () => {
+  it('forwards Page.createIsolatedWorld to already-attached manual tabs (utility world must exist)', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },
     });
     const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
     try {
-      const extensionCommands = [];
+      const isolatedWorldCommands = [];
       ext.on('message', (data) => {
         const msg = JSON.parse(data.toString());
         if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
-        extensionCommands.push(msg);
+        if (msg.id && msg.method === 'cdpCommand') {
+          if (msg.params.method === 'Page.createIsolatedWorld') {
+            isolatedWorldCommands.push(msg.params);
+            ext.send(JSON.stringify({ id: msg.id, result: { executionContextId: 7 } }));
+            return;
+          }
+          ext.send(JSON.stringify({ id: msg.id, result: {} }));
+        }
       });
 
       const events = [];
@@ -2679,12 +3199,65 @@ describe('manualTabAttached handler', () => {
       await sleep(100);
 
       const response = events.find((m) => m.id === 20);
-      assert.deepEqual(response?.result, {});
       assert.equal(
-        extensionCommands.filter((msg) => msg.method === 'cdpCommand').length,
-        0,
-        'Page.createIsolatedWorld must not be forwarded to the extension',
+        response?.result?.executionContextId,
+        7,
+        'forwarded response must round-trip from the extension',
       );
+      assert.equal(
+        isolatedWorldCommands.length,
+        1,
+        'Page.createIsolatedWorld must be forwarded to the extension exactly once',
+      );
+      assert.equal(isolatedWorldCommands[0].tabId, 777);
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('keeps Page.createIsolatedWorld synthetic on unattached tabs (no eager attach)', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const extCommands = [];
+      ext.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+        if (msg.id && msg.method === 'listTabs') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: { tabs: [{ tabId: 901, windowId: 11, url: 'https://idle.example', title: 'Idle', active: false }] },
+          }));
+          return;
+        }
+        if (msg.id) extCommands.push(msg.method);
+      });
+
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+
+      const attached = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attached, 'discovered tab should be exposed');
+
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Page.createIsolatedWorld',
+        params: { frameId: 'bf-target-901', worldName: '__pw_utility', grantUniveralAccess: true },
+        sessionId: attached.params.sessionId,
+      }));
+      await sleep(150);
+
+      const response = events.find((m) => m.id === 2);
+      assert.deepEqual(response?.result, {}, 'unattached tab still gets a synthetic response');
+      assert.ok(!extCommands.includes('attachTab'), 'must not trigger eager debugger attach');
+      assert.ok(!extCommands.includes('cdpCommand'), 'must not forward to the extension');
     } finally {
       cdp.close();
       ext.close();
