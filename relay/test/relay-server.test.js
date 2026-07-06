@@ -2075,6 +2075,82 @@ describe('Auto-attach Flow', () => {
     }
   });
 
+  it('retries lazy attach after a failed attachTab instead of poisoning the target', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    // attachTab fails once (e.g. frozen tab / extension timeout), then succeeds.
+    let attachAttempts = 0;
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 990, windowId: 11, url: 'https://flaky.example', title: 'Flaky', active: false }] },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        attachAttempts += 1;
+        if (attachAttempts === 1) {
+          ext.send(JSON.stringify({ id: msg.id, error: 'Debugger attach hung (simulated)' }));
+        } else {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: {
+              tabId: msg.params.tabId,
+              targetId: `real-target-${msg.params.tabId}`,
+              targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'Flaky', url: 'https://flaky.example', windowId: 11 },
+              sessionId: msg.params.sessionId,
+            },
+          }));
+        }
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        ext.send(JSON.stringify({ id: msg.id, result: { value: 'ok' } }));
+      }
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+      const attachedEvt = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attachedEvt, 'discovered tab should be exposed');
+      const sessionId = attachedEvt.params.sessionId;
+
+      // First real command: lazy attach fails -> command must surface the error.
+      cdp.send(JSON.stringify({ id: 2, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId }));
+      await sleep(200);
+      const firstResp = events.find((m) => m.id === 2);
+      assert.ok(firstResp?.error, 'first command must surface the attach failure');
+
+      // Second real command: a fresh attach attempt must be made and succeed —
+      // a rejected attachPromise must NOT permanently poison the target.
+      cdp.send(JSON.stringify({ id: 3, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId }));
+      await sleep(200);
+      const secondResp = events.find((m) => m.id === 3);
+      assert.equal(attachAttempts, 2, 'second command must retry the attach');
+      assert.ok(secondResp?.result, `second command must succeed after retry, got: ${JSON.stringify(secondResp)}`);
+
+      const res = await httpGet(`http://127.0.0.1:${port}/attached-tabs`);
+      const tab = res.body.tabs.find((t) => t.tabId === 990);
+      assert.equal(tab?.debuggerAttached, true, 'tab must be attached after the retry');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
   it('tabs without listTabs origin still become relay-attached (old-extension compat)', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },

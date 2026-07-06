@@ -1531,29 +1531,38 @@ class RelayServer {
     }
 
     target.attachPromise = (async () => {
-      log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (triggered by: ${target._triggerMethod || '?'}) ${target.targetInfo?.url}`);
-      // Preserve manual/agent-created provenance; only anonymous discoveries
-      // become relay-attached. Demoting agent-created would exempt the tab
-      // from auto-close after any SW-restart re-adoption.
-      const preservedOrigin = (target.origin === 'manual' || target.origin === 'agent-created')
-        ? target.origin
-        : 'relay-attached';
-      const result = await this._sendToExt('attachTab', {
-        tabId: target.tabId,
-        sessionId,
-        origin: preservedOrigin,
-      });
-      if (result.targetId) target.chromeTargetId = result.targetId;
-      if (result.targetInfo) {
-        target.targetInfo = {
-          ...result.targetInfo,
-          targetId: target.targetId,
-          browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
-        };
+      try {
+        log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (triggered by: ${target._triggerMethod || '?'}) ${target.targetInfo?.url}`);
+        // Preserve manual/agent-created provenance; only anonymous discoveries
+        // become relay-attached. Demoting agent-created would exempt the tab
+        // from auto-close after any SW-restart re-adoption.
+        const preservedOrigin = (target.origin === 'manual' || target.origin === 'agent-created')
+          ? target.origin
+          : 'relay-attached';
+        const result = await this._sendToExt('attachTab', {
+          tabId: target.tabId,
+          sessionId,
+          origin: preservedOrigin,
+        });
+        if (result.targetId) target.chromeTargetId = result.targetId;
+        if (result.targetInfo) {
+          target.targetInfo = {
+            ...result.targetInfo,
+            targetId: target.targetId,
+            browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
+          };
+        }
+        target.debuggerAttached = true;
+        target.origin = preservedOrigin;
+      } finally {
+        // ALWAYS clear, including on failure: a rejected attachPromise would
+        // otherwise stick to the target (rediscovery preserves attachPromise)
+        // and instantly re-throw the stale error for every later command —
+        // the tab would be permanently unusable until relay restart. Clearing
+        // lets the next real command retry the attach (e.g. after a frozen
+        // tab wakes up). In-flight waiters still see this attempt's outcome.
+        target.attachPromise = null;
       }
-      target.debuggerAttached = true;
-      target.origin = preservedOrigin;
-      target.attachPromise = null;
     })();
 
     await target.attachPromise;
