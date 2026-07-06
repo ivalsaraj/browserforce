@@ -631,6 +631,78 @@ describe('parseBrowserforceCommand', () => {
     assert.deepEqual(parseBrowserforceCommand('get url').args, ['url']);
   });
 
+  describe('eval raw-remainder parsing', () => {
+    it('preserves quotes in raw JS code verbatim (the a0eab22b crash shape)', () => {
+      const code = "(async () => { const b = await page.getByRole('button', { name: /%$/ }).all(); return b.length; })()";
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code]);
+      assert.deepEqual(parsed.flags, {});
+    });
+
+    it('preserves newlines and inner double quotes in raw code', () => {
+      const code = 'const t = await page.locator(\'button[title="Show absolute change"]\').count();\nreturn t;';
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code]);
+    });
+
+    it('raw code containing an apostrophe does not throw BAD_QUOTING', () => {
+      const code = "return document.title + ' — it\\'s fine';";
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.equal(parsed.verb, 'eval');
+      assert.ok(parsed.args[0].includes("it\\'s"));
+    });
+
+    it('quote-leading JS that continues past the closing quote stays raw', () => {
+      const code = "'text'.length";
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code], 'closing quote followed by .length means raw code, not a legacy quoted group');
+    });
+
+    it('extracts a LEADING --tab flag before raw code', () => {
+      const parsed = parseBrowserforceCommand('eval --tab app return 1 + 1');
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+      assert.deepEqual(parsed.args, ['return 1 + 1']);
+    });
+
+    it('extracts a LEADING --tab=name form before raw code', () => {
+      const parsed = parseBrowserforceCommand('eval --tab=app return page.url()');
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+      assert.deepEqual(parsed.args, ['return page.url()']);
+    });
+
+    it('legacy fully-quoted form with a trailing --tab keeps tokenized semantics', () => {
+      const parsed = parseBrowserforceCommand('eval "return page.url()" --tab app');
+      assert.deepEqual(parsed.args, ['return page.url()']);
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+    });
+
+    it('quoted code with a --tab=name trailing flag keeps tokenized semantics', () => {
+      const parsed = parseBrowserforceCommand('eval "return 1" --tab=app');
+      assert.deepEqual(parsed.args, ['return 1']);
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+    });
+
+    it('legacy double-quoted group unescapes backslash escapes like the CLI builder emits', () => {
+      // bin.js quoteCommandToken emits: eval "say \"hi\""
+      const parsed = parseBrowserforceCommand('eval "say \\"hi\\""');
+      assert.deepEqual(parsed.args, ['say "hi"']);
+    });
+
+    it('quoted-looking code that is NOT a single quoted group falls back to raw', () => {
+      const code = '"a" + "b"';
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code]);
+    });
+
+    it('bare eval still fails with the usage error', async () => {
+      const runtime = { async runCommand() { throw new Error('must not run'); } };
+      await assert.rejects(
+        () => executeBrowserforceCommand({ command: 'eval', runtime }),
+        (err) => err instanceof BrowserforceCommandError,
+      );
+    });
+  });
+
   it('parses open with --as and --replace', () => {
     assert.deepEqual(parseBrowserforceCommand('open https://example.com --as docs'), {
       verb: 'open',

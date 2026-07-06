@@ -416,6 +416,7 @@ browserforce press Enter                      # press a key
 browserforce wait text "saved"                # case-insensitive; also url <glob> / load <state> / fn <expr>
 browserforce get url | title | text @e5 | html @e5   # read page/element data
 echo 'return await snapshot()' | browserforce eval --stdin   # run piped Playwright JS in the session
+browserforce run "eval return page.url()"     # eval code is VERBATIM after the verb (put --tab before the code)
 browserforce rename docs api-docs             # rename a tab name
 browserforce forget api-docs                  # remove a tab name
 browserforce run "click @e2 --tab docs"       # run any command string verbatim

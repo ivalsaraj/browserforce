@@ -111,6 +111,54 @@ function tokenize(command) {
   return tokens;
 }
 
+// Scan one fully-quoted group at the start of `text`. Honors backslash
+// escapes inside double quotes only (mirror of tokenize's rules — the CLI
+// builder emits \" and \\ inside double-quoted code). Returns
+// { inner, endIndex } for a terminated group, or null when the group never
+// closes.
+function matchQuotedGroup(text) {
+  const quote = text[0];
+  let inner = '';
+  for (let i = 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === quote) return { inner, endIndex: i + 1 };
+    if (ch === '\\' && quote === '"' && i + 1 < text.length) {
+      i += 1;
+      inner += text[i];
+      continue;
+    }
+    inner += ch;
+  }
+  return null;
+}
+
+// Legacy quoted shapes (CLI-built): `eval "<code>"` with optional trailing
+// --tab — recognized ONLY when the remainder is one fully-quoted group
+// followed by end-of-input or a valid --tab. Everything else is raw code
+// with an optional LEADING --tab. Trailing flag extraction on raw code is
+// deliberately unsupported — code may legitimately contain "--tab", and
+// guessing wrong corrupts the snippet. Quote-leading JS that continues past
+// its closing quote (`'text'.length`) is raw, never unwrapped.
+function parseEvalRemainder(remainder) {
+  if (remainder.startsWith('"') || remainder.startsWith("'")) {
+    const group = matchQuotedGroup(remainder);
+    if (group) {
+      const rest = remainder.slice(group.endIndex).trim();
+      if (rest === '') return { args: [group.inner], flags: {} };
+      const tabMatch = rest.match(/^--tab(?:=(\S+)|\s+(\S+))$/);
+      if (tabMatch) return { args: [group.inner], flags: { tab: tabMatch[1] ?? tabMatch[2] } };
+    }
+  }
+  const flags = {};
+  let code = remainder;
+  const leadingTab = code.match(/^--tab(?:=(\S+)|\s+(\S+))\s*/);
+  if (leadingTab) {
+    flags.tab = leadingTab[1] ?? leadingTab[2];
+    code = code.slice(leadingTab[0].length);
+  }
+  return { args: [code], flags };
+}
+
 // ─── Parser ──────────────────────────────────────────────────────────────────
 
 /**
@@ -125,6 +173,18 @@ export function parseBrowserforceCommand(command) {
       code: 'EMPTY_COMMAND',
       suggestion: HELP_SUGGESTION,
     });
+  }
+
+  // `eval` carries raw JS: tokenizing it strips quotes and collapses
+  // whitespace, silently turning valid code into different code
+  // (getByRole('button') became getByRole(button) — ReferenceError). Take the
+  // remainder verbatim; only the legacy fully-quoted forms (what the CLI
+  // direct-verb builder emits) keep tokenized semantics.
+  const firstWord = text.match(/^(\S+)/)[1];
+  if (firstWord.toLowerCase() === 'eval') {
+    const remainder = text.slice(firstWord.length).trim();
+    const { args, flags } = parseEvalRemainder(remainder);
+    return { verb: 'eval', args, flags, command: text };
   }
 
   const tokens = tokenize(text);
@@ -591,7 +651,10 @@ export const COMMAND_HELP_TEXT = `BrowserForce commands:
                                        (flag form also works: wait --text <s>)
   get <url|title> [--tab name]         Read page url/title
   get <text|html> <ref> [--tab name]   Read element text/innerHTML
-  eval <js> [--tab name]               Run raw Playwright JS in the session
+  eval [--tab name] <js>               Run raw Playwright JS in the session.
+                                       Code is taken VERBATIM to the end of the
+                                       command (quotes/newlines preserved) —
+                                       put --tab BEFORE the code
   rename <old> <new> [--replace]       Rename a tab name
   forget <name>                        Remove a tab name
   help                                 Show this help

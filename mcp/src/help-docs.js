@@ -143,6 +143,7 @@ browserforce "click @e2 --tab app"
 - Session commands — \`open\` / \`tabs\` / \`use\` / \`snapshot\` / \`click\` / \`hover\` / \`fill\` / \`type\` / \`press\` / \`wait\` / \`get\` / \`eval\` / \`rename\` / \`forget\` — share one browser session and the snapshot refs across separate CLI invocations. \`browserforce run "<command>"\` runs any command string verbatim (same language as the MCP browserforce tool).
 - Refs (\`@e1\`, \`e1\`, \`ref=e1\` all normalize to \`e1\`) come from the latest \`snapshot\`; they go stale on any page change — re-snapshot before the next ref interaction.
 - Every command routes through the same guarded runCode() boundary as MCP exec. \`eval --stdin\` runs piped Playwright JS in the session with persistent \`state\` (and \`page\`, \`context\`, \`snapshot()\`, \`locatorForRef()\`).
+- In a command STRING (\`run "eval ..."\`, MCP browserforce tool), eval code is taken VERBATIM after the verb — quotes and newlines survive. Put \`--tab\` BEFORE the code: \`eval --tab app return page.url()\`.
 - One-shot \`-e\` stays independent — no persisted state — for self-contained scripts.
 - Add \`--json\` for a { success, data, error, warning } envelope; commands exit non-zero on failure (\`tabs --json\` prints the rows array directly).
 - Lifecycle: \`browserforce session start | status | stop\`. The daemon auto-starts on the first command and idles out after 5 minutes.`,
