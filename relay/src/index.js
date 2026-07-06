@@ -145,7 +145,7 @@ const INIT_ONLY_METHODS = new Set([
   'Page.setBypassCSP',
   'Page.addScriptToEvaluateOnNewDocument',     // needs shaped response — returns { identifier }
   'Page.removeScriptToEvaluateOnNewDocument',
-  'Page.createIsolatedWorld',                  // Playwright uses _sendMayFail — response ignored
+  'Page.createIsolatedWorld',                  // synthetic ONLY while unattached; forwarded when attached so Playwright's utility world (locator actions) exists — see docs/knowledge/knowledge1.md 2026-07-06
   'Page.setFontFamilies',
   // Network / Fetch
   'Fetch.enable', 'Fetch.disable',
@@ -176,10 +176,6 @@ const INIT_ONLY_METHODS = new Set([
   'Emulation.setScriptExecutionDisabled',
   'Emulation.setLocaleOverride', 'Emulation.setTimezoneOverride',
   'Emulation.setUserAgentOverride', 'Emulation.setGeolocationOverride',
-]);
-
-const ALWAYS_SYNTHETIC_INIT_METHODS = new Set([
-  'Page.createIsolatedWorld',
 ]);
 
 // Return a well-shaped synthetic response for init commands that need more than {}.
@@ -1677,9 +1673,6 @@ class RelayServer {
     // Main session
     const target = this.targets.get(sessionId);
     if (target) {
-      if (ALWAYS_SYNTHETIC_INIT_METHODS.has(method)) {
-        return syntheticInitResponse(method, target);
-      }
       if (!target.debuggerAttached) {
         // Playwright sends init-only commands to every page it learns about.
         // Return synthetic {} so we never attach the debugger until the AI
@@ -1727,9 +1720,6 @@ class RelayServer {
       if (!primaryTarget) {
         this.aliasSessions.delete(sessionId);
         throw new Error(`Session '${sessionId}' not found`);
-      }
-      if (ALWAYS_SYNTHETIC_INIT_METHODS.has(method)) {
-        return syntheticInitResponse(method, primaryTarget);
       }
       if (!primaryTarget.debuggerAttached) {
         if (INIT_ONLY_METHODS.has(method)) {

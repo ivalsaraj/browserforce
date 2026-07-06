@@ -2631,17 +2631,24 @@ describe('manualTabAttached handler', () => {
     await sleep(100);
   });
 
-  it('answers Page.createIsolatedWorld synthetically for already-attached manual tabs', async () => {
+  it('forwards Page.createIsolatedWorld to already-attached manual tabs (utility world must exist)', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },
     });
     const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
     try {
-      const extensionCommands = [];
+      const isolatedWorldCommands = [];
       ext.on('message', (data) => {
         const msg = JSON.parse(data.toString());
         if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
-        extensionCommands.push(msg);
+        if (msg.id && msg.method === 'cdpCommand') {
+          if (msg.params.method === 'Page.createIsolatedWorld') {
+            isolatedWorldCommands.push(msg.params);
+            ext.send(JSON.stringify({ id: msg.id, result: { executionContextId: 7 } }));
+            return;
+          }
+          ext.send(JSON.stringify({ id: msg.id, result: {} }));
+        }
       });
 
       const events = [];
@@ -2679,12 +2686,65 @@ describe('manualTabAttached handler', () => {
       await sleep(100);
 
       const response = events.find((m) => m.id === 20);
-      assert.deepEqual(response?.result, {});
       assert.equal(
-        extensionCommands.filter((msg) => msg.method === 'cdpCommand').length,
-        0,
-        'Page.createIsolatedWorld must not be forwarded to the extension',
+        response?.result?.executionContextId,
+        7,
+        'forwarded response must round-trip from the extension',
       );
+      assert.equal(
+        isolatedWorldCommands.length,
+        1,
+        'Page.createIsolatedWorld must be forwarded to the extension exactly once',
+      );
+      assert.equal(isolatedWorldCommands[0].tabId, 777);
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('keeps Page.createIsolatedWorld synthetic on unattached tabs (no eager attach)', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    try {
+      const extCommands = [];
+      ext.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+        if (msg.id && msg.method === 'listTabs') {
+          ext.send(JSON.stringify({
+            id: msg.id,
+            result: { tabs: [{ tabId: 901, windowId: 11, url: 'https://idle.example', title: 'Idle', active: false }] },
+          }));
+          return;
+        }
+        if (msg.id) extCommands.push(msg.method);
+      });
+
+      const events = [];
+      cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+      await sleep(300);
+
+      const attached = events.find((m) => m.method === 'Target.attachedToTarget');
+      assert.ok(attached, 'discovered tab should be exposed');
+
+      cdp.send(JSON.stringify({
+        id: 2,
+        method: 'Page.createIsolatedWorld',
+        params: { frameId: 'bf-target-901', worldName: '__pw_utility', grantUniveralAccess: true },
+        sessionId: attached.params.sessionId,
+      }));
+      await sleep(150);
+
+      const response = events.find((m) => m.id === 2);
+      assert.deepEqual(response?.result, {}, 'unattached tab still gets a synthetic response');
+      assert.ok(!extCommands.includes('attachTab'), 'must not trigger eager debugger attach');
+      assert.ok(!extCommands.includes('cdpCommand'), 'must not forward to the extension');
     } finally {
       cdp.close();
       ext.close();
