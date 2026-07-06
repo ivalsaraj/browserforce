@@ -17,6 +17,7 @@ import { createBrowserSessionRuntime } from './browser-session-runtime.js';
 import {
   parseBrowserforceCommand,
   executeBrowserforceCommand,
+  fireAndForgetIifeHint,
   BrowserforceCommandError,
 } from './browserforce-command-registry.js';
 import {
@@ -30,6 +31,7 @@ import {
   listHelpSections,
   HELP_SECTION_NAMES,
 } from './help-docs.js';
+import { installProcessCrashGuard } from './process-crash-guard.js';
 
 // ─── Browser Session Runtime ─────────────────────────────────────────────────
 // Browser connection, persistent userState, idle-disconnect lifecycle, console
@@ -232,6 +234,8 @@ function registerExecTool(skillAppendix = '') {
           const result = await runCode(code, execCtx, timeout);
           const formatted = formatResult(result);
           const content = Array.isArray(formatted) ? [...formatted] : [formatted];
+          const iifeHint = fireAndForgetIifeHint(code, result);
+          if (iifeHint) content.push({ type: 'text', text: `[HINT: ${iifeHint}]` });
           if (pendingUpdate && !updateNoticeSent && content[0]?.type === 'text') {
             updateNoticeSent = true;
             content.push({ type: 'text', text: `[BrowserForce update available: ${pendingUpdate.current} → ${pendingUpdate.latest}]\n[Run: browserforce update   or: npm install -g browserforce]` });
@@ -394,6 +398,12 @@ async function main() {
   await server.connect(transport);
   process.stderr.write('[bf-mcp] MCP server running\n');
 }
+
+// User exec/eval snippets can leave detached promises behind; their later
+// rejections must never kill the server (Node 22 default is a fatal crash —
+// every window's MCP connection dies and reset cannot recover). Logs to
+// stderr only: stdout is the MCP stdio transport.
+installProcessCrashGuard({ logPrefix: '[bf-mcp]' });
 
 main().catch((err) => {
   process.stderr.write(`[bf-mcp] Fatal: ${err.message}\n`);

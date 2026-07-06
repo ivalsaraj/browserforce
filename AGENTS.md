@@ -247,6 +247,26 @@ command strings), **`exec`** (raw JS escape hatch — the tool formerly named
   the relay-reported tab count (`/extension/status`) or a stable-count settle,
   bounded by a 5s timeout.
 
+### Process Crash Guard (MCP server + sessiond)
+
+Both long-lived servers that run user snippet code install
+`installProcessCrashGuard()` (`mcp/src/process-crash-guard.js`): a detached
+promise rejection or a stray sync throw from user exec/eval code must log and
+survive, never kill the process (Node 22 default kills it — the a0eab22b
+outage: every MCP client got "Not connected" and `reset` could not recover
+because reset runs inside the dead process).
+
+- **Rule**: The guard writes to **stderr only** — stdout is the MCP stdio
+  transport. Never remove the guard "for cleanliness", never add a
+  swallow-everything variant to short-lived CLIs.
+- **Rule**: sessiond installs it in the **direct-run block only** so
+  programmatic `startSessiond()` in tests keeps Node's default crash
+  semantics (test processes must still fail loudly).
+- **Testing gotcha**: `node:test` intercepts `unhandledRejection`/
+  `uncaughtException` and fails the running test even when listeners exist —
+  guard behavior must be tested in spawned subprocesses with REAL events,
+  never via `process.emit()`.
+
 ### Execute Timeout Cancellation
 
 `runCode()` is the single execution boundary for the MCP `exec` tool (formerly `execute`), the `browserforce` command tool's canned snippets, and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.
@@ -299,6 +319,25 @@ Backend policy (`mcp/src/backend-selection.js`, negotiated in
   can filter hidden installed skills out entirely, which would hide the
   `skills get core` redirect from the model. Runtime skill content lives in
   `skill-data/` and is served by `browserforce skills get|list|path`.
+
+### Eval Command-String Parsing (raw remainder)
+
+In a command STRING (MCP `browserforce` tool, `run "eval ..."`), the `eval`
+verb's code is the RAW remainder after the verb — never tokenized. The
+shell-style tokenizer strips quotes and collapses whitespace, which silently
+rewrites JS (`getByRole('button')` became `getByRole(button)` →
+`ReferenceError` → the a0eab22b server crash).
+
+- **Rule**: `parseEvalRemainder()` (`mcp/src/browserforce-command-registry.js`)
+  takes the remainder verbatim (quotes/newlines preserved). `--tab` is
+  recognized at the START of the remainder only — trailing extraction on raw
+  code is unsupported by design (code may legitimately contain `--tab`).
+- **Rule**: Legacy fully-quoted forms keep tokenized semantics ONLY when the
+  remainder is one quoted group + optional trailing `--tab` — exactly what the
+  CLI direct-verb builder (`bin.js` `quoteCommandToken()`) emits. A closing
+  quote followed by anything else (`'text'.length`) means raw code.
+- **Rule**: Never re-tokenize an argument that is source code — carry it
+  verbatim from the surface that received it.
 
 ## Security Rules
 

@@ -10,6 +10,7 @@ import {
   executeBrowserforceCommand,
   executeBrowserforceVerb,
   normalizeRef,
+  fireAndForgetIifeHint,
   BrowserforceCommandError,
 } from '../src/browserforce-command-registry.js';
 import { createBrowserSessionRuntime } from '../src/browser-session-runtime.js';
@@ -631,6 +632,78 @@ describe('parseBrowserforceCommand', () => {
     assert.deepEqual(parseBrowserforceCommand('get url').args, ['url']);
   });
 
+  describe('eval raw-remainder parsing', () => {
+    it('preserves quotes in raw JS code verbatim (the a0eab22b crash shape)', () => {
+      const code = "(async () => { const b = await page.getByRole('button', { name: /%$/ }).all(); return b.length; })()";
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code]);
+      assert.deepEqual(parsed.flags, {});
+    });
+
+    it('preserves newlines and inner double quotes in raw code', () => {
+      const code = 'const t = await page.locator(\'button[title="Show absolute change"]\').count();\nreturn t;';
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code]);
+    });
+
+    it('raw code containing an apostrophe does not throw BAD_QUOTING', () => {
+      const code = "return document.title + ' — it\\'s fine';";
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.equal(parsed.verb, 'eval');
+      assert.ok(parsed.args[0].includes("it\\'s"));
+    });
+
+    it('quote-leading JS that continues past the closing quote stays raw', () => {
+      const code = "'text'.length";
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code], 'closing quote followed by .length means raw code, not a legacy quoted group');
+    });
+
+    it('extracts a LEADING --tab flag before raw code', () => {
+      const parsed = parseBrowserforceCommand('eval --tab app return 1 + 1');
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+      assert.deepEqual(parsed.args, ['return 1 + 1']);
+    });
+
+    it('extracts a LEADING --tab=name form before raw code', () => {
+      const parsed = parseBrowserforceCommand('eval --tab=app return page.url()');
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+      assert.deepEqual(parsed.args, ['return page.url()']);
+    });
+
+    it('legacy fully-quoted form with a trailing --tab keeps tokenized semantics', () => {
+      const parsed = parseBrowserforceCommand('eval "return page.url()" --tab app');
+      assert.deepEqual(parsed.args, ['return page.url()']);
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+    });
+
+    it('quoted code with a --tab=name trailing flag keeps tokenized semantics', () => {
+      const parsed = parseBrowserforceCommand('eval "return 1" --tab=app');
+      assert.deepEqual(parsed.args, ['return 1']);
+      assert.deepEqual(parsed.flags, { tab: 'app' });
+    });
+
+    it('legacy double-quoted group unescapes backslash escapes like the CLI builder emits', () => {
+      // bin.js quoteCommandToken emits: eval "say \"hi\""
+      const parsed = parseBrowserforceCommand('eval "say \\"hi\\""');
+      assert.deepEqual(parsed.args, ['say "hi"']);
+    });
+
+    it('quoted-looking code that is NOT a single quoted group falls back to raw', () => {
+      const code = '"a" + "b"';
+      const parsed = parseBrowserforceCommand(`eval ${code}`);
+      assert.deepEqual(parsed.args, [code]);
+    });
+
+    it('bare eval still fails with the usage error', async () => {
+      const runtime = { async runCommand() { throw new Error('must not run'); } };
+      await assert.rejects(
+        () => executeBrowserforceCommand({ command: 'eval', runtime }),
+        (err) => err instanceof BrowserforceCommandError,
+      );
+    });
+  });
+
   it('parses open with --as and --replace', () => {
     assert.deepEqual(parseBrowserforceCommand('open https://example.com --as docs'), {
       verb: 'open',
@@ -915,6 +988,39 @@ describe('executeBrowserforceCommand → runtime.runCommand snippets', () => {
     assert.match(data, /snapshot/);
     assert.match(data, /click <ref>/);
     assert.equal(runtime.calls.length, 0);
+  });
+
+  describe('fireAndForgetIifeHint', () => {
+    it('hints when a top-level async IIFE returned undefined', () => {
+      const code = '(async () => { await page.click("x"); })()';
+      assert.ok(fireAndForgetIifeHint(code, undefined));
+    });
+
+    it('stays silent when the result is defined', () => {
+      assert.equal(fireAndForgetIifeHint('(async () => 1)()', 42), null);
+    });
+
+    it('stays silent for non-IIFE code that returns undefined', () => {
+      assert.equal(fireAndForgetIifeHint('await page.click("x");', undefined), null);
+    });
+
+    it('executeBrowserforceCommand surfaces the hint as the eval warning', async () => {
+      const runtime = { async runCommand() { return undefined; } };
+      const { warning } = await executeBrowserforceCommand({
+        command: 'eval (async () => { await page.reload(); })()',
+        runtime,
+      });
+      assert.ok(warning && warning.includes('return'));
+    });
+
+    it('eval with a defined result has no warning', async () => {
+      const runtime = { async runCommand() { return 'ok'; } };
+      const { warning } = await executeBrowserforceCommand({
+        command: 'eval return "ok"',
+        runtime,
+      });
+      assert.equal(warning, null);
+    });
   });
 
   it('validation failures throw structured errors without reset hints', async () => {

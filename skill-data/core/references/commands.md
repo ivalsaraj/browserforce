@@ -77,7 +77,7 @@ command language of the MCP `browserforce` tool.
 | `browserforce get title` | Page title. |
 | `browserforce get text <@ref>` | Text content of a ref. |
 | `browserforce get html <@ref>` | innerHTML of a ref. |
-| `browserforce eval --stdin` | Run piped Playwright JS in the session (or `eval "<code>"`). |
+| `browserforce eval --stdin` | Run piped Playwright JS in the session (or `eval "<code>"`). In a command string (`run "eval ..."`, MCP browserforce tool) the code is taken VERBATIM after the verb — quotes/newlines survive; put `--tab` BEFORE the code. |
 | `browserforce rename <old> <new> [--replace]` | Rename a tab name. |
 | `browserforce forget <name>` | Remove a tab name. |
 | `browserforce run "<command>"` | Run any command string verbatim (MCP-doc compatible). |
