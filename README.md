@@ -1021,7 +1021,7 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 | `GET /`                  | Health check (extension status, target count) |
 | `GET /client-slot`       | Client-slot state: `{ mode, busy, activeClientId, connectedAt }` |
 | `GET /extension/status`  | Attached-tab introspection: `{ connected, activeTargets, activeManualTargets, attachedTabs, manualAttachedTabs, clients, startedAt }` (no wildcard CORS) |
-| `GET /attached-tabs`     | Attached-tab list: `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin }] }` (no wildcard CORS) |
+| `GET /attached-tabs`     | Attached-tab list: `{ tabs: [{ tabId, sessionId, targetId, title, url, debuggerAttached, origin, windowId?, lastCommandAt?, idleMs? }] }` — `lastCommandAt`/`idleMs` track real (non-init) CDP activity for auto-close observability (no wildcard CORS) |
 | `GET /json/version`      | CDP discovery                                 |
 | `GET /json/list`         | List attached targets                         |
 | `GET /logs/status` | Logs viewer status (extension-only origin) |

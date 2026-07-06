@@ -128,9 +128,13 @@ When the agent sends `Target.setAutoAttach`, the relay responds with `{}` immedi
 
 ### INIT_ONLY_METHODS Interception
 
-Playwright eagerly sends ~40 init-only CDP commands to every page it learns about via `Target.attachedToTarget`. Without interception, this would trigger eager debugger attachment on all tabs. The relay intercepts these commands (in `INIT_ONLY_METHODS` set) and returns synthetic responses without calling `chrome.debugger.attach()`.
+Playwright eagerly sends ~40 init-only CDP commands to every page it learns about via `Target.attachedToTarget`. Without interception, this would trigger eager debugger attachment on all tabs. The relay intercepts these commands (in `INIT_ONLY_METHODS` set) and returns synthetic responses without calling `chrome.debugger.attach()` — but **only while the tab is unattached**. Once the debugger is attached, every init-only command is forwarded for real.
 
-Key methods: `Runtime.enable/disable`, `Page.enable/disable`, `Page.getFrameTree`, `Page.createIsolatedWorld` (critical — this was the actual trigger), `Page.addScriptToEvaluateOnNewDocument`, plus ~35 more Network/Fetch/Emulation/Security commands.
+Key methods: `Runtime.enable/disable`, `Page.enable/disable`, `Page.getFrameTree`, `Page.createIsolatedWorld` (the eager-attach trigger while unattached), `Page.addScriptToEvaluateOnNewDocument`, plus ~35 more Network/Fetch/Emulation/Security commands.
+
+**`Page.createIsolatedWorld` must be forwarded on attached tabs.** Playwright fires it via `_sendMayFail` and discards the response; the utility world (which every locator action — `fill`/`click`/`waitFor` — runs in) is registered only via the resulting `Runtime.executionContextCreated` event. Synthesizing the response on an attached tab silently starves the page of its utility world and every locator action hangs until a navigation. Never re-add an "always synthetic" set for it.
+
+Forwarded init-only commands are tagged `passive: true` in the `cdpCommand` payload so the extension does not count them as tab activity (see Durable Auto-Close below).
 
 **Location**: `relay/src/index.js`, `INIT_ONLY_METHODS`, `syntheticInitResponse()`, `_forwardToTab()`.
 
@@ -150,11 +154,23 @@ When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the 
 
 ### Agent Window Affinity
 
-Agent-created tabs are pinned to the Chrome **window** the agent first worked in, not the user's current focus. The relay seeds `agentWindowByClientId` (keyed by CDP client id) from the `windowId` of the first real (non-init) command in `_forwardToTab()`, then passes that `windowId` to `createTab`. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the current focused window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowPlan()`, which returns a `{ action }` plan (`use-window` / `new-window` / `current-window`) that `createTab` executes.
+Agent-created tabs are pinned to the Chrome **window** the agent first worked in, not the user's current focus. The relay seeds `agentWindowByAffinityKey` from the `windowId` of the first real (non-init) command in `_forwardToTab()`, then passes that `windowId` to `createTab`. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the current focused window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowPlan()`, which returns a `{ action }` plan (`use-window` / `new-window` / `current-window`) that `createTab` executes.
+
+**Affinity keying (label-durable):** the map key is `label:<explicit label>` when the client connected with an explicit `?label=` query param (MCP sends `label=browserforce-mcp`), else the ephemeral connection id. Label-keyed pins **survive disconnects** — this is what stops MCP's 15s idle-disconnect/reset cycle from spawning a new dedicated window per reconnect. Connection-keyed pins are deleted on client close. Only *explicit* labels are durable: `_deriveClientLabel()` always returns a display label (UA fallbacks like `cdp-client`), which must never key durable affinity — durability is decided by `meta.affinityLabel` from `_explicitClientLabel(req)`. Consequence (deliberate): two clients sharing a label share an agent window. Leak guard: `MAX_AFFINITY_ENTRIES = 50`, FIFO eviction via `_pinAgentWindow()`.
 
 **Do not** treat the current Chrome focus as stable agent ownership — use the stored `windowId`. Residual limitation: with truly concurrent first creates (the user changing focus between two extension-handled creates) tabs can land in different windows; affinity still resolves deterministically to the first established window. Playwright awaits `newPage()` sequentially, so no per-client serialization queue is added.
 
 **Dedicated window (opt-in):** When the `dedicatedWindow` setting (popup toggle) is on and a create has no valid pinned window, `resolveCreateWindowPlan()` returns `{ action: 'new-window' }` and the extension opens a fresh **background** (`focused: false`) Chrome window for the agent's created tabs, instead of a tab in the user's current window. Affinity then pins to that window so later created tabs join it. If the dedicated window is closed mid-session, the next create spawns a **new** dedicated window rather than falling back to the user's window. Scope is agent-**created** tabs only — manually attached tabs are never moved. Default is OFF.
+
+### Durable Auto-Close (agent tab bookkeeping)
+
+Auto-close/auto-detach state must survive MV3 service worker restarts and Playwright's reconnect init storm:
+
+- **Persistence**: `agentCreatedTabs` + `tabLastActivity` are checkpointed to `chrome.storage.session` under `AUTO_MANAGE_STATE_KEY` (`persistAutoManageState()` / `hydrateAutoManageState()` in `extension/background.js`). Session storage survives SW restarts and dies with the browser — the correct lifetime. Membership changes persist immediately; the activity clock checkpoints once per `checkInactiveTabs()` sweep, never per CDP command.
+- **Passive flag contract**: the relay tags forwarded `INIT_ONLY_METHODS` `cdpCommand` payloads with `passive: true`; the extension skips the `tabLastActivity` bump for them. Only real commands count as activity. The flag is optional — old relay/extension pairings degrade to the previous behavior.
+- **Provenance no-demote**: `agent-created` origin must never be demoted to `relay-attached` (that would exempt the tab from auto-close). The extension surfaces `origin: 'agent-created'` in `listTabs` for hydrated agent tabs; the relay accepts it in `_autoAttachAllTabs()` discovery (never `manual` from discovery) and `_ensureDebuggerAttached()` preserves `manual`/`agent-created` on lazy attach. `attachTab` re-registers agent-created tabs into `agentCreatedTabs`.
+- **Alarm-driven sweep**: the `bf-reconnect` alarm also runs `checkInactiveTabs()` — `setInterval` dies with the SW; alarms don't.
+- **Observability**: `GET /attached-tabs` exposes `lastCommandAt`/`idleMs` per tab (real, non-init activity as seen by the relay).
 
 ### Test Isolation: writeCdpUrl Flag
 
