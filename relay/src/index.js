@@ -1485,6 +1485,13 @@ class RelayServer {
         browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
       };
 
+      // The extension persists agentCreatedTabs across SW restarts and
+      // surfaces them here; relay memory of origins is wiped on extension
+      // disconnect, so discovery is the only way to re-learn agent tabs.
+      // Only 'agent-created' is accepted — 'manual' must come from a real
+      // manualTabAttached notification, never from discovery.
+      const discoveredOrigin = tab.origin === 'agent-created' ? 'agent-created' : undefined;
+
       this.targets.set(sessionId, {
         tabId,
         targetId: existing?.targetId || targetId,
@@ -1492,7 +1499,7 @@ class RelayServer {
         windowId: integerWindowId(tab.windowId) ?? existing?.windowId,
         debuggerAttached: !!existing?.debuggerAttached,
         attachPromise: existing?.attachPromise || null,
-        origin: existing?.origin || 'relay-discovered',
+        origin: existing?.origin || discoveredOrigin || 'relay-discovered',
       });
       this.tabToSession.set(tabId, sessionId);
       if (isNewTarget) {
@@ -1517,11 +1524,16 @@ class RelayServer {
 
     target.attachPromise = (async () => {
       log(`[relay] Lazy-attaching debugger to tab ${target.tabId} (triggered by: ${target._triggerMethod || '?'}) ${target.targetInfo?.url}`);
+      // Preserve manual/agent-created provenance; only anonymous discoveries
+      // become relay-attached. Demoting agent-created would exempt the tab
+      // from auto-close after any SW-restart re-adoption.
+      const preservedOrigin = (target.origin === 'manual' || target.origin === 'agent-created')
+        ? target.origin
+        : 'relay-attached';
       const result = await this._sendToExt('attachTab', {
         tabId: target.tabId,
         sessionId,
-        // Preserve manual provenance; any other origin is a relay-driven lazy attach.
-        origin: target.origin === 'manual' ? 'manual' : 'relay-attached',
+        origin: preservedOrigin,
       });
       if (result.targetId) target.chromeTargetId = result.targetId;
       if (result.targetInfo) {
@@ -1532,7 +1544,7 @@ class RelayServer {
         };
       }
       target.debuggerAttached = true;
-      if (target.origin !== 'manual') target.origin = 'relay-attached';
+      target.origin = preservedOrigin;
       target.attachPromise = null;
     })();
 

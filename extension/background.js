@@ -48,12 +48,50 @@ const agentCreatedTabs = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
 
+/** storage.session key for auto-manage state (survives SW restarts, dies with the browser) */
+const AUTO_MANAGE_STATE_KEY = 'bfAutoManageState';
+
+async function persistAutoManageState() {
+  try {
+    await chrome.storage.session.set({
+      [AUTO_MANAGE_STATE_KEY]: {
+        agentCreatedTabs: [...agentCreatedTabs],
+        tabLastActivity: [...tabLastActivity],
+      },
+    });
+  } catch (e) {
+    console.warn('[bf] Failed to persist auto-manage state:', e?.message || e);
+  }
+}
+
+async function hydrateAutoManageState() {
+  try {
+    const stored = await chrome.storage.session.get(AUTO_MANAGE_STATE_KEY);
+    const saved = stored?.[AUTO_MANAGE_STATE_KEY];
+    if (!saved) return;
+    // Prune tabs that closed while the service worker was dead.
+    const openTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
+    for (const tabId of saved.agentCreatedTabs || []) {
+      if (openTabIds.has(tabId)) agentCreatedTabs.add(tabId);
+    }
+    for (const [tabId, lastActivity] of saved.tabLastActivity || []) {
+      if (openTabIds.has(tabId)) tabLastActivity.set(tabId, lastActivity);
+    }
+  } catch (e) {
+    console.warn('[bf] Failed to hydrate auto-manage state:', e?.message || e);
+  }
+}
+
 /** Whether restrictions have been explained to the agent (reset per CDP client session) */
 let restrictionExplained = false;
 
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 (async function init() {
+  // Restore auto-close bookkeeping lost with the previous SW lifetime BEFORE
+  // anything can attach tabs or serve listTabs.
+  await hydrateAutoManageState();
+
   const stored = await chrome.storage.local.get(['relayUrl']);
   currentRelayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
 
@@ -70,8 +108,10 @@ let restrictionExplained = false;
   // Alarm-based fallback: wakes the service worker if it was killed
   chrome.alarms.create('bf-reconnect', { periodInMinutes: 0.5 });
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'bf-reconnect' && !ws) {
-      startMaintainLoop();
+    if (alarm.name === 'bf-reconnect') {
+      if (!ws) startMaintainLoop();
+      // Alarm-driven idle sweep: setInterval dies with the SW; alarms don't.
+      checkInactiveTabs();
     }
   });
 
@@ -347,18 +387,30 @@ async function listTabs() {
         url: t.url,
         title: t.title,
         active: t.active,
+        // Surface provenance so the relay re-learns agent tabs after its
+        // extension-disconnect cleanup wiped its own origin memory.
+        // JSON.stringify drops undefined, so non-agent tabs keep the old shape.
+        origin: agentCreatedTabs.has(t.id) ? 'agent-created' : undefined,
       })),
   };
 }
 
 async function attachTab(tabId, sessionId, options = {}) {
   const origin = ALLOWED_TAB_ORIGINS.has(options.origin) ? options.origin : 'unknown';
+  // Re-register agent tabs for auto-close (e.g. re-adoption after SW restart).
+  if (origin === 'agent-created') {
+    agentCreatedTabs.add(tabId);
+    persistAutoManageState();
+  }
   // If already attached, update sessionId and return existing info
   if (attachedTabs.has(tabId)) {
     const existing = attachedTabs.get(tabId);
     existing.sessionId = sessionId;
-    // Preserve provenance: only overwrite origin when the incoming value is allowlisted.
-    if (ALLOWED_TAB_ORIGINS.has(options.origin)) existing.origin = origin;
+    // Preserve provenance: only overwrite origin when the incoming value is
+    // allowlisted, and never demote agent-created to relay-attached (a lazy
+    // re-attach must not exempt an agent tab from auto-close).
+    const isDemotion = existing.origin === 'agent-created' && origin === 'relay-attached';
+    if (ALLOWED_TAB_ORIGINS.has(options.origin) && !isDemotion) existing.origin = origin;
     // Ensure attached tabs are always reconciled into the browserforce group.
     setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
     return existing;
@@ -491,6 +543,7 @@ async function createTab(params) {
 
   const result = await attachTab(tab.id, params.sessionId, { origin: 'agent-created' });
   agentCreatedTabs.add(tab.id);
+  persistAutoManageState();
   return result;
 }
 
@@ -649,6 +702,7 @@ function onDebuggerDetach(source, reason) {
     }
     attachedTabs.clear();
     childSessions.clear();
+    persistAutoManageState();
     queueSyncTabGroup();
   } else {
     if (attachedTabs.has(source.tabId)) {
@@ -722,6 +776,7 @@ function cleanupTab(tabId) {
   }
   tabLastActivity.delete(tabId);
   agentCreatedTabs.delete(tabId);
+  persistAutoManageState();
 }
 
 // ─── Auto-Detach / Auto-Close ─────────────────────────────────────────────
@@ -764,6 +819,9 @@ async function checkInactiveTabs() {
       await detachTab(tabId);
     }
   }
+
+  // Cheap activity-clock checkpoint: one write per sweep, not per CDP command.
+  persistAutoManageState();
 }
 
 chrome.storage.onChanged.addListener(async (changes) => {
