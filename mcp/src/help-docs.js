@@ -76,7 +76,8 @@ browserforce "click @e2 --tab app"
 - Use snapshot({ showDiffSinceLastCall: true }) for repeated observations of the same page, and false when full output is needed.
 - Use cleanHTML(selector?, opts?) for structured DOM extraction.
 - Use pageMarkdown() for article-like content.
-- Use screenshots only when the user requested visuals or layout evidence.`,
+- Use screenshots only when the user requested visuals or layout evidence.
+- Before screenshots of SPAs, wait for load plus a short visual settle or a page-specific ready signal so captures are high signal and low noise.`,
   },
   logs: {
     title: 'Logs And Debugging',

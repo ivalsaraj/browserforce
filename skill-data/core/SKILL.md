@@ -125,6 +125,9 @@ browserforce open https://gmail.com    # open a URL in a new session tab
 Prefer `snapshot` (text, fast, cheap) over `screenshot`; reach for a screenshot
 only when you need visual layout verification.
 
+Before screenshots of SPAs, wait for load plus a short visual settle or a
+page-specific ready signal so captures are high signal and low noise.
+
 ## Common workflow: log in
 
 ```bash
