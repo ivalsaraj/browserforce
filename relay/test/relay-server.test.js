@@ -1675,6 +1675,127 @@ describe('Auto-attach Flow', () => {
     ext.close();
     await sleep(100);
   });
+
+  // Fake extension shared by the affinity-across-reconnects tests: echoes the
+  // requested windowId (falling back to 500 for unpinned creates).
+  function affinityFakeExtension(ext, createCommands) {
+    let nextTabId = 420;
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({ id: msg.id, result: { tabs: [] } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        const tabId = nextTabId++;
+        const windowId = Number.isInteger(msg.params.windowId) ? msg.params.windowId : 500;
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId,
+            windowId,
+            targetId: `real-target-${tabId}`,
+            targetInfo: { targetId: `real-target-${tabId}`, type: 'page', title: '', url: msg.params.url || 'about:blank', windowId },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+  }
+
+  it('window affinity survives reconnect for labeled clients', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    affinityFakeExtension(ext, createCommands);
+    let cdpB;
+    try {
+      // Session A: labeled client creates a tab -> establishes window 500
+      const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=mcp-live`);
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await sleep(200);
+      cdpA.close();
+      await sleep(100);
+
+      // Session B: NEW connection, same label -> must reuse window 500
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=mcp-live`);
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://b.example' } }));
+      await sleep(200);
+
+      assert.equal(createCommands.length, 2);
+      assert.equal(createCommands[0].windowId, undefined, 'first create has no pin yet');
+      assert.equal(createCommands[1].windowId, 500, 'reconnected labeled client reuses the pinned window');
+    } finally {
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('two different labels keep independent window affinity', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    affinityFakeExtension(ext, createCommands);
+    let cdpB;
+    try {
+      const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=agent-one`);
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await sleep(200);
+      cdpA.close();
+      await sleep(100);
+
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=agent-two`);
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://b.example' } }));
+      await sleep(200);
+
+      assert.equal(createCommands.length, 2);
+      assert.equal(createCommands[0].windowId, undefined);
+      assert.equal(createCommands[1].windowId, undefined, 'a different label must not inherit the first label\'s window');
+    } finally {
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('unlabeled clients keep per-connection affinity (cleared on disconnect)', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    affinityFakeExtension(ext, createCommands);
+    let cdpB;
+    try {
+      // Session A: unlabeled client (still gets a DERIVED display label like
+      // 'cdp-client' — derived labels must NOT create durable affinity).
+      const cdpA = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdpA.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await sleep(200);
+      cdpA.close();
+      await sleep(100);
+
+      cdpB = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdpB.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://b.example' } }));
+      await sleep(200);
+
+      assert.equal(createCommands.length, 2);
+      assert.equal(createCommands[0].windowId, undefined);
+      assert.equal(createCommands[1].windowId, undefined, 'unlabeled reconnect starts with fresh affinity');
+    } finally {
+      if (cdpB) cdpB.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
 });
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────

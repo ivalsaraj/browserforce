@@ -14,6 +14,9 @@ const PING_INTERVAL_MS = 5000;
 const DEFAULT_CDP_LOG_BUFFER_LIMIT = 10000;
 const RESTRICTIONS_FETCH_TIMEOUT_MS = 2000;
 const RESTRICTIONS_FAIL_CLOSED = Object.freeze({ mode: 'manual', noNewTabs: true });
+// Leak guard for label-keyed window affinity entries (which outlive their
+// connection by design). FIFO-evict the oldest pin beyond this size.
+const MAX_AFFINITY_ENTRIES = 50;
 
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
@@ -274,7 +277,12 @@ class RelayServer {
     this.childSessions = new Map(); // childSessionId -> { tabId, parentSessionId }
     this.oopifTargets = new Map();  // iframe targetId -> { childSessionId, tabId, targetInfo }
     this.aliasSessions = new Map(); // aliasSessionId -> { primarySessionId, clientId } (explicit newCDPSession re-attach to an already-attached page)
-    this.agentWindowByClientId = new Map(); // clientId -> windowId (agent window affinity)
+    // Agent window affinity: affinityKey -> windowId. Key is 'label:<explicit
+    // label>' when the client passed ?label= (e.g. MCP's browserforce-mcp),
+    // else the connection id. Explicit-label entries survive disconnects so
+    // the 15s MCP idle-disconnect/reset cycle reuses the same agent window
+    // instead of spawning a new dedicated window per reconnect.
+    this.agentWindowByAffinityKey = new Map();
     this.sessionCounter = 0;
 
     // State
@@ -659,19 +667,29 @@ class RelayServer {
     return parseExtensionOrigin(referer);
   }
 
-  _deriveClientLabel(req) {
+  // Explicit label from the connect URL's query params (null when absent).
+  // Only these create durable window affinity — _deriveClientLabel() below
+  // ALWAYS returns some display label (UA-derived fallbacks like
+  // 'playwright-client'/'cdp-client'), which must never be shared across
+  // unrelated clients as an affinity key.
+  _explicitClientLabel(req) {
     try {
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
-      const fromQuery = sanitizeClientLabel(
+      return sanitizeClientLabel(
         url.searchParams.get('label')
           || url.searchParams.get('clientLabel')
           || url.searchParams.get('client')
           || '',
       );
-      if (fromQuery) return fromQuery;
     } catch {
-      // Ignore malformed request URL; fall back to header-based label.
+      // Malformed request URL — treat as unlabeled.
+      return null;
     }
+  }
+
+  _deriveClientLabel(req) {
+    const fromQuery = this._explicitClientLabel(req);
+    if (fromQuery) return fromQuery;
 
     const origin = req?.headers?.origin || '';
     if (origin.startsWith('chrome-extension://')) {
@@ -1188,6 +1206,7 @@ class RelayServer {
     const clientMeta = {
       id: clientId,
       label: this._deriveClientLabel(req),
+      affinityLabel: this._explicitClientLabel(req),
       connectedAt: new Date().toISOString(),
       origin: req?.headers?.origin || null,
       userAgent: req?.headers?.['user-agent'] || null,
@@ -1215,7 +1234,10 @@ class RelayServer {
       log(`[relay] CDP client disconnected (${meta?.id || 'unknown'})`);
       if (meta?.id) {
         this.clientById.delete(meta.id);
-        this.agentWindowByClientId.delete(meta.id);
+        // Connection-keyed affinity dies with the connection; explicit-label
+        // affinity (key 'label:...') survives so the next same-label client
+        // reuses the agent window.
+        if (!meta.affinityLabel) this.agentWindowByAffinityKey.delete(meta.id);
         // Drop any explicit-attach aliases this client never detached.
         this._dropAliasSessions((_id, entry) => entry.clientId === meta.id);
       }
@@ -1548,14 +1570,33 @@ class RelayServer {
     ws.send(JSON.stringify(event));
   }
 
+  // Affinity key for a CDP client: explicit labels are durable across
+  // reconnects ('label:<label>'); unlabeled clients fall back to their
+  // connection id (cleared on disconnect).
+  _affinityKey(clientId) {
+    if (!clientId) return null;
+    const affinityLabel = this.clientById.get(clientId)?.affinityLabel;
+    return affinityLabel ? `label:${affinityLabel}` : clientId;
+  }
+
+  _pinAgentWindow(affinityKey, windowId) {
+    if (!affinityKey || !Number.isInteger(windowId)) return;
+    this.agentWindowByAffinityKey.set(affinityKey, windowId);
+    if (this.agentWindowByAffinityKey.size > MAX_AFFINITY_ENTRIES) {
+      const oldest = this.agentWindowByAffinityKey.keys().next().value;
+      this.agentWindowByAffinityKey.delete(oldest);
+    }
+  }
+
   // Pin the agent to a window on its first real tab use so later created tabs
   // stay in that window. Uses one predicate (Number.isInteger) and only the
-  // first suitable window wins per CDP client.
+  // first suitable window wins per affinity key.
   _seedAgentWindowAffinity(clientId, target) {
-    if (!clientId || this.agentWindowByClientId.has(clientId)) return;
+    const key = this._affinityKey(clientId);
+    if (!key || this.agentWindowByAffinityKey.has(key)) return;
     const windowId = target?.windowId ?? target?.targetInfo?.windowId;
     if (Number.isInteger(windowId)) {
-      this.agentWindowByClientId.set(clientId, windowId);
+      this._pinAgentWindow(key, windowId);
     }
   }
 
@@ -1573,7 +1614,10 @@ class RelayServer {
       sessionId,
     };
     // Pin the new tab to the agent's established window when we have one.
-    const pinnedWindowId = this.agentWindowByClientId.get(clientId);
+    const affinityKey = this._affinityKey(clientId);
+    const pinnedWindowId = affinityKey
+      ? this.agentWindowByAffinityKey.get(affinityKey)
+      : undefined;
     const sentPinned = Number.isInteger(pinnedWindowId);
     if (sentPinned) createParams.windowId = pinnedWindowId;
 
@@ -1592,9 +1636,9 @@ class RelayServer {
     const resultWindowId = integerWindowId(
       result.windowId ?? result.targetInfo?.windowId
     );
-    if (clientId && resultWindowId !== undefined) {
-      if (sentPinned || !this.agentWindowByClientId.has(clientId)) {
-        this.agentWindowByClientId.set(clientId, resultWindowId);
+    if (affinityKey && resultWindowId !== undefined) {
+      if (sentPinned || !this.agentWindowByAffinityKey.has(affinityKey)) {
+        this._pinAgentWindow(affinityKey, resultWindowId);
       }
     }
 
