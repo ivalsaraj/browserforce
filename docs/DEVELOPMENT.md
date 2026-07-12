@@ -92,6 +92,23 @@ next create spawns a **new** dedicated window rather than falling back to the us
 window. Scope is agent-**created** tabs only; manually attached tabs are never moved.
 Default is OFF.
 
+## Ghost Cursor
+
+The extension Settings tab includes **Show ghost cursor for agent actions**, which
+is OFF by default. When enabled, each currently controlled tab gets a cosmetic
+pointer overlay that follows successful top-level mouse CDP commands with eased,
+distance-based movement, press feedback, and idle fading. The overlay is
+pointer-events-free and never changes page input behavior.
+
+The service worker owns one serialized cursor queue per tab. It injects the renderer
+for the current document and registers it for future navigations, coalesces pending
+movement updates, and awaits disable cleanup before detaching a debugger. Child-frame
+mouse sessions and failed input commands are ignored. The implementation lives in
+`extension/ghost-cursor.js` and is wired from `extension/background.js`.
+
+After changing extension code, reload the unpacked extension from
+`chrome://extensions` to restart the service worker and apply the change.
+
 ## Relay Status & Introspection Endpoints
 
 The relay exposes localhost-only status endpoints that read existing relay state

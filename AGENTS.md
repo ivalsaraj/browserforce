@@ -173,6 +173,18 @@ Auto-close/auto-detach state must survive MV3 service worker restarts and Playwr
 - **Alarm-driven sweep**: the `bf-reconnect` alarm also runs `checkInactiveTabs()` — `setInterval` dies with the SW; alarms don't.
 - **Observability**: `GET /attached-tabs` exposes `lastCommandAt`/`idleMs` per tab (real, non-init activity as seen by the relay).
 
+### Ghost Cursor
+
+The optional ghost cursor is controlled by the local-storage key
+`ghostCursorEnabled` and defaults to disabled. `extension/ghost-cursor.js` owns the
+renderer, action mapping, and per-tab serialized queue; `extension/background.js`
+owns live setting state and debugger lifecycle. Only successful top-level
+`Input.dispatchMouseEvent` commands enqueue cosmetic updates, so child sessions,
+unsupported input, and failed browser commands cannot affect the cursor. Disable
+must complete the renderer teardown and registered-script removal before normal
+debugger detach; post-detach cleanup only invalidates queued work and must not send
+new debugger commands.
+
 ### Test Isolation: writeCdpUrl Flag
 
 `RelayServer.start()` accepts `{ writeCdpUrl: false }` to prevent test instances from clobbering `~/.browserforce/cdp-url`. **All test `relay.start()` calls must pass `{ writeCdpUrl: false }`** or the production cdp-url file gets overwritten with random test ports.
