@@ -13,9 +13,9 @@
 ### Task 1: Add failing cursor mapping and contract tests
 
 **Files:**
-- Create: `/Users/valsaraj/Documents/projects/chrome-connect-relay/test/agent/ghost-cursor.test.js`
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/test/agent/popup-contract.test.js`
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/package.json:59-63`
+- Create: `test/agent/ghost-cursor.test.js`
+- Modify: `test/agent/popup-contract.test.js`
+- Modify: `package.json:59-63`
 
 **Step 1: Write the failing tests**
 
@@ -91,8 +91,8 @@ settings/injection contracts are not present yet.
 ### Task 2: Implement the page-side cursor renderer
 
 **Files:**
-- Create: `/Users/valsaraj/Documents/projects/chrome-connect-relay/extension/ghost-cursor.js`
-- Test: `/Users/valsaraj/Documents/projects/chrome-connect-relay/test/agent/ghost-cursor.test.js`
+- Create: `extension/ghost-cursor.js`
+- Test: `test/agent/ghost-cursor.test.js`
 
 **Step 1: Implement pure event mapping**
 
@@ -143,7 +143,8 @@ Renderer requirements:
 **Step 3: Implement the shared per-tab operation controller**
 
 Export `createGhostCursorController({ isEnabled, isTabAttached, sendCommand,
-log })`. The service worker must use this controller rather than maintaining a
+log })`, where `isEnabled` and `isTabAttached` are functions evaluated both
+when an operation is enqueued and when it executes. The service worker must use this controller rather than maintaining a
 second queue implementation. The controller owns one operation queue per tab
 and exposes `enable(tabId)`, `queueAction(tabId, action)`, `disable(tabId)`,
 and `cleanup(tabId)`.
@@ -157,16 +158,40 @@ The queue must:
 - capture a generation number for queued actions and invalidate it immediately
   when disabling or cleaning up, so stale actions cannot re-enable or update a
   tab;
+- re-read `isEnabled()` and `isTabAttached(tabId)` at execution time, so a
+  storage change or detach that occurs while work is queued takes effect;
 - settle all rejected cosmetic operations through `log` without rejecting
   callers or affecting real CDP input results;
 - remove per-tab state only after invalidated operations settle.
+
+Export `handleGhostCursorInput({ method, childSessionId, tabId, params,
+controller })` as the single input-path adapter. It must ignore child sessions,
+non-`Input.dispatchMouseEvent` methods, and malformed events; otherwise it must
+map the event and call the supplied controller. `background.js#cdpCommand()`
+must call this adapter after the real debugger command resolves, so tests can
+exercise the same method predicate and queue entry used in production.
 
 The registered page source must call `enable()` at document start so a
 new-document execution both installs and mounts the visible cursor. The
 current-document evaluation uses the same source and therefore has identical
 mount behavior.
 
-**Step 4: Run the focused tests**
+**Step 4: Add the same-source renderer harness**
+
+Use Node’s built-in `node:vm` with a small fake DOM and deterministic timer
+queue to execute the exported page source itself. Do not duplicate renderer
+logic in the test. Assert that the real source:
+
+- installs and enables the API at document start;
+- places the first action without a move transition;
+- uses the declared ease-in-out curve and distance-derived duration on later
+  movement;
+- applies press/release scale and opacity transitions;
+- schedules idle fade, wakes on the next action, and preserves the new target;
+- can execute again against a fresh document to model navigation; and
+- removes the DOM node and clears the API state on disable.
+
+**Step 5: Run the focused tests**
 
 Run:
 
@@ -174,25 +199,27 @@ Run:
 node --test test/agent/ghost-cursor.test.js
 ```
 
-Expected: mapping and controller tests pass; extension contract tests remain
+Expected: mapping, controller, and renderer-source tests pass; extension contracts remain
 red until the service-worker and popup integration tasks are complete.
 
 ### Task 3: Integrate renderer lifecycle into the service worker
 
 **Files:**
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/extension/background.js:1-115,285-320,642-805,828-845`
-- Test: `/Users/valsaraj/Documents/projects/chrome-connect-relay/test/agent/ghost-cursor.test.js`
+- Modify: `extension/background.js:1-115,285-320,642-805,828-845`
+- Test: `test/agent/ghost-cursor.test.js`
 
 **Step 1: Add setting and per-tab state**
 
-Import the renderer source, mapping helper, and expression helper. Add:
+Import the renderer source, shared controller, and input-path adapter. Add:
 
 - `isGhostCursorEnabled`, initialized to `false` and hydrated from the
   `ghostCursorEnabled` storage key with the initial `chrome.storage.local.get`
   call before starting the maintain loop.
 - One `ghostCursorController` created from the shared controller in
   `extension/ghost-cursor.js`, configured with the service worker’s attached-tab
-  predicate, debugger command function, and debug logger.
+  predicate `isTabAttached: (tabId) => attachedTabs.has(tabId)`, live setting
+  predicate `isEnabled: () => isGhostCursorEnabled`, debugger command function,
+  and debug logger.
 - A single disable expression that calls the injected API when present.
 
 **Step 2: Add enable/disable helpers**
@@ -223,13 +250,12 @@ commands. Every controller entry point must remain best-effort and attach a
 In `cdpCommand`, after the real `chrome.debugger.sendCommand` resolves:
 
 - Only handle top-level `Input.dispatchMouseEvent` calls (no child session).
-- Build an action with `buildGhostCursorAction`.
-- If an action exists and the setting is enabled, call
-  `ghostCursorController.queueAction(tabId, action)`.
+- Call `handleGhostCursorInput({ method, childSessionId, tabId, params,
+  controller: ghostCursorController })`.
 - Start the controller operation with `void` and catch/log failures at debug
   level. Never await it and never replace the real command result or error.
-- Check the setting again inside the queued continuation so a quick disable
-  prevents stale updates.
+- The controller re-checks its live predicates and generation inside the
+  queued continuation so a quick disable prevents stale updates.
 
 **Step 5: Apply setting changes live**
 
@@ -255,9 +281,9 @@ Expected: all cursor mapping and extension contract tests pass.
 ### Task 4: Add the extension Settings toggle
 
 **Files:**
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/extension/popup.html:95-112`
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/extension/popup.js:20-150`
-- Test: `/Users/valsaraj/Documents/projects/chrome-connect-relay/test/agent/ghost-cursor.test.js`
+- Modify: `extension/popup.html:95-112`
+- Modify: `extension/popup.js:20-150`
+- Test: `test/agent/ghost-cursor.test.js`
 
 **Step 1: Add the checkbox markup**
 
@@ -304,11 +330,12 @@ Expected: both suites pass.
 ### Task 5: Update project documentation and run propagation checks
 
 **Files:**
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/docs/DEVELOPMENT.md`
-- Create: `/Users/valsaraj/Documents/projects/chrome-connect-relay/docs/knowledge/timeline2.md`
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/docs/knowledge/INDEX.md`
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/docs/knowledge/critical-patterns.md`
-- Modify: `/Users/valsaraj/Documents/projects/chrome-connect-relay/AGENTS.md`
+- Modify: `docs/DEVELOPMENT.md`
+- Create: `docs/knowledge/timeline2.md`
+- Modify: `docs/knowledge/INDEX.md`
+- Modify: `docs/knowledge/knowledge1.md`
+- Modify: `docs/knowledge/critical-patterns.md`
+- Modify: `AGENTS.md`
 
 **Step 1: Document user-facing behavior**
 
@@ -320,10 +347,15 @@ the fact that cursor errors are cosmetic.
 
 Because the active `timeline1.md` is already over 500 lines, create
 `docs/knowledge/timeline2.md`, add it to `docs/knowledge/INDEX.md` as the only
-active timeline, and start it with a short bullet summary. Append a dated
+active timeline, mark `timeline1.md` `ARCHIVED` in the index, and start the new
+file with a short bullet summary. Append a dated
 2026-07-12 entry describing the renderer, setting, CDP input mapping, lifecycle
 cleanup, tests, and the no-relay-change decision. Do not edit existing entries
 in `timeline1.md`.
+
+Append a structured decision entry to the active `docs/knowledge/knowledge1.md`
+covering the live-setting predicate, generation invalidation, and the rule that
+cosmetic cursor failures cannot alter real CDP input behavior.
 
 **Step 3: Record the critical implementation contracts**
 
@@ -389,7 +421,7 @@ Stage only the implementation files, tests, package metadata, and updated
 documentation:
 
 ```bash
-git add extension/ghost-cursor.js extension/background.js extension/popup.html extension/popup.js test/agent/ghost-cursor.test.js test/agent/popup-contract.test.js package.json docs/DEVELOPMENT.md docs/knowledge/INDEX.md docs/knowledge/timeline2.md docs/knowledge/critical-patterns.md AGENTS.md
+git add extension/ghost-cursor.js extension/background.js extension/popup.html extension/popup.js test/agent/ghost-cursor.test.js test/agent/popup-contract.test.js package.json docs/DEVELOPMENT.md docs/knowledge/INDEX.md docs/knowledge/knowledge1.md docs/knowledge/timeline2.md docs/knowledge/critical-patterns.md AGENTS.md
 git commit -m "feat(extension): add optional animated ghost cursor" -m "- Render natural per-tab cursor movement for agent mouse events.\n- Add a default-off popup setting with live enable and disable behavior.\n- Keep cursor updates cosmetic and document the lifecycle contract."
 ```
 
