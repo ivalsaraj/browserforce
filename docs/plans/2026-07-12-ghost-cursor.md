@@ -78,7 +78,9 @@ invalidating pending actions, cleanup while a command rejects, and independent
 state for two attached tabs. Add adapter tests for child-session and malformed
 event rejection, a throwing controller/log path that must not throw, and an
 assertion that the real input result remains available to `cdpCommand` when the
-cosmetic adapter fails.
+cosmetic adapter fails. Add a disable test that flips `isEnabled()` to false
+before calling `disable(tabId)` and asserts both cleanup debugger commands
+still execute.
 
 **Step 2: Run the test to verify it fails**
 
@@ -163,6 +165,10 @@ The queue must:
   tab;
 - re-read `isEnabled()` and `isTabAttached(tabId)` at execution time, so a
   storage change or detach that occurs while work is queued takes effect;
+- require `isEnabled()` for `enable()` and `queueAction()`, but bypass that
+  predicate for `disable()` so turning the setting off still sends page-side
+  disable and script-removal commands; `disable()` only requires
+  `isTabAttached(tabId)` before issuing debugger commands;
 - settle all rejected cosmetic operations through `log` without rejecting
   callers or affecting real CDP input results;
 - remove per-tab state only after invalidated operations settle.
@@ -300,7 +306,7 @@ Expected: all cursor mapping and extension contract tests pass.
 ### Task 4: Add the extension Settings toggle
 
 **Files:**
-- Modify: `extension/popup.html:85-112`
+- Modify: `extension/popup.html:85`
 - Modify: `extension/popup.js:20-150`
 - Test: `test/agent/ghost-cursor.test.js`
 
