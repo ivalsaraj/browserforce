@@ -50,3 +50,11 @@ test('popup exposes a dedicated-window toggle wired to storage', () => {
   assert.match(popupJs, /dedicatedWindowCb/);
   assert.match(popupJs, /chrome\.storage\.local\.set\(\{\s*dedicatedWindow:/);
 });
+
+test('popup exposes a default-off ghost-cursor toggle wired to storage', () => {
+  assert.match(html, /id="bf-ghost-cursor"/);
+  assert.match(html, /Show ghost cursor for agent actions/);
+  assert.match(popupJs, /'ghostCursorEnabled'/);
+  assert.match(popupJs, /ghostCursorCb\.checked\s*=\s*!!s\.ghostCursorEnabled/);
+  assert.match(popupJs, /chrome\.storage\.local\.set\(\{\s*ghostCursorEnabled:/);
+});

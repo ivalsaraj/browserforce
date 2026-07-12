@@ -1,5 +1,6 @@
 import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
+import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
 
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
@@ -47,6 +48,14 @@ const tabLastActivity = new Map();
 const agentCreatedTabs = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
+let isGhostCursorEnabled = false;
+
+const ghostCursorController = createGhostCursorController({
+  isEnabled: () => isGhostCursorEnabled,
+  isTabAttached: (tabId) => attachedTabs.has(tabId),
+  sendCommand: (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
+  log: (error) => console.warn('[bf] Ghost cursor error:', error?.message || error),
+});
 
 /** storage.session key for auto-manage state (survives SW restarts, dies with the browser) */
 const AUTO_MANAGE_STATE_KEY = 'bfAutoManageState';
@@ -92,8 +101,9 @@ let restrictionExplained = false;
   // anything can attach tabs or serve listTabs.
   await hydrateAutoManageState();
 
-  const stored = await chrome.storage.local.get(['relayUrl']);
+  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled']);
   currentRelayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
+  isGhostCursorEnabled = !!stored.ghostCursorEnabled;
 
   // Register debugger listeners once (persists across reconnections)
   chrome.debugger.onEvent.addListener(onDebuggerEvent);
@@ -470,6 +480,7 @@ async function attachTab(tabId, sessionId, options = {}) {
   updateBadge();
   tabLastActivity.set(tabId, Date.now());
   setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
+  void ghostCursorController.enable(tabId);
 
   return entry;
 }
@@ -477,6 +488,7 @@ async function attachTab(tabId, sessionId, options = {}) {
 async function detachTab(tabId) {
   if (!attachedTabs.has(tabId)) return {};
 
+  await ghostCursorController.disable(tabId);
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -551,6 +563,7 @@ async function createTab(params) {
 async function closeTab(params) {
   const { tabId } = params;
 
+  if (attachedTabs.has(tabId)) await ghostCursorController.disable(tabId);
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -660,6 +673,18 @@ async function cdpCommand({ tabId, method, params, childSessionId }) {
     : { tabId };
 
   const result = await chrome.debugger.sendCommand(debuggee, method, params || {});
+  try {
+    handleGhostCursorInput({
+      method,
+      childSessionId,
+      tabId,
+      params,
+      controller: ghostCursorController,
+      log: (error) => console.warn('[bf] Ghost cursor input error:', error?.message || error),
+    });
+  } catch (error) {
+    console.warn('[bf] Ghost cursor input adapter error:', error?.message || error);
+  }
   return result || {};
 }
 
@@ -698,6 +723,7 @@ function onDebuggerDetach(source, reason) {
         method: 'tabDetached',
         params: { tabId, reason },
       });
+      void ghostCursorController.cleanup(tabId);
       tabLastActivity.delete(tabId);
       agentCreatedTabs.delete(tabId);
     }
@@ -771,6 +797,7 @@ function onTabDetachedFromWindow(tabId) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function cleanupTab(tabId) {
+  void ghostCursorController.cleanup(tabId);
   attachedTabs.delete(tabId);
   for (const [childId, parentTabId] of childSessions) {
     if (parentTabId === tabId) childSessions.delete(childId);
@@ -825,7 +852,9 @@ async function checkInactiveTabs() {
   persistAutoManageState();
 }
 
-chrome.storage.onChanged.addListener(async (changes) => {
+chrome.storage.onChanged.addListener(async (changes, areaName) => {
+  if (areaName !== 'local') return;
+
   if (changes.relayUrl) {
     const nextRelayUrl = changes.relayUrl.newValue || RELAY_URL_DEFAULT;
     if (nextRelayUrl !== currentRelayUrl) {
@@ -842,6 +871,16 @@ chrome.storage.onChanged.addListener(async (changes) => {
     } else {
       stopAutoManageTimer();
     }
+  }
+
+  if (changes.ghostCursorEnabled) {
+    isGhostCursorEnabled = !!changes.ghostCursorEnabled.newValue;
+    const operations = [...attachedTabs.keys()].map((tabId) => (
+      isGhostCursorEnabled
+        ? ghostCursorController.enable(tabId)
+        : ghostCursorController.disable(tabId)
+    ));
+    await Promise.allSettled(operations);
   }
 });
 

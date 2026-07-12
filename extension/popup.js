@@ -32,6 +32,7 @@ const lockUrlCb = document.getElementById('bf-lock-url');
 const noNewTabsCb = document.getElementById('bf-no-new-tabs');
 const readOnlyCb = document.getElementById('bf-read-only');
 const dedicatedWindowCb = document.getElementById('bf-dedicated-window');
+const ghostCursorCb = document.getElementById('bf-ghost-cursor');
 const autoDetachSelect = document.getElementById('bf-auto-detach');
 const autoCloseSelect = document.getElementById('bf-auto-close');
 const instructionsEl = document.getElementById('bf-instructions');
@@ -52,7 +53,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 const SETTINGS_KEYS = [
   'relayUrl', 'autoDetachMinutes', 'autoCloseMinutes',
   'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions',
-  'executionMode', 'parallelVisibilityMode', 'dedicatedWindow',
+  'executionMode', 'parallelVisibilityMode', 'dedicatedWindow', 'ghostCursorEnabled',
 ];
 
 chrome.storage.local.get(SETTINGS_KEYS, (s) => {
@@ -66,6 +67,7 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
   dedicatedWindowCb.checked = !!s.dedicatedWindow;
+  ghostCursorCb.checked = !!s.ghostCursorEnabled;
   instructionsEl.value = s.userInstructions || '';
   setAutoModeState(s.mode || 'auto');
 });
@@ -125,6 +127,10 @@ parallelVisibilitySelect.addEventListener('change', () => {
 
 dedicatedWindowCb.addEventListener('change', () => {
   chrome.storage.local.set({ dedicatedWindow: dedicatedWindowCb.checked });
+});
+
+ghostCursorCb.addEventListener('change', () => {
+  chrome.storage.local.set({ ghostCursorEnabled: ghostCursorCb.checked });
 });
 
 autoDetachSelect.addEventListener('change', () => {
