@@ -75,7 +75,10 @@ Add controller behavior tests against the same exported dependency-free
 controller that the service worker will use. Cover setup ordering, coalescing
 consecutive movement updates, preserving press/release order, quick disable
 invalidating pending actions, cleanup while a command rejects, and independent
-state for two attached tabs.
+state for two attached tabs. Add adapter tests for child-session and malformed
+event rejection, a throwing controller/log path that must not throw, and an
+assertion that the real input result remains available to `cdpCommand` when the
+cosmetic adapter fails.
 
 **Step 2: Run the test to verify it fails**
 
@@ -164,12 +167,22 @@ The queue must:
   callers or affecting real CDP input results;
 - remove per-tab state only after invalidated operations settle.
 
+`disable(tabId)` is the ordered barrier used while the debugger is still
+available: it invalidates stale actions, performs the page-side disable and
+script removal, and resolves after both settle. `cleanup(tabId)` is the
+post-detach invalidation path: it must not start new debugger commands, must not
+cancel an already-enqueued disable barrier, and removes state after the queue
+settles.
+
 Export `handleGhostCursorInput({ method, childSessionId, tabId, params,
-controller })` as the single input-path adapter. It must ignore child sessions,
-non-`Input.dispatchMouseEvent` methods, and malformed events; otherwise it must
-map the event and call the supplied controller. `background.js#cdpCommand()`
-must call this adapter after the real debugger command resolves, so tests can
-exercise the same method predicate and queue entry used in production.
+controller, log })` as the single input-path adapter. It must ignore child
+sessions, non-`Input.dispatchMouseEvent` methods, and malformed events;
+otherwise it must map the event and call the supplied controller inside a
+non-throwing boundary that reports synchronous mapping/controller failures to
+`log`. `background.js#cdpCommand()` must call this adapter after the real
+debugger command resolves inside an explicit detached `try/catch`, so tests can
+exercise the same method predicate and queue entry used in production without
+changing the original input result.
 
 The registered page source must call `enable()` at document start so a
 new-document execution both installs and mounts the visible cursor. The
@@ -237,13 +250,18 @@ commands. Every controller entry point must remain best-effort and attach a
 
 - Start `ghostCursorController.enable(tabId)` after `attachTab` registers the tab;
   do not make attach wait for cosmetic injection.
-- Call `ghostCursorController.disable(tabId)` before normal `detachTab` and
-  `closeTab` debugger detaches.
+- Define `ghostCursorController.disable(tabId)` as a settled, best-effort
+  barrier: it invalidates pending actions, queues page-side disable and
+  new-document script removal, and resolves only after those operations settle.
+- Await that disable barrier, with a catch/log boundary, before normal
+  `detachTab` and `closeTab` debugger detaches. Then call
+  `ghostCursorController.cleanup(tabId)` after the debugger detach.
 - Call `ghostCursorController.cleanup(tabId)` from `cleanupTab` and clear all
-  cursor state in the
-  `canceled_by_user` detach cascade.
-- Keep tab-removal and debugger-detach handlers safe when the debugger is
-  already unavailable.
+  cursor state in the `canceled_by_user` detach cascade.
+- Keep tab-removal and unexpected debugger-detach handlers safe when the
+  debugger is already unavailable: cleanup only invalidates state and never
+  attempts a new debugger command. Cleanup must not cancel an already-enqueued
+  disable barrier; it waits for that operation to settle before removing state.
 
 **Step 4: Wire input event updates without blocking CDP**
 
@@ -251,9 +269,10 @@ In `cdpCommand`, after the real `chrome.debugger.sendCommand` resolves:
 
 - Only handle top-level `Input.dispatchMouseEvent` calls (no child session).
 - Call `handleGhostCursorInput({ method, childSessionId, tabId, params,
-  controller: ghostCursorController })`.
-- Start the controller operation with `void` and catch/log failures at debug
-  level. Never await it and never replace the real command result or error.
+  controller: ghostCursorController, log })` inside a detached `try/catch`
+  after the real debugger command succeeds.
+- The adapter and controller catch/log all cosmetic failures. Never await them
+  and never replace the real command result or error.
 - The controller re-checks its live predicates and generation inside the
   queued continuation so a quick disable prevents stale updates.
 
@@ -281,7 +300,7 @@ Expected: all cursor mapping and extension contract tests pass.
 ### Task 4: Add the extension Settings toggle
 
 **Files:**
-- Modify: `extension/popup.html:95-112`
+- Modify: `extension/popup.html:85-112`
 - Modify: `extension/popup.js:20-150`
 - Test: `test/agent/ghost-cursor.test.js`
 
@@ -352,6 +371,9 @@ file with a short bullet summary. Append a dated
 2026-07-12 entry describing the renderer, setting, CDP input mapping, lifecycle
 cleanup, tests, and the no-relay-change decision. Do not edit existing entries
 in `timeline1.md`.
+
+Update the index prose so it names `timeline2.md` as the active changelog and
+describes `timeline1.md` as the archived historical changelog.
 
 Append a structured decision entry to the active `docs/knowledge/knowledge1.md`
 covering the live-setting predicate, generation invalidation, and the rule that
