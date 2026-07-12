@@ -77,6 +77,11 @@ commands. It forwards the real command normally, then asynchronously queues a
 corresponding cursor update for the same tab. Cursor updates use the injected
 page API and never delay or reject the actual input command.
 
+A dependency-free per-tab controller owns the cursor operation pipeline used by
+the service worker and its tests. It serializes injection, updates, disable,
+and cleanup; coalesces consecutive movement updates; and invalidates stale
+work with a generation token when settings change or a tab detaches.
+
 ## Reliability and security
 
 - No new extension permissions are required; the existing debugger permission
@@ -93,12 +98,15 @@ page API and never delay or reject the actual input command.
 ## Testing strategy
 
 - Add pure unit tests for mouse-event mapping, unsupported event handling, and
-  first-action behavior.
+  the shared controller’s queue, invalidation, coalescing, cleanup, and
+  failure-containment behavior.
 - Add extension contract tests for the settings markup, storage key, default,
   storage listener, renderer injection, and cleanup hooks.
 - Run focused agent tests, then the complete project test suite.
-- Manually verify enable, disable, navigation, click, drag, wheel, tab close,
-  and simultaneous controlled tabs in Chrome.
+- Execute the page source in a lightweight renderer harness for source-level
+  mount/enable/disable contracts, then manually verify enable, disable,
+  navigation, click, drag, wheel, tab close, and simultaneous controlled tabs
+  in Chrome.
 
 ## Acceptance criteria
 
