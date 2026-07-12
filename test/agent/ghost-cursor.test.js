@@ -191,6 +191,19 @@ test('controller serializes setup, coalesces movement, and preserves presses', a
   assert.deepEqual(logs, []);
 });
 
+test('enable does not inject when the live setting is disabled', async () => {
+  const commandRecorder = createCommandRecorder();
+  const controller = createGhostCursorController({
+    isEnabled: () => false,
+    isTabAttached: () => true,
+    sendCommand: commandRecorder.sendCommand,
+  });
+
+  await controller.enable(7);
+
+  assert.deepEqual(commandRecorder.calls, []);
+});
+
 test('disable bypasses the live enabled predicate and removes cursor registration', async () => {
   let isEnabled = true;
   const commandRecorder = createCommandRecorder();

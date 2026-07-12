@@ -1,15 +1,5 @@
 const CURSOR_ID = '__browserforce_ghost_cursor__';
 const CURSOR_API_KEY = '__browserforceGhostCursor';
-const MOVE_EASING = 'cubic-bezier(0.65, 0, 0.35, 1)';
-const PRESS_EASING = 'cubic-bezier(0.23, 1, 0.32, 1)';
-const PRESS_DURATION_MS = 140;
-const IDLE_HIDE_DELAY_MS = 5000;
-const IDLE_FADE_OUT_MS = 600;
-const MIN_MOVE_DURATION_MS = 220;
-const MAX_MOVE_DURATION_MS = 1500;
-const MOVE_SPEED_PX_PER_MS = 1.2;
-const CURSOR_SIZE_PX = 22;
-const CURSOR_Z_INDEX = 2147483647;
 const VALID_BUTTONS = new Set(['left', 'right', 'middle']);
 const ACTION_TYPES = new Map([
   ['mouseMoved', 'move'],

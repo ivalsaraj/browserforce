@@ -11,3 +11,7 @@ enabled predicate so a setting change can tear down an already-rendered cursor,
 while post-detach cleanup only clears state and never sends a new debugger
 command. Cursor failures are logged and contained after the real input command,
 so cosmetic feedback cannot alter CDP input behavior or its result.
+
+The service-worker module keeps only the identifiers and action-validation values
+it needs; renderer motion constants live in the injected source so there is one
+authoritative page-side definition rather than two unused copies that could drift.
