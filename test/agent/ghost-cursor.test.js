@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   GHOST_CURSOR_SOURCE,
+  buildGhostCursorSource,
   buildGhostCursorAction,
   buildGhostCursorActionExpression,
   createGhostCursorController,
@@ -16,6 +17,7 @@ const ghostCursorModule = fs.readFileSync(new URL('../../extension/ghost-cursor.
 const popupHtml = fs.readFileSync(new URL('../../extension/popup.html', import.meta.url), 'utf8');
 const popupJs = fs.readFileSync(new URL('../../extension/popup.js', import.meta.url), 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+const manifest = JSON.parse(fs.readFileSync(new URL('../../extension/manifest.json', import.meta.url), 'utf8'));
 
 function createCommandRecorder({ shouldReject = false, onCommand } = {}) {
   const calls = [];
@@ -31,7 +33,7 @@ function createCommandRecorder({ shouldReject = false, onCommand } = {}) {
   return { calls, sendCommand };
 }
 
-function createFakeRendererRuntime() {
+function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE) {
   class FakeElement {
     constructor(tagName) {
       this.tagName = tagName.toUpperCase();
@@ -109,7 +111,7 @@ function createFakeRendererRuntime() {
   };
   context.globalThis = context;
 
-  vm.runInNewContext(GHOST_CURSOR_SOURCE, context);
+  vm.runInNewContext(source, context);
 
   return {
     context,
@@ -122,6 +124,21 @@ function createFakeRendererRuntime() {
     },
   };
 }
+
+test('packages the PNG and resolves its extension URL in the injected renderer', () => {
+  const imageUrl = 'chrome-extension://test-extension/assets/ghost-cursor.png';
+  const source = buildGhostCursorSource(imageUrl);
+  const runtime = createFakeRendererRuntime(source);
+  const inner = runtime.document.getElementById('__browserforce_ghost_cursor__').firstElementChild;
+
+  assert.ok(source.includes(imageUrl));
+  assert.ok(!source.includes('__browserforce_ghost_cursor_image_url__'));
+  assert.equal(inner.style.backgroundImage, `url("${imageUrl}")`);
+  assert.deepEqual(manifest.web_accessible_resources, [{
+    resources: ['assets/ghost-cursor.png'],
+    matches: ['<all_urls>'],
+  }]);
+});
 
 test('maps supported CDP mouse events into cursor actions', () => {
   assert.deepEqual(
@@ -330,6 +347,7 @@ test('extension wiring keeps cursor updates cosmetic and settings default-off', 
   assert.match(popupJs, /ghostCursorEnabled/);
   assert.match(background, /handleGhostCursorInput/);
   assert.match(background, /ghostCursorController/);
+  assert.match(background, /chrome\.runtime\.getURL\(['"]assets\/ghost-cursor\.png['"]\)/);
   assert.match(ghostCursorModule, /Page\.addScriptToEvaluateOnNewDocument/);
   assert.match(ghostCursorModule, /Page\.removeScriptToEvaluateOnNewDocument/);
   assert.match(packageJson.scripts.test, /test\/agent\/ghost-cursor\.test\.js/);

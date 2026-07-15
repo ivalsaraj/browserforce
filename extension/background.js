@@ -16,6 +16,7 @@ const BADGE_COLORS = {
   connecting: '#B1ADA1',
   disconnected: '#B1ADA1',
 };
+const GHOST_CURSOR_IMAGE_URL = chrome.runtime.getURL('assets/ghost-cursor.png');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ const ghostCursorController = createGhostCursorController({
   isEnabled: () => isGhostCursorEnabled,
   isTabAttached: (tabId) => attachedTabs.has(tabId),
   sendCommand: (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
+  cursorImageUrl: GHOST_CURSOR_IMAGE_URL,
   log: (error) => console.warn('[bf] Ghost cursor error:', error?.message || error),
 });
 
