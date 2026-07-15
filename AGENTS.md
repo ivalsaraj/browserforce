@@ -326,11 +326,11 @@ Backend policy (`mcp/src/backend-selection.js`, negotiated in
 - **`--real` / `BF_BROWSER_BACKEND=real` never falls back.** It fails loud
   (non-zero exit, no lock written) when the bridge is unavailable. Negotiation
   runs BEFORE the lock is published so a failed `real` request leaves no daemon.
-- **The installed BrowserForce skill stub (`skills/browserforce/SKILL.md`) must
-  NOT use `hidden: true`.** Deliberate divergence from agent-browser: OpenCode
-  can filter hidden installed skills out entirely, which would hide the
-  `skills get core` redirect from the model. Runtime skill content lives in
-  `skill-data/` and is served by `browserforce skills get|list|path`.
+- **The installed BrowserForce guide (`skills/browserforce/SKILL.md`) is the
+  complete canonical guide.** Install it with
+  `npx -y skills add ivalsaraj/browserforce`; it must remain visible to
+  OpenCode and must not use `hidden: true`. There is no second documentation
+  command or runtime skill loader.
 
 ### Eval Command-String Parsing (raw remainder)
 

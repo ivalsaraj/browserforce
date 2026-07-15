@@ -30,9 +30,6 @@ const { values, positionals } = parseArgs({
     load: { type: 'string' },
     fn: { type: 'string' },
     stdin: { type: 'boolean', default: false },
-    // skills get flags.
-    full: { type: 'boolean', default: false },
-    all: { type: 'boolean', default: false },
     // doctor: remove stale sidecars (never secrets).
     fix: { type: 'boolean', default: false },
   },
@@ -1082,65 +1079,6 @@ function readStdin() {
   });
 }
 
-// Serve the BrowserForce skills bundled with the package (mirrors agent-browser
-// `skills list|get|path`). Pure discovery/parse logic lives in skills-cmd.js;
-// this function only resolves the search dirs and renders text/JSON output.
-async function cmdSkills() {
-  const { findSkillsDirs, skillsList, skillsGet, skillsPath, truncateDescription } =
-    await import('./mcp/src/skills-cmd.js');
-
-  const dirs = findSkillsDirs();
-  if (dirs.length === 0) {
-    const error = 'Skills directory not found. Reinstall via npm or set BF_SKILLS_DIR.';
-    if (values.json) output({ success: false, error }, true);
-    else console.error(`✗ ${error}`);
-    process.exit(1);
-  }
-
-  const sub = positionals[1] || 'list';
-
-  if (sub === 'list') {
-    const result = skillsList(dirs);
-    if (values.json) { output(result, true); return; }
-    if (result.data.length === 0) { console.log('No skills found'); return; }
-    const maxName = Math.max(...result.data.map((s) => s.name.length));
-    for (const s of result.data) {
-      console.log(`  ${s.name.padEnd(maxName)}  ${truncateDescription(s.description, 70)}`);
-    }
-    return;
-  }
-
-  if (sub === 'get') {
-    const names = positionals.slice(2);
-    const result = skillsGet(dirs, names, { all: values.all, full: values.full });
-    if (values.json) { output(result, true); if (!result.success) process.exit(1); return; }
-    if (!result.success) { console.error(`✗ ${result.error}`); process.exit(1); }
-    result.data.forEach((s, i) => {
-      if (i > 0) console.log('\n---\n');
-      process.stdout.write(s.content.endsWith('\n') ? s.content : `${s.content}\n`);
-      for (const f of s.files || []) {
-        console.log(`\n--- ${f.path} ---\n`);
-        process.stdout.write(f.content.endsWith('\n') ? f.content : `${f.content}\n`);
-      }
-    });
-    return;
-  }
-
-  if (sub === 'path') {
-    const result = skillsPath(dirs, positionals[2]);
-    if (values.json) { output(result, true); if (!result.success) process.exit(1); return; }
-    if (!result.success) { console.error(`✗ ${result.error}`); process.exit(1); }
-    if (result.data.paths) for (const p of result.data.paths) console.log(p);
-    else console.log(result.data.path);
-    return;
-  }
-
-  const error = `Unknown skills subcommand: ${sub}`;
-  if (values.json) output({ success: false, error }, true);
-  else console.error(`✗ ${error}`);
-  process.exit(1);
-}
-
 // Read-only diagnostics (relay, extension, stale cdp-url, secret perms, active
 // backend). `--fix` removes only stale sidecars — never secrets. Exits 1 when
 // any check fails (warnings are allowed).
@@ -1201,7 +1139,6 @@ function cmdHelp() {
     browserforce plugin remove <n>  Remove an installed plugin
     browserforce agent <subcmd>     Start/status/stop local BrowserForce Agent daemon
     browserforce session <subcmd>   Start/status/stop the CLI session daemon
-    browserforce skills <subcmd>    list / get <name> [--full] / path [name]
     browserforce doctor [--fix]     Diagnose relay/extension/sidecars/backend
     browserforce setup openclaw     Configure OpenClaw + optional autostart
     browserforce update             Update to the latest version
@@ -1240,7 +1177,7 @@ const commands = {
   screenshot: cmdScreenshot, navigate: cmdNavigate,
   execute: cmdExecute, plugin: cmdPlugin, update: cmdUpdate,
   'install-extension': cmdInstallExtension, setup: cmdSetup, agent: cmdAgent,
-  session: cmdSession, skills: cmdSkills, doctor: cmdDoctor,
+  session: cmdSession, doctor: cmdDoctor,
   help: cmdHelp,
 };
 // Session-backed command verbs all share the registry path (direct and `run`).
