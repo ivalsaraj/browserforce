@@ -1,6 +1,7 @@
 import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
+import { hydrateAgentTabs, hydrateActivity, canCloseTab } from './auto-manage-state.js';
 import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
 
 // BrowserForce — MV3 Service Worker
@@ -46,8 +47,8 @@ let isSyncingTabGroup = false;
 
 /** Tracks last CDP activity per attached tab (tabId → timestamp ms) */
 const tabLastActivity = new Map();
-/** Tracks tabs created by the agent via createTab() */
-const agentCreatedTabs = new Set();
+/** Tracks tabs created by the agent via createTab() (tabId → owning agent key) */
+const agentCreatedTabs = new Map();
 /** Windows this extension opened AS dedicated agent windows (windowId set) */
 const dedicatedWindowIds = new Set();
 /** Auto-detach check interval handle */
@@ -69,7 +70,10 @@ async function persistAutoManageState() {
   try {
     await chrome.storage.session.set({
       [AUTO_MANAGE_STATE_KEY]: {
-        agentCreatedTabs: [...agentCreatedTabs],
+        // Bare ids: an older extension build hydrates this key directly, so the
+        // shape must stay rollback-readable. Owners ride alongside it.
+        agentCreatedTabs: [...agentCreatedTabs.keys()],
+        agentTabOwners: [...agentCreatedTabs],
         tabLastActivity: [...tabLastActivity],
         dedicatedWindowIds: [...dedicatedWindowIds],
       },
@@ -86,11 +90,11 @@ async function hydrateAutoManageState() {
     if (!saved) return;
     // Prune tabs that closed while the service worker was dead.
     const openTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
-    for (const tabId of saved.agentCreatedTabs || []) {
-      if (openTabIds.has(tabId)) agentCreatedTabs.add(tabId);
+    for (const [tabId, ownerKey] of hydrateAgentTabs(saved, openTabIds)) {
+      agentCreatedTabs.set(tabId, ownerKey);
     }
-    for (const [tabId, lastActivity] of saved.tabLastActivity || []) {
-      if (openTabIds.has(tabId)) tabLastActivity.set(tabId, lastActivity);
+    for (const [tabId, lastActivity] of hydrateActivity(saved, openTabIds)) {
+      tabLastActivity.set(tabId, lastActivity);
     }
     // Without this, a service-worker restart forgets which windows are the
     // agent's, every valid pin stops looking dedicated, and each create opens
@@ -419,6 +423,7 @@ async function listTabs() {
         // extension-disconnect cleanup wiped its own origin memory.
         // JSON.stringify drops undefined, so non-agent tabs keep the old shape.
         origin: agentCreatedTabs.has(t.id) ? 'agent-created' : undefined,
+        ownerKey: agentCreatedTabs.get(t.id) || undefined,
       })),
   };
 }
@@ -427,8 +432,17 @@ async function attachTab(tabId, sessionId, options = {}) {
   const origin = ALLOWED_TAB_ORIGINS.has(options.origin) ? options.origin : 'unknown';
   // Re-register agent tabs for auto-close (e.g. re-adoption after SW restart).
   if (origin === 'agent-created') {
-    agentCreatedTabs.add(tabId);
-    persistAutoManageState();
+    const ownerKey = typeof options.ownerKey === 'string' ? options.ownerKey : null;
+    if (!agentCreatedTabs.has(tabId)) agentCreatedTabs.set(tabId, ownerKey);
+    else if (ownerKey && !agentCreatedTabs.get(tabId)) agentCreatedTabs.set(tabId, ownerKey);
+    // Seed the activity clock here too: this checkpoint is the only write before
+    // the debugger attach, and membership persisted without an activity entry
+    // means checkInactiveTabs() (which iterates tabLastActivity) never sees the
+    // tab, so auto-close would silently never fire.
+    if (!tabLastActivity.has(tabId)) tabLastActivity.set(tabId, Date.now());
+    // Checkpoint BEFORE chrome.debugger.attach, which can throw on a frozen or
+    // restricted tab. Awaited so an MV3 restart cannot race the write.
+    await persistAutoManageState();
   }
   // If already attached, update sessionId and return existing info
   if (attachedTabs.has(tabId)) {
@@ -575,14 +589,26 @@ async function createTab(params) {
   // Brief delay for Chrome to finalize tab creation
   await sleep(200);
 
-  const result = await attachTab(tab.id, params.sessionId, { origin: 'agent-created' });
-  agentCreatedTabs.add(tab.id);
-  persistAutoManageState();
-  return result;
+  const ownerKey = typeof params.ownerKey === 'string' ? params.ownerKey : null;
+  try {
+    // attachTab already registered membership with the owner and persisted it;
+    // re-setting here would resurrect a tab onTabRemoved cleared mid-await.
+    return await attachTab(tab.id, params.sessionId, { origin: 'agent-created', ownerKey });
+  } catch (e) {
+    agentCreatedTabs.delete(tab.id);
+    tabLastActivity.delete(tab.id);
+    await persistAutoManageState();
+    throw e;
+  }
 }
 
 async function closeTab(params) {
   const { tabId } = params;
+
+  const requester = typeof params.ownerKey === 'string' ? params.ownerKey : null;
+  if (!canCloseTab({ owner: agentCreatedTabs.get(tabId), requester })) {
+    throw new Error(`Tab ${tabId} is owned by another agent`);
+  }
 
   if (attachedTabs.has(tabId)) await ghostCursorController.disable(tabId);
   try {
@@ -769,6 +795,13 @@ function onDebuggerDetach(source, reason) {
 // ─── Tab Lifecycle Events ────────────────────────────────────────────────────
 
 function onTabRemoved(tabId) {
+  // Bookkeeping is cleared even for tabs we never attached: hydrated agent tabs
+  // can close while unattached, and Chrome reuses tab ids, so a stale entry
+  // would later misclassify or auto-close an unrelated tab.
+  const hadAgentEntry = agentCreatedTabs.delete(tabId);
+  const hadActivity = tabLastActivity.delete(tabId);
+  if (hadAgentEntry || hadActivity) persistAutoManageState();
+
   if (!attachedTabs.has(tabId)) return;
 
   send({

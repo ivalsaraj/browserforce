@@ -1737,6 +1737,98 @@ describe('Auto-attach Flow', () => {
     }
   });
 
+  it('Target.createTarget forwards the client ownerKey to the extension', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: 600, windowId: 900, targetId: 'real-target-600',
+            targetInfo: { targetId: 'real-target-600', type: 'page', title: '', url: 'about:blank', windowId: 900 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+
+    // Unique label: `agent-one` is already claimed by the 'two different labels'
+    // test and label pins are durable, so reusing it makes the suite order-dependent.
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=owner-create-test`);
+    try {
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await waitForCondition(() => createCommands.length === 1, { description: 'createTab reaching the extension' });
+      assert.equal(createCommands[0].ownerKey, 'label:owner-create-test');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('Target.closeTarget forwards the caller ownerKey and still cleans up', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const closeCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: 601, windowId: 901, targetId: 'real-target-601',
+            targetInfo: { targetId: 'real-target-601', type: 'page', title: '', url: 'about:blank', windowId: 901 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'closeTab') {
+        closeCommands.push(msg.params);
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=owner-close-test`);
+    const detached = [];
+    cdp.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'Target.detachedFromTarget') detached.push(msg.params);
+    });
+
+    try {
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await waitForCondition(() => relay.tabToSession.has(601), { description: 'created tab registered' });
+
+      cdp.send(JSON.stringify({ id: 2, method: 'Target.closeTarget', params: { targetId: 'real-target-601' } }));
+      await waitForCondition(() => closeCommands.length === 1, { description: 'closeTab reaching the extension' });
+
+      assert.equal(closeCommands[0].ownerKey, 'label:owner-close-test');
+      // Cleanup must still run — a `return` in place of `await` would skip it.
+      await waitForCondition(() => detached.length > 0, { description: 'detachedFromTarget broadcast' });
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
   it('Target.createTarget re-pins to the fallback window when the pinned window was closed', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },

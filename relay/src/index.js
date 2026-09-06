@@ -1428,7 +1428,7 @@ class RelayServer {
         return this._createTarget(ws, params, clientId);
 
       case 'Target.closeTarget':
-        return this._closeTarget(params);
+        return this._closeTarget(params, clientId);
 
       case 'Browser.setDownloadBehavior':
         return {};
@@ -1647,10 +1647,12 @@ class RelayServer {
     }
 
     const sessionId = `s${++this.sessionCounter}`;
+    const affinityKeyForOwner = this._affinityKey(clientId);
     const createParams = {
       url: params.url || 'about:blank',
       sessionId,
     };
+    if (affinityKeyForOwner) createParams.ownerKey = affinityKeyForOwner;
     // Only a 'created' pin may steer a new tab: a 'discovered' pin can point at
     // the USER's window, and sending it would drop agent tabs there.
     const affinityKey = this._affinityKey(clientId);
@@ -1708,7 +1710,7 @@ class RelayServer {
     return { targetId: result.targetId };
   }
 
-  async _closeTarget(params) {
+  async _closeTarget(params, clientId) {
     let tabId;
     let sessionId;
 
@@ -1722,7 +1724,10 @@ class RelayServer {
 
     if (!tabId) throw new Error('Target not found');
 
-    await this._sendToExt('closeTab', { tabId });
+    // Keep this awaited: the child-session cleanup and detachedFromTarget
+    // broadcast below must still run.
+    const ownerKey = this._affinityKey(clientId);
+    await this._sendToExt('closeTab', ownerKey ? { tabId, ownerKey } : { tabId });
 
     // Clean up child sessions
     for (const [childId, child] of this.childSessions) {
