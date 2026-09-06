@@ -75,22 +75,25 @@ relay instead of returning an "already attached" error.
 
 Agent-created tabs are pinned to the Chrome **window** where the agent first did
 real work, not the user's currently focused window. The relay remembers the
-first window per CDP client (seeded from the first non-init command), and sends
-that `windowId` to the extension's `createTab`. If the user switches to another
+first window per CDP client, but a pin merely seeded from a first non-init
+command is `discovered` and is never sent to `createTab`; only a pin a create
+actually established (`created`) steers a new tab. If the user switches to another
 Chrome window before the agent opens its next tab, the new tab still appears in
-the original window. BrowserForce only falls back to the current focused window
-when the pinned window has been closed, and then re-pins to that fallback window.
+the original window. With dedicated mode ON (the default), a closed or
+non-dedicated pinned window yields a NEW dedicated window rather than the
+current focused one; only with dedicated mode OFF does it fall back to the
+current window and re-pin there.
 
 Tab `windowId` is surfaced in `listTabs`, `/extension/status`, and
 `/attached-tabs` whenever it is known.
 
-**Dedicated window (opt-in):** With the **Open agent tabs in a dedicated window**
+**Dedicated window (default ON):** With the **Open agent tabs in a dedicated window**
 popup setting ON, a create with no valid pinned window opens a fresh **background**
 (`focused: false`) Chrome window for the agent's tabs instead of using the user's
 current window; affinity then pins to it. If that window is closed mid-session, the
 next create spawns a **new** dedicated window rather than falling back to the user's
 window. Scope is agent-**created** tabs only; manually attached tabs are never moved.
-Default is OFF.
+Default is **ON**; an unset setting reads as enabled.
 
 ## Ghost Cursor
 
@@ -105,6 +108,8 @@ for the current document and registers it for future navigations, coalesces pend
 movement updates, and awaits disable cleanup before detaching a debugger. Child-frame
 mouse sessions and failed input commands are ignored. The implementation lives in
 `extension/ghost-cursor.js` and is wired from `extension/background.js`.
+The cursor artwork is packaged at `extension/assets/ghost-cursor.png` and exposed
+to page renderers through the extension's web-accessible resources.
 
 After changing extension code, reload the unpacked extension from
 `chrome://extensions` to restart the service worker and apply the change.
@@ -193,6 +198,9 @@ Relay writes CDP traffic to:
 ```text
 ~/.browserforce/cdp.jsonl
 ```
+
+The file rolls over in place at 10 MiB and is recreated on relay startup. Set
+`BROWSERFORCE_CDP_LOG_MAX_BYTES` to override the byte cap.
 
 Tail live:
 

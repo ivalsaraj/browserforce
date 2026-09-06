@@ -16,3 +16,11 @@
 - No relay protocol, manifest permission, or dependency changes were needed.
 - Added focused renderer/controller/wiring coverage and registered it in the
   agent and full test scripts.
+
+## 2026-09-06 — Bounded CDP traffic log
+
+- Capped `~/.browserforce/cdp.jsonl` at 10 MiB by default, with an environment
+  override via `BROWSERFORCE_CDP_LOG_MAX_BYTES`.
+- Kept rollover in the existing serialized write queue and skipped individual
+  entries that cannot fit within the configured cap.
+- Added regression coverage for sustained writes and oversized entries.

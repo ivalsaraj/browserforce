@@ -1,5 +1,6 @@
 const CURSOR_ID = '__browserforce_ghost_cursor__';
 const CURSOR_API_KEY = '__browserforceGhostCursor';
+const CURSOR_IMAGE_URL_MARKER = '__browserforce_ghost_cursor_image_url__';
 const VALID_BUTTONS = new Set(['left', 'right', 'middle']);
 const ACTION_TYPES = new Map([
   ['mouseMoved', 'move'],
@@ -13,6 +14,7 @@ const DISABLE_EXPRESSION = `globalThis.${CURSOR_API_KEY}?.disable?.()`;
 export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   const CURSOR_ID = '__browserforce_ghost_cursor__';
   const CURSOR_API_KEY = '__browserforceGhostCursor';
+  const CURSOR_IMAGE_URL = ${JSON.stringify(CURSOR_IMAGE_URL_MARKER)};
   const MOVE_EASING = 'cubic-bezier(0.65, 0, 0.35, 1)';
   const PRESS_EASING = 'cubic-bezier(0.23, 1, 0.32, 1)';
   const PRESS_DURATION_MS = 140;
@@ -82,10 +84,7 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     inner.style.filter = 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4))';
     inner.style.opacity = '1';
 
-    const triangleSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="-1 -1 26 26">'
-      + '<path fill="white" stroke="#111827" stroke-width="1.5" stroke-linejoin="round" '
-      + 'd="m23.284 19.124l-6.866-6.895a.4.4 0 0 1-.118-.296a.43.43 0 0 1 .163-.282l4.439-3.077a1.48 1.48 0 0 0 .621-1.48a1.48 1.48 0 0 0-1.036-1.198L1.623.302a1.14 1.14 0 0 0-1.11.282A1.13 1.13 0 0 0 .29 1.649L5.928 20.44a1.48 1.48 0 0 0 1.183 1.035a1.48 1.48 0 0 0 1.48-.621l3.078-4.44a.37.37 0 0 1 .31-.118a.43.43 0 0 1 .296.104l6.91 6.91a1.48 1.48 0 0 0 2.087 0l2.086-2.086a1.48 1.48 0 0 0-.074-2.101"/></svg>';
-    inner.style.backgroundImage = 'url("data:image/svg+xml,' + encodeURIComponent(triangleSvg) + '")';
+    inner.style.backgroundImage = CURSOR_IMAGE_URL ? 'url("' + CURSOR_IMAGE_URL + '")' : '';
     outer.appendChild(inner);
 
     runtime.outerElement = outer;
@@ -217,6 +216,14 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   enable();
 })();`;
 
+export function buildGhostCursorSource(cursorImageUrl = '') {
+  const safeImageUrl = typeof cursorImageUrl === 'string' ? cursorImageUrl : '';
+  return GHOST_CURSOR_SOURCE.replace(
+    JSON.stringify(CURSOR_IMAGE_URL_MARKER),
+    JSON.stringify(safeImageUrl),
+  );
+}
+
 export function buildGhostCursorAction({ type, params } = {}) {
   const actionType = ACTION_TYPES.get(type);
   const x = params?.x;
@@ -243,9 +250,11 @@ export function createGhostCursorController({
   isEnabled,
   isTabAttached,
   sendCommand,
+  cursorImageUrl = '',
   log = () => {},
 }) {
   const stateByTab = new Map();
+  const cursorSource = buildGhostCursorSource(cursorImageUrl);
 
   function getState(tabId) {
     let state = stateByTab.get(tabId);
@@ -313,7 +322,7 @@ export function createGhostCursorController({
   async function ensureScript(tabId, state, generation) {
     if (state.scriptId) return true;
     const result = await sendCommand(tabId, 'Page.addScriptToEvaluateOnNewDocument', {
-      source: GHOST_CURSOR_SOURCE,
+      source: cursorSource,
     });
     const scriptId = result?.identifier;
     if (!scriptId) throw new Error('Ghost cursor injection did not return a script identifier');
@@ -333,7 +342,7 @@ export function createGhostCursorController({
       if (!isEnabled() || !isTabAttached(tabId) || generation !== state.generation) return false;
       if (!(await ensureScript(tabId, state, generation))) return false;
       if (!isEnabled() || !isTabAttached(tabId) || generation !== state.generation) return false;
-      await sendCommand(tabId, 'Runtime.evaluate', { expression: GHOST_CURSOR_SOURCE });
+      await sendCommand(tabId, 'Runtime.evaluate', { expression: cursorSource });
       return true;
     });
   }

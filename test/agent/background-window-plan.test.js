@@ -6,7 +6,7 @@ const bg = fs.readFileSync('extension/background.js', 'utf8');
 
 test('createTab imports and uses the plan resolver', () => {
   assert.match(bg, /import \{ resolveCreateWindowPlan \} from '\.\/window-affinity\.js'/);
-  assert.match(bg, /resolveCreateTabWindowPlan\(params, !!settings\.dedicatedWindow\)/);
+  assert.match(bg, /resolveCreateTabWindowPlan\(params, resolveDedicatedWindow\(settings\)\)/);
 });
 
 test('createTab reads the dedicatedWindow setting from storage', () => {
@@ -27,7 +27,7 @@ test('auto-manage state is persisted to chrome.storage.session and hydrated on s
 });
 
 test('attachTab re-registers agent-created tabs for auto-close', () => {
-  assert.match(bg, /origin === 'agent-created'\) \{\s*agentCreatedTabs\.add\(tabId\)/);
+  assert.match(bg, /origin === 'agent-created'\) \{[\s\S]{0,300}agentCreatedTabs\.set\(tabId, ownerKey\)/);
 });
 
 test('attachTab never demotes agent-created provenance to relay-attached', () => {
@@ -44,4 +44,59 @@ test('listTabs surfaces agent-created provenance for hydrated tabs', () => {
 
 test('passive cdpCommands do not bump tabLastActivity', () => {
   assert.match(bg, /if \(!msg\.params\.passive\) tabLastActivity\.set\(msg\.params\.tabId, Date\.now\(\)\)/);
+});
+
+test('dedicated windows are tracked and consulted by the resolver', () => {
+  assert.match(bg, /const dedicatedWindowIds = new Set\(\)/);
+  assert.match(bg, /dedicatedWindowIds\.add\(win\.id\)/);
+  assert.match(bg, /isRequestedWindowDedicated: dedicatedWindowIds\.has\(requestedWindowId\)/);
+});
+
+test('dedicated windows survive a service-worker restart and are pruned', () => {
+  assert.match(bg, /dedicatedWindowIds: \[\.\.\.dedicatedWindowIds\]/);
+  assert.match(bg, /saved\.dedicatedWindowIds/);
+  assert.match(bg, /chrome\.windows\.getAll\(\)/);
+  assert.match(bg, /openWindowIds\.has\(windowId\)/);
+  assert.match(bg, /chrome\.windows\.onRemoved\.addListener/);
+});
+
+test('agent setting defaults come from the shared resolvers, never `|| 0`', () => {
+  assert.match(bg, /import \{ resolveAutoCloseMinutes, resolveDedicatedWindow \} from '\.\/agent-defaults\.js'/);
+  // `|| 0` cannot tell "never chosen" from an explicit Off, so it must be gone.
+  assert.doesNotMatch(bg, /settings\.autoCloseMinutes \|\| 0/);
+  assert.doesNotMatch(bg, /!!settings\.dedicatedWindow/);
+});
+
+test('agent-created tabs are tracked with their owning agent', () => {
+  assert.match(bg, /const agentCreatedTabs = new Map\(\)/);
+  assert.match(bg, /attachTab\(tab\.id, params\.sessionId, \{ origin: 'agent-created', ownerKey \}\)/);
+  // No post-attach resurrection: onTabRemoved may have cleared it mid-await.
+  assert.doesNotMatch(bg, /agentCreatedTabs\.set\(tab\.id, ownerKey\)/);
+});
+
+test('agent membership and its activity clock are checkpointed before the attach can throw', () => {
+  const registration = bg.indexOf("origin === 'agent-created'");
+  const activity = bg.indexOf('tabLastActivity.set(tabId, Date.now())', registration);
+  const checkpoint = bg.indexOf('await persistAutoManageState()', registration);
+  const attach = bg.indexOf('chrome.debugger.attach(', registration);
+  assert.ok([registration, activity, checkpoint, attach].every((i) => i !== -1));
+  assert.ok(activity < checkpoint, 'activity clock must be seeded before the checkpoint');
+  assert.ok(checkpoint < attach, 'persist must happen before chrome.debugger.attach');
+});
+
+test('persisted auto-manage state stays rollback-readable', () => {
+  assert.match(bg, /agentCreatedTabs: \[\.\.\.agentCreatedTabs\.keys\(\)\]/);
+  assert.match(bg, /agentTabOwners: \[\.\.\.agentCreatedTabs\]/);
+  assert.match(bg, /dedicatedWindowIds: \[\.\.\.dedicatedWindowIds\]/);
+});
+
+test('background delegates hydration and the close fence to the pure helpers', () => {
+  assert.match(bg, /import \{ hydrateAgentTabs, hydrateActivity, canCloseTab \} from '\.\/auto-manage-state\.js'/);
+  assert.match(bg, /hydrateAgentTabs\(saved, openTabIds\)/);
+  assert.match(bg, /hydrateActivity\(saved, openTabIds\)/);
+  assert.match(bg, /canCloseTab\(\{ owner: agentCreatedTabs\.get\(tabId\), requester \}\)/);
+});
+
+test('closing an unattached tab still clears its agent bookkeeping', () => {
+  assert.match(bg, /function onTabRemoved\(tabId\) \{[\s\S]{0,500}agentCreatedTabs\.delete\(tabId\)[\s\S]{0,300}if \(!attachedTabs\.has\(tabId\)\) return;/);
 });

@@ -70,8 +70,8 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 | `listTabs` | — | List all eligible browser tabs |
 | `attachTab` | `{ tabId, sessionId }` | Attach debugger to tab |
 | `detachTab` | `{ tabId }` | Detach debugger |
-| `createTab` | `{ url, sessionId, windowId? }` | Create and attach new tab (optional `windowId` pins the agent's window) |
-| `closeTab` | `{ tabId }` | Close tab |
+| `createTab` | `{ url, sessionId, windowId?, ownerKey? }` | Create and attach new tab (`windowId` pins the agent's window; `ownerKey` records the owning agent) |
+| `closeTab` | `{ tabId, ownerKey? }` | Close tab (refused when `ownerKey` names a different agent than the tab's owner) |
 | `cdpCommand` | `{ tabId, method, params, childSessionId? }` | Forward CDP command |
 | `ping` | — | Keepalive (every 5s) |
 
@@ -155,19 +155,32 @@ When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the 
 
 ### Agent Window Affinity
 
-Agent-created tabs are pinned to the Chrome **window** the agent first worked in, not the user's current focus. The relay seeds `agentWindowByAffinityKey` from the `windowId` of the first real (non-init) command in `_forwardToTab()`, then passes that `windowId` to `createTab`. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the current focused window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowPlan()`, which returns a `{ action }` plan (`use-window` / `new-window` / `current-window`) that `createTab` executes.
+Agent-created tabs are pinned to the Chrome **window** the agent created them in, not the user's current focus. The relay seeds `agentWindowByAffinityKey` from the `windowId` of the first real (non-init) command in `_forwardToTab()` as a **weak** pin, which is never passed to `createTab`; only a pin a create actually established is sent. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the current focused window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowPlan()`, which returns a `{ action }` plan (`use-window` / `new-window` / `current-window`) that `createTab` executes.
 
-**Affinity keying (label-durable):** the map key is `label:<explicit label>` when the client connected with an explicit `?label=` query param (MCP sends `label=browserforce-mcp`), else the ephemeral connection id. Label-keyed pins **survive disconnects** — this is what stops MCP's 15s idle-disconnect/reset cycle from spawning a new dedicated window per reconnect. Connection-keyed pins are deleted on client close. Only *explicit* labels are durable: `_deriveClientLabel()` always returns a display label (UA fallbacks like `cdp-client`), which must never key durable affinity — durability is decided by `meta.affinityLabel` from `_explicitClientLabel(req)`. Consequence (deliberate): two clients sharing a label share an agent window. Leak guard: `MAX_AFFINITY_ENTRIES = 50`, FIFO eviction via `_pinAgentWindow()`.
+**Affinity keying (label-durable):** the map key is `label:<explicit label>` when the client connected with an explicit `?label=` query param (MCP sends `label=browserforce-mcp-<8 hex>`), else the ephemeral connection id. Label-keyed pins **survive disconnects** — this is what stops MCP's 15s idle-disconnect/reset cycle from spawning a new dedicated window per reconnect. Connection-keyed pins are deleted on client close. Only *explicit* labels are durable: `_deriveClientLabel()` always returns a display label (UA fallbacks like `cdp-client`), which must never key durable affinity — durability is decided by `meta.affinityLabel` from `_explicitClientLabel(req)`. Consequence (deliberate): two clients sharing a label share an agent window. Leak guard: `MAX_AFFINITY_ENTRIES = 50`, FIFO eviction via `_pinAgentWindow()`.
 
-**Do not** treat the current Chrome focus as stable agent ownership — use the stored `windowId`. Residual limitation: with truly concurrent first creates (the user changing focus between two extension-handled creates) tabs can land in different windows; affinity still resolves deterministically to the first established window. Playwright awaits `newPage()` sequentially, so no per-client serialization queue is added.
+**Pin provenance:** affinity entries are `{ windowId, strength }`. `strength: 'created'` means a window a `createTab` actually used; `strength: 'discovered'` means a window merely seeded from the first real command on some tab — which may be the USER's. **Only `created` pins are sent to the extension as a create target.** A create always re-pins (`_pinAgentWindow(key, id, 'created')`) with no guard: the previous `sentPinned || !has(key)` guard skipped the re-pin whenever a real command seeded affinity DURING the `createTab` round-trip, so the dedicated window was never recorded and every later create fell into the seeded user window. A weak pin never overwrites a strong one.
 
-**Dedicated window (opt-in):** When the `dedicatedWindow` setting (popup toggle) is on and a create has no valid pinned window, `resolveCreateWindowPlan()` returns `{ action: 'new-window' }` and the extension opens a fresh **background** (`focused: false`) Chrome window for the agent's created tabs, instead of a tab in the user's current window. Affinity then pins to that window so later created tabs join it. If the dedicated window is closed mid-session, the next create spawns a **new** dedicated window rather than falling back to the user's window. Scope is agent-**created** tabs only — manually attached tabs are never moved. Default is OFF.
+**Dedicated-window provenance:** a `created` pin is NOT automatically an agent window — a pin established while `dedicatedWindow` was OFF names the user's own window and stays valid when the setting is later switched ON. The relay cannot tell the two apart, so the extension tracks the windows it opened as dedicated (`dedicatedWindowIds`, persisted under `AUTO_MANAGE_STATE_KEY`, pruned on `chrome.windows.onRemoved` and at hydrate) and `resolveCreateWindowPlan()` takes `isRequestedWindowDedicated`: while dedicated mode is on, a valid pinned window is reused ONLY when the extension opened it as dedicated. Do not "simplify" this away — without it, agent tabs keep landing in the user's window with the setting ON.
+
+**Per-agent windows:** MCP sends a per-process label (`browserforce-mcp-<8 hex>`, `mcp/src/client-label.js`), unique across concurrent agents and stable within a process so the 15s idle-reconnect reuses the same window. `BROWSERFORCE_CDP_CLIENT_LABEL` overrides it — that is how two agents deliberately share one window. The helper lives outside `index.js` because `index.js` calls `main()` at import time.
+
+**Do not** treat the current Chrome focus as stable agent ownership — use the stored `windowId`. Residual limitation: with truly concurrent first creates tabs can land in different windows; a create now re-pins unconditionally, so the last completing create's window wins. Playwright awaits `newPage()` sequentially, so no per-client serialization queue is added.
+
+**Dedicated window (default ON):** When the `dedicatedWindow` setting (popup toggle) is on and a create has no valid pinned window, `resolveCreateWindowPlan()` returns `{ action: 'new-window' }` and the extension opens a fresh **background** (`focused: false`) Chrome window for the agent's created tabs, instead of a tab in the user's current window. Affinity then pins to that window so later created tabs join it. If the dedicated window is closed mid-session, the next create spawns a **new** dedicated window rather than falling back to the user's window. Scope is agent-**created** tabs only — manually attached tabs are never moved. Default is **ON**; an unset setting reads as enabled.
 
 ### Durable Auto-Close (agent tab bookkeeping)
 
+Auto-close of agent-created tabs is **ON by default** (10 minutes idle,
+`DEFAULT_AUTO_CLOSE_MINUTES` in `extension/agent-defaults.js`); auto-detach stays
+off by default. Both are changeable in the popup's Auto-Cleanup section.
+`resolveAutoCloseMinutes()` uses an explicit integer check rather than `|| 0`,
+which could not distinguish "never chosen" from an explicit **Off** — both read
+as `0` and the default would silently override the user's choice.
+
 Auto-close/auto-detach state must survive MV3 service worker restarts and Playwright's reconnect init storm:
 
-- **Persistence**: `agentCreatedTabs` + `tabLastActivity` are checkpointed to `chrome.storage.session` under `AUTO_MANAGE_STATE_KEY` (`persistAutoManageState()` / `hydrateAutoManageState()` in `extension/background.js`). Session storage survives SW restarts and dies with the browser — the correct lifetime. Membership changes persist immediately; the activity clock checkpoints once per `checkInactiveTabs()` sweep, never per CDP command.
+- **Persistence shape**: in memory `agentCreatedTabs` is a `Map<tabId, ownerKey|null>`. `AUTO_MANAGE_STATE_KEY` holds four fields: `agentCreatedTabs` (a bare tab-id array — kept in this shape so an older extension build can still hydrate membership after a rollback), `agentTabOwners` (`[tabId, ownerKey]` pairs), `tabLastActivity`, and `dedicatedWindowIds`. Hydration runs through the pure `extension/auto-manage-state.js` helpers, which validate every entry before destructuring: a malformed member previously threw and aborted the whole hydrate, silently disabling auto-close for every restored tab. `agentCreatedTabs` + `tabLastActivity` are checkpointed to `chrome.storage.session` under `AUTO_MANAGE_STATE_KEY` (`persistAutoManageState()` / `hydrateAutoManageState()` in `extension/background.js`). Session storage survives SW restarts and dies with the browser — the correct lifetime. Membership changes persist immediately; the activity clock checkpoints once per `checkInactiveTabs()` sweep, never per CDP command.
 - **Passive flag contract**: the relay tags forwarded `INIT_ONLY_METHODS` `cdpCommand` payloads with `passive: true`; the extension skips the `tabLastActivity` bump for them. Only real commands count as activity. The flag is optional — old relay/extension pairings degrade to the previous behavior.
 - **Provenance no-demote**: `agent-created` origin must never be demoted to `relay-attached` (that would exempt the tab from auto-close). The extension surfaces `origin: 'agent-created'` in `listTabs` for hydrated agent tabs; the relay accepts it in `_autoAttachAllTabs()` discovery (never `manual` from discovery) and `_ensureDebuggerAttached()` preserves `manual`/`agent-created` on lazy attach. `attachTab` re-registers agent-created tabs into `agentCreatedTabs`.
 - **Alarm-driven sweep**: the `bf-reconnect` alarm also runs `checkInactiveTabs()` — `setInterval` dies with the SW; alarms don't.
@@ -279,6 +292,14 @@ because reset runs inside the dead process).
   guard behavior must be tested in spawned subprocesses with REAL events,
   never via `process.emit()`.
 
+### CDP Traffic Log Retention
+
+`relay/src/cdp-log.js` keeps `~/.browserforce/cdp.jsonl` within a hard byte cap
+(10 MiB by default, configurable with `BROWSERFORCE_CDP_LOG_MAX_BYTES`). Rollover
+must remain inside the logger's serialized write queue so concurrent traffic
+cannot race truncation against appends. A single encoded entry larger than the
+cap is skipped; the file itself must never exceed the configured limit.
+
 ### Execute Timeout Cancellation
 
 `runCode()` is the single execution boundary for the MCP `exec` tool (formerly `execute`), the `browserforce` command tool's canned snippets, and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.
@@ -362,8 +383,8 @@ rewrites JS (`getByRole('button')` became `getByRole(button)` →
 ## Operational Non-Goals
 
 - No new dependencies for client arbitration or standby behavior.
-- No per-tab ownership model; arbitration is one relay-level client slot.
-- No extension protocol changes for this feature area.
+- Tab ownership is metadata-only: agent-created tabs record an owning agent key, and an explicit `closeTab` from a different agent is refused. It is NOT a capability fence — every CDP client can still navigate any target, and auto-close remains per-tab idle time rather than per owner.
+- No extension protocol changes beyond the `ownerKey` field on `createTab`/`closeTab`.
 
 ## Development Workflow
 

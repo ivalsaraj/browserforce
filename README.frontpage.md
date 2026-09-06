@@ -864,7 +864,7 @@ In `single-active` mode, the relay enforces one active client slot. A second `/c
 | `ws://.../extension` | Chrome extension WebSocket |
 | `ws://.../cdp?token=...` | Agent CDP connection |
 
-Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
+Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window).
 
 ## Troubleshooting
 
@@ -927,7 +927,7 @@ curl -s http://127.0.0.1:19222/client-slot | jq
 
 If `busy: true`, close the other MCP/CDP session or set `BF_CLIENT_MODE=multi-client` for explicit concurrent-client fallback.
 
-CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
+CDP traffic is logged to `~/.browserforce/cdp.jsonl`, capped at 10 MiB and recreated on each relay start. Set `BROWSERFORCE_CDP_LOG_MAX_BYTES` to override the cap. Summarize traffic by direction + method:
 
 ```bash
 jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.jsonl | uniq -c

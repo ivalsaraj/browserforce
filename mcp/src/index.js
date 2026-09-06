@@ -32,6 +32,7 @@ import {
   HELP_SECTION_NAMES,
 } from './help-docs.js';
 import { installProcessCrashGuard } from './process-crash-guard.js';
+import { withClientLabel } from './client-label.js';
 
 // ─── Browser Session Runtime ─────────────────────────────────────────────────
 // Browser connection, persistent userState, idle-disconnect lifecycle, console
@@ -56,20 +57,6 @@ const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
   DEFAULT_IDLE_BROWSER_DISCONNECT_MS,
 );
 
-function withClientLabel(cdpUrl) {
-  try {
-    const url = new URL(cdpUrl);
-    if (!url.searchParams.get('label')) {
-      url.searchParams.set(
-        'label',
-        process.env.BROWSERFORCE_CDP_CLIENT_LABEL || 'browserforce-mcp',
-      );
-    }
-    return url.toString();
-  } catch {
-    return cdpUrl;
-  }
-}
 
 // Injected connect path. Note: extension readiness is asserted by
 // preflightAttachedPageBeforeCdp() (via /extension/status) before this point is

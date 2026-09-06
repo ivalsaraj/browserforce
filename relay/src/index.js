@@ -1428,7 +1428,7 @@ class RelayServer {
         return this._createTarget(ws, params, clientId);
 
       case 'Target.closeTarget':
-        return this._closeTarget(params);
+        return this._closeTarget(params, clientId);
 
       case 'Browser.setDownloadBehavior':
         return {};
@@ -1608,24 +1608,33 @@ class RelayServer {
     return affinityLabel ? `label:${affinityLabel}` : clientId;
   }
 
-  _pinAgentWindow(affinityKey, windowId) {
+  // Pin an agent window. `strength` records provenance:
+  //   'created'    — a window a createTab actually used; authoritative.
+  //   'discovered' — merely a window the agent touched a tab in, which may be
+  //                  the USER's own window, so it must never be sent to the
+  //                  extension as a create target.
+  // A weak pin never overwrites a strong one; a create always overwrites.
+  _pinAgentWindow(affinityKey, windowId, strength) {
     if (!affinityKey || !Number.isInteger(windowId)) return;
-    this.agentWindowByAffinityKey.set(affinityKey, windowId);
+    const existing = this.agentWindowByAffinityKey.get(affinityKey);
+    if (existing?.strength === 'created' && strength !== 'created') return;
+    this.agentWindowByAffinityKey.set(affinityKey, { windowId, strength });
     if (this.agentWindowByAffinityKey.size > MAX_AFFINITY_ENTRIES) {
       const oldest = this.agentWindowByAffinityKey.keys().next().value;
       this.agentWindowByAffinityKey.delete(oldest);
     }
   }
 
-  // Pin the agent to a window on its first real tab use so later created tabs
-  // stay in that window. Uses one predicate (Number.isInteger) and only the
-  // first suitable window wins per affinity key.
+  // Record the window of the first real tab use as a WEAK pin. It keeps the
+  // /attached-tabs picture coherent but is never used as a create target — the
+  // tab may well be one of the user's, which is exactly the bug the provenance
+  // split fixes.
   _seedAgentWindowAffinity(clientId, target) {
     const key = this._affinityKey(clientId);
     if (!key || this.agentWindowByAffinityKey.has(key)) return;
     const windowId = target?.windowId ?? target?.targetInfo?.windowId;
     if (Number.isInteger(windowId)) {
-      this._pinAgentWindow(key, windowId);
+      this._pinAgentWindow(key, windowId, 'discovered');
     }
   }
 
@@ -1638,37 +1647,34 @@ class RelayServer {
     }
 
     const sessionId = `s${++this.sessionCounter}`;
+    const affinityKeyForOwner = this._affinityKey(clientId);
     const createParams = {
       url: params.url || 'about:blank',
       sessionId,
     };
-    // Pin the new tab to the agent's established window when we have one.
+    if (affinityKeyForOwner) createParams.ownerKey = affinityKeyForOwner;
+    // Only a 'created' pin may steer a new tab: a 'discovered' pin can point at
+    // the USER's window, and sending it would drop agent tabs there.
     const affinityKey = this._affinityKey(clientId);
-    const pinnedWindowId = affinityKey
+    const pinned = affinityKey
       ? this.agentWindowByAffinityKey.get(affinityKey)
       : undefined;
+    const pinnedWindowId = pinned?.strength === 'created' ? pinned.windowId : undefined;
     const sentPinned = Number.isInteger(pinnedWindowId);
     if (sentPinned) createParams.windowId = pinnedWindowId;
 
     const result = await this._sendToExt('createTab', createParams);
 
-    // Re-pin affinity from the window the extension actually used:
-    // - sentPinned → overwrite. Closed-window refresh: if the pinned window was
-    //   gone, the extension fell back to the current window and returned its
-    //   real windowId, so re-pin there (no-op when the window was still open).
-    // - otherwise → establish first-wins only when no affinity exists yet.
-    //   NOTE: with true-concurrent first creates (the user changing focus
-    //   between two extension-handled creates) the tabs may land in different
-    //   windows, but affinity still resolves deterministically to the first
-    //   established window. Playwright awaits newPage() sequentially, so a
-    //   per-client serialization queue would be over-engineering.
+    // Always record the window the extension actually used. The previous
+    // `sentPinned || !has(key)` guard silently skipped this whenever a real
+    // command seeded affinity DURING the createTab round-trip, so the agent's
+    // own dedicated window was never remembered and every later create fell
+    // into the seeded (user) window.
     const resultWindowId = integerWindowId(
       result.windowId ?? result.targetInfo?.windowId
     );
     if (affinityKey && resultWindowId !== undefined) {
-      if (sentPinned || !this.agentWindowByAffinityKey.has(affinityKey)) {
-        this._pinAgentWindow(affinityKey, resultWindowId);
-      }
+      this._pinAgentWindow(affinityKey, resultWindowId, 'created');
     }
 
     const target = {
@@ -1704,7 +1710,7 @@ class RelayServer {
     return { targetId: result.targetId };
   }
 
-  async _closeTarget(params) {
+  async _closeTarget(params, clientId) {
     let tabId;
     let sessionId;
 
@@ -1718,7 +1724,10 @@ class RelayServer {
 
     if (!tabId) throw new Error('Target not found');
 
-    await this._sendToExt('closeTab', { tabId });
+    // Keep this awaited: the child-session cleanup and detachedFromTarget
+    // broadcast below must still run.
+    const ownerKey = this._affinityKey(clientId);
+    await this._sendToExt('closeTab', ownerKey ? { tabId, ownerKey } : { tabId });
 
     // Clean up child sessions
     for (const [childId, child] of this.childSessions) {

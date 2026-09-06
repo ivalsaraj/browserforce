@@ -7,6 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { WebSocket } = require('ws');
 const { RelayServer, DEFAULT_PORT, BF_DIR } = require('../src/index.js');
+const { createCdpLogger } = require('../src/cdp-log.js');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1479,7 +1480,7 @@ describe('Auto-attach Flow', () => {
     await sleep(100);
   });
 
-  it('Target.createTarget uses the windowId from the first real tab command', async () => {
+  it('Target.createTarget does not steer new tabs into a merely-discovered window', async () => {
     const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://test' },
     });
@@ -1566,7 +1567,9 @@ describe('Auto-attach Flow', () => {
     await sleep(200);
 
     assert.equal(createCommands.length, 1);
-    assert.equal(createCommands[0].windowId, 222);
+    // A pin merely seeded from a real command on an existing tab is 'discovered'
+    // and must never be sent to the extension — that tab may be the user's.
+    assert.equal(createCommands[0].windowId, undefined);
 
     cdp.close();
     ext.close();
@@ -1618,6 +1621,212 @@ describe('Auto-attach Flow', () => {
     cdp.close();
     ext.close();
     await sleep(100);
+  });
+
+  it('Target.createTarget re-pins to the created window even when affinity is seeded mid-create', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+
+    const createCommands = [];
+    let nextTabId = 400;
+    let releaseCreate = null;
+
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 301, windowId: 111, url: 'https://user.example', title: 'User', active: true }] },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: msg.params.tabId,
+            windowId: 111,
+            targetId: `real-target-${msg.params.tabId}`,
+            targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'User', url: 'https://user.example', windowId: 111 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        const tabId = nextTabId++;
+        // Hold the FIRST create open so a real command can seed affinity from
+        // the user's window while this create is still in flight.
+        const respond = () => ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId,
+            windowId: 999,
+            targetId: `real-target-${tabId}`,
+            targetInfo: { targetId: `real-target-${tabId}`, type: 'page', title: '', url: msg.params.url || 'about:blank', windowId: 999 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        if (createCommands.length === 1) { releaseCreate = respond; } else { respond(); }
+      }
+    });
+
+    // Unique label => a private affinity key. The relay is shared across this
+    // describe block and label pins are durable, so the test must never look at
+    // the collection as a whole.
+    const AFFINITY_KEY = 'label:race-test';
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=race-test`);
+    const userSessions = [];
+    cdp.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'Target.attachedToTarget' && msg.params?.targetInfo?.url === 'https://user.example') {
+        userSessions.push(msg.params.sessionId);
+      }
+    });
+
+    // The ENTIRE body after socket setup is guarded: the red phase makes the
+    // FIRST affinity assertion fail, and RelayServer.stop() closes only the HTTP
+    // server, so a leaked socket hangs the suite.
+    try {
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }));
+      await waitForCondition(() => userSessions.length > 0, { description: 'user tab auto-attach' });
+
+      // First create — the extension holds its response open.
+      cdp.send(JSON.stringify({ id: 2, method: 'Target.createTarget', params: { url: 'https://agent.example/one' } }));
+      await waitForCondition(() => createCommands.length === 1 && releaseCreate, { description: 'first createTab to reach the extension' });
+
+      // Mid-create: a real command on the USER tab seeds affinity to window 111.
+      cdp.send(JSON.stringify({ id: 3, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId: userSessions[0] }));
+      await waitForCondition(
+        () => relay.agentWindowByAffinityKey.get(AFFINITY_KEY),
+        { description: 'affinity to be seeded from the user tab mid-create' },
+      );
+      // Precondition of the race: the seed points at the USER's window.
+      assert.deepEqual(relay.agentWindowByAffinityKey.get(AFFINITY_KEY),
+        { windowId: 111, strength: 'discovered' });
+
+      releaseCreate();
+      await waitForCondition(
+        () => relay.agentWindowByAffinityKey.get(AFFINITY_KEY)?.strength === 'created',
+        { description: 'the created window to be re-pinned' },
+      );
+      assert.deepEqual(relay.agentWindowByAffinityKey.get(AFFINITY_KEY),
+        { windowId: 999, strength: 'created' });
+
+      // Second create must go to the window the FIRST create actually used (999),
+      // not the user window (111) that got seeded during the round-trip.
+      cdp.send(JSON.stringify({ id: 4, method: 'Target.createTarget', params: { url: 'https://agent.example/two' } }));
+      await waitForCondition(() => createCommands.length === 2, { description: 'second createTab' });
+
+      assert.equal(createCommands[1].windowId, 999);
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('Target.createTarget forwards the client ownerKey to the extension', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const createCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        createCommands.push(msg.params);
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: 600, windowId: 900, targetId: 'real-target-600',
+            targetInfo: { targetId: 'real-target-600', type: 'page', title: '', url: 'about:blank', windowId: 900 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+      }
+    });
+
+    // Unique label: `agent-one` is already claimed by the 'two different labels'
+    // test and label pins are durable, so reusing it makes the suite order-dependent.
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=owner-create-test`);
+    try {
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await waitForCondition(() => createCommands.length === 1, { description: 'createTab reaching the extension' });
+      assert.equal(createCommands[0].ownerKey, 'label:owner-create-test');
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
+  });
+
+  it('Target.closeTarget forwards the caller ownerKey and still cleans up', async () => {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const closeCommands = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({ id: msg.id, result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' } }));
+        return;
+      }
+      if (msg.id && msg.method === 'createTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: 601, windowId: 901, targetId: 'real-target-601',
+            targetInfo: { targetId: 'real-target-601', type: 'page', title: '', url: 'about:blank', windowId: 901 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'closeTab') {
+        closeCommands.push(msg.params);
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      }
+    });
+
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=owner-close-test`);
+    const detached = [];
+    cdp.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'Target.detachedFromTarget') detached.push(msg.params);
+    });
+
+    try {
+      cdp.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'https://a.example' } }));
+      await waitForCondition(() => relay.tabToSession.has(601), { description: 'created tab registered' });
+
+      cdp.send(JSON.stringify({ id: 2, method: 'Target.closeTarget', params: { targetId: 'real-target-601' } }));
+      await waitForCondition(() => closeCommands.length === 1, { description: 'closeTab reaching the extension' });
+
+      assert.equal(closeCommands[0].ownerKey, 'label:owner-close-test');
+      // Cleanup must still run — a `return` in place of `await` would skip it.
+      await waitForCondition(() => detached.length > 0, { description: 'detachedFromTarget broadcast' });
+    } finally {
+      cdp.close();
+      ext.close();
+      await sleep(100);
+    }
   });
 
   it('Target.createTarget re-pins to the fallback window when the pinned window was closed', async () => {
@@ -1983,7 +2192,7 @@ describe('Auto-attach Flow', () => {
       headers: { Origin: 'chrome-extension://test' },
     });
     provenanceFakeExtension(ext, { tabId: 980, tabOrigin: undefined, attachCommands: [] });
-    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}&label=alias-affinity`);
     try {
       const events = [];
       cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
@@ -2023,8 +2232,10 @@ describe('Auto-attach Flow', () => {
       const tab = res.body.tabs.find((t) => t.tabId === 980);
       assert.ok(Number.isInteger(tab?.lastCommandAt),
         'alias-session real command must bump lastCommandAt');
-      assert.ok([...relay.agentWindowByAffinityKey.values()].includes(11),
-        'alias-session real command must seed window affinity');
+      assert.deepEqual(
+        relay.agentWindowByAffinityKey.get('label:alias-affinity'),
+        { windowId: 11, strength: 'discovered' },
+        'alias-session real command must seed a weak (discovered) window affinity');
     } finally {
       cdp.close();
       ext.close();
@@ -2557,6 +2768,36 @@ describe('CDP JSONL Logging', () => {
       secondRelay?.stop();
       firstRelay?.stop();
     }
+  });
+
+  it('keeps the CDP JSONL log within its configured byte limit', async () => {
+    const maxFileSizeBytes = 180;
+    const logger = createCdpLogger({ logFilePath, maxFileSizeBytes });
+
+    for (let id = 0; id < 10; id += 1) {
+      logger.log({ id, message: 'x'.repeat(40) });
+    }
+
+    await waitForCondition(
+      () => readJsonlEntries(logFilePath).at(-1)?.id === 9,
+      { description: 'final bounded CDP log entry' },
+    );
+
+    assert.ok(fs.statSync(logFilePath).size <= maxFileSizeBytes);
+  });
+
+  it('skips a CDP log entry larger than the configured byte limit', async () => {
+    const logger = createCdpLogger({ logFilePath, maxFileSizeBytes: 80 });
+
+    logger.log({ id: 'oversized', message: 'x'.repeat(100) });
+    logger.log({ id: 'small' });
+
+    await waitForCondition(
+      () => readJsonlEntries(logFilePath).at(-1)?.id === 'small',
+      { description: 'small CDP log entry after oversized entry' },
+    );
+
+    assert.deepEqual(readJsonlEntries(logFilePath).map((entry) => entry.id), ['small']);
   });
 
   it('logs command/event traffic with direction and method in JSONL entries', async () => {
