@@ -923,20 +923,20 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | ----------------------- | ------------------------------------------------------------------------ |
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
-| **Parallel visibility** | `foreground-tab` keeps new tabs visible in the current window             |
+| **Parallel visibility** | `foreground-tab` keeps new tabs visible inside the agent's dedicated window |
 | **Tab grouping**        | Attached tabs stay grouped as `browserforce` inside their own Chrome window |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
 | **Auto-detach**         | Automatically detach inactive tabs after 5-60 minutes                    |
-| **Auto-close**          | Automatically close agent-created tabs after 5-60 minutes                |
+| **Auto-close**          | Automatically close agent-created tabs after 5-60 minutes — **on by default (10 min)** |
 | **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
 
-`parallelVisibilityMode` is currently enforced as `foreground-tab` (visible tabs in the active window, no new windows). If `rotate-visible` is selected, BrowserForce normalizes to `foreground-tab` in this release.
+`parallelVisibilityMode` is currently enforced as `foreground-tab` (tabs visible within the agent's window). If `rotate-visible` is selected, BrowserForce normalizes to `foreground-tab` in this release.
 
 ### Execution Strategy Preferences
 
-- **Visible parallel with current-window tabs (`foreground-tab`)**: New agent tabs open visibly in your current Chrome window and stay there.
+- **Visible parallel (`foreground-tab`)**: New agent tabs open visibly in the agent's own dedicated window and stay there, leaving your working window untouched.
 - **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
 - **Rotate-visible demo mode (`rotate-visible`)**: Temporarily normalized to `foreground-tab` while the visibility lock is enforced.
 
@@ -950,7 +950,7 @@ MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and 
 - **Restrict to one controlled tab:** Use **Manual mode**, attach one tab, and enable **No new tabs**.
 - **Allow multiple controlled tabs:** Stay in **Manual mode** and attach each tab you want the agent to access.
 - **Restriction modes:** Use **Lock URL** (no navigation), **No new tabs**, and **Read-only** (observe only) together or separately.
-- **Auto-cleanup:** Use **Auto-detach** for inactive attached tabs and **Auto-close** for agent-created tabs.
+- **Auto-cleanup:** Use **Auto-detach** for inactive attached tabs and **Auto-close** for agent-created tabs. Auto-close defaults to 10 minutes; choose **Off** to disable it.
 
 For step-by-step setups, see the [Controlled Tabs Playbook](GUIDE.md#controlled-tabs-playbook).
 
@@ -1076,7 +1076,7 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 - **CORS:** `/extension/status` and `/attached-tabs` intentionally omit `Access-Control-Allow-Origin` because they expose local browsing metadata (tab URLs/titles); arbitrary websites must not read them. Other routes retain wildcard CORS for CDP discovery.
 - **`/extension/status` vs `/json/list`:** `/json/list` returns CDP-discovery-shaped targets for Playwright; `/extension/status` returns relay-owned provenance — `manualAttachedTabs` are user-attached tabs (`origin: 'manual'`), while `attachedTabs` can also include `agent-created` and `relay-attached` tabs. Use `activeManualTargets`/`manualAttachedTabs` to confirm an attached page is ready for inspect/current-tab flows.
 
-Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
+Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window).
 
 
 </details>

@@ -55,7 +55,7 @@ Result: the agent can operate only in your approved set.
 ### 5) Cleanup and session hygiene
 
 - `Auto-detach inactive tabs`: remove debugger from stale tabs (recommended `10-15 min`).
-- `Auto-close agent tabs`: close exploration tabs after runs.
+- `Auto-close agent tabs`: close exploration tabs after runs. **On by default (10 min idle)** — agent tabs are disposable. Set to `Off` here to keep them.
 
 Use both in long-running sessions to limit drift and memory growth.
 
@@ -68,16 +68,16 @@ Popup settings include:
 
 Current behavior lock:
 
-- Agent-created tabs stay visible in the current window (`foreground-tab` behavior).
+- Agent-created tabs open in the agent's own dedicated window by default, visible within it.
 - Attached tabs stay in a `browserforce` group within their own Chrome window.
-- No new windows are created for parallel workers.
+- A dedicated background window is created per agent process by default (`dedicatedWindow`, on unless turned off).
 - `rotate-visible` is treated as `foreground-tab` in this release.
 
 MCP reads these preferences once per session and caches them. If you change popup settings mid-session, call `reset` so new execute calls pick up updated values.
 
 ### Operational examples
 
-- Visible parallel in current window: `executionMode=parallel`, `parallelVisibilityMode=foreground-tab`
+- Visible parallel in the agent's dedicated window: `executionMode=parallel`, `parallelVisibilityMode=foreground-tab`
 - Sequential low-detection run: `executionMode=sequential`
 - Rotate-visible demo toggle: `parallelVisibilityMode=rotate-visible` (currently normalized to `foreground-tab`)
 

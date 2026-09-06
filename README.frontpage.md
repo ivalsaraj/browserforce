@@ -864,7 +864,7 @@ In `single-active` mode, the relay enforces one active client slot. A second `/c
 | `ws://.../extension` | Chrome extension WebSocket |
 | `ws://.../cdp?token=...` | Agent CDP connection |
 
-Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp`).
+Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window).
 
 ## Troubleshooting
 
