@@ -82,6 +82,14 @@ describe('CLI', () => {
     assert.ok(stdout.includes('browserforce serve'));
     assert.ok(stdout.includes('browserforce -e'));
     assert.ok(stdout.includes('one-shot'));
+    assert.ok(!stdout.includes('browserforce skills'));
+  });
+
+  it('removed skills command uses the unknown-command failure', async () => {
+    await assert.rejects(exec('node', ['bin.js', 'skills', 'get', 'core']), (err) => {
+      assert.match(err.stderr, /Unknown command: skills/);
+      return true;
+    });
   });
 
   it('relay HTTP health check returns expected shape', async () => {

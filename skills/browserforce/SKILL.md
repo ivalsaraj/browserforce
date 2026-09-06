@@ -16,18 +16,6 @@ allowed-tools: Bash(browserforce:*)
 BrowserForce gives you the user's actual Chrome browser — all their logins,
 cookies, and extensions already active. No headless browser, no fresh profiles.
 
-## Load the full runtime skill first
-
-This file is a quick-start stub. For the complete, up-to-date guide — the
-session commands (`open`/`tabs`/`use`/`snapshot`/`click`/`fill`/`wait`/`get`/`eval`),
-the snapshot-and-ref workflow, multi-tab handling, and troubleshooting — load
-the runtime skill:
-
-```bash
-browserforce skills get core          # the full core guide
-browserforce skills get core --full   # plus the complete command reference
-```
-
 ## Prerequisites
 
 The user must have:
@@ -38,8 +26,9 @@ Check with: `browserforce status`
 
 ## Use commands first
 
-Session commands share one persistent browser session (and snapshot refs)
-across CLI calls — the same command language as the MCP `browserforce` tool:
+Session commands share one persistent browser session (including the active tab
+and snapshot refs) across CLI calls. The same command language powers the MCP
+`browserforce` tool:
 
 ```bash
 browserforce tabs                # List tabs: stable t<N> handles + names
@@ -82,6 +71,34 @@ Target tabs by stable handle (`t2`) or name — never by list position. Tab
 names are unique; pass `--replace` only when you intentionally want to move a
 name to another tab.
 
+Stable handles and names persist for the lifetime of the session; use
+`browserforce tabs` to discover them.
+
+### Command reference
+
+```bash
+browserforce snapshot [--tab docs] [--selector "#main"] [--search "login"] [--interactive]
+browserforce hover @e3                         # Hover a ref
+browserforce type @e2 "more text"              # Type without clearing
+browserforce press Enter                        # Send a key
+browserforce wait text "Saved"                  # Wait for text
+browserforce wait url "**/dashboard"            # Wait for a URL glob
+browserforce wait load domcontentloaded          # Wait for a load state
+browserforce wait fn "window.ready === true"    # Wait for a JavaScript predicate
+browserforce get url|title                      # Read the current page
+browserforce get text|html @e5                  # Read a referenced element
+browserforce eval --stdin                       # Run piped JS in the persistent session
+browserforce rename docs api-docs                # Rename a tab
+browserforce forget api-docs                     # Remove a tab name
+browserforce run "click @e2 --tab docs"         # Run a command string
+```
+
+Refs accept `@e1`, `e1`, or `ref=e1`. Ref/read commands accept `--tab
+<handle|name|text>` without changing the active tab. `eval` uses the same
+guarded boundary as MCP `exec`; it exposes `page`, `context`, `state`, and
+`snapshot()`, and `state` persists between session commands. Add `--json` for
+machine-readable command results.
+
 ### Extract data
 
 ```bash
@@ -107,14 +124,19 @@ browserforce -e "
 
 ## Rules
 
-1. **snapshot over screenshot** — snapshot returns text (fast, cheap).
-   Use screenshot only for visual layout verification.
+1. **snapshot over screenshot** — snapshot returns text (fast, cheap); use a
+   screenshot only for visual layout verification.
 2. **Re-snapshot after every page change** — refs go stale immediately.
 3. **Don't navigate existing tabs** — open your own via `browserforce open`.
 4. **Commands over `-e`** — reach for raw Playwright only when the command
    layer cannot express the task.
 5. **Command errors teach the next step** — stale ref → re-snapshot; unknown
    tab → `browserforce tabs`. Fix and retry.
+6. **Backend fallback is visible** — `auto` uses real Chrome when the extension
+   is connected and warns if it falls back to managed Chrome; use `--real` to
+   fail instead of falling back.
+
+## Troubleshooting
 
 ## Error Recovery
 

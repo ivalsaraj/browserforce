@@ -112,11 +112,15 @@ browserforce setup openclaw
 
 `setup openclaw` now auto-installs the official `openclaw` BrowserForce plugin into `~/.browserforce/plugins/openclaw/` so OpenClaw gets BrowserForce-specific usage policy without affecting other agents.
 
-Optional: install the BrowserForce skill for your OpenClaw agent (scoped to OpenClaw only):
+Optional: install the complete BrowserForce guide for your OpenClaw agent (scoped to OpenClaw only):
 
 ```bash
 npx -y skills add ivalsaraj/browserforce --agent openclaw --skill browserforce --yes
 ```
+
+This installs the normal guide in one step; no second BrowserForce
+documentation command is required. The skill installation is separate from
+the CLI and Chrome extension setup above.
 
 Preview only (no install):
 
@@ -380,7 +384,6 @@ browserforce status             # Check relay and extension status
 browserforce screenshot [n]     # Screenshot tab n (PNG to stdout)
 browserforce navigate <url>     # Open URL in a new tab (one-shot, no session)
 browserforce -e "<code>"        # Run Playwright JavaScript (one-shot)
-browserforce skills get core    # Print the runtime agent skill (--full for references)
 browserforce doctor [--fix]     # Diagnose relay/extension/sidecars/backend
 browserforce plugin list        # List installed plugins
 browserforce plugin install <n> # Install a plugin from the registry
