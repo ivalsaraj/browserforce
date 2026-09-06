@@ -196,6 +196,9 @@ Relay writes CDP traffic to:
 ~/.browserforce/cdp.jsonl
 ```
 
+The file rolls over in place at 10 MiB and is recreated on relay startup. Set
+`BROWSERFORCE_CDP_LOG_MAX_BYTES` to override the byte cap.
+
 Tail live:
 
 ```bash

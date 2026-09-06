@@ -15,3 +15,17 @@ so cosmetic feedback cannot alter CDP input behavior or its result.
 The service-worker module keeps only the identifiers and action-validation values
 it needs; renderer motion constants live in the injected source so there is one
 authoritative page-side definition rather than two unused copies that could drift.
+
+## 2026-09-06 — [BUG] Bound the CDP traffic log (@Valsaraj)
+
+**Scope**: relay
+**Problem**: A long-lived relay allowed `~/.browserforce/cdp.jsonl` to grow to
+many gigabytes and consume local disk space.
+**Root Cause**: The logger serialized append operations but enforced retention
+only by truncating the file at process startup.
+**Fix**: Added a 10 MiB default byte cap with in-queue rollover and oversized
+entry rejection in `relay/src/cdp-log.js`, plus regression coverage in
+`relay/test/relay-server.test.js`.
+**Rule**: Bound persistent diagnostic logs during writes; process-restart cleanup
+is not a retention policy.
+**Files**: `relay/src/cdp-log.js`, `relay/test/relay-server.test.js`

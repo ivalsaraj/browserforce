@@ -5,6 +5,7 @@ const path = require('node:path');
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const LOG_CDP_FILE_PATH = process.env.BROWSERFORCE_CDP_LOG_FILE_PATH || path.join(BF_DIR, 'cdp.jsonl');
 const DEFAULT_MAX_STRING_LENGTH = 2000;
+const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
 function chmodBestEffort(filePath, mode) {
   try {
@@ -23,6 +24,17 @@ function resolveMaxStringLength(maxStringLength) {
     return Math.floor(fromEnv);
   }
   return DEFAULT_MAX_STRING_LENGTH;
+}
+
+function resolveMaxFileSizeBytes(maxFileSizeBytes) {
+  if (Number.isFinite(maxFileSizeBytes) && maxFileSizeBytes > 0) {
+    return Math.floor(maxFileSizeBytes);
+  }
+  const fromEnv = Number(process.env.BROWSERFORCE_CDP_LOG_MAX_BYTES);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return Math.floor(fromEnv);
+  }
+  return DEFAULT_MAX_FILE_SIZE_BYTES;
 }
 
 function truncateString(value, maxLength) {
@@ -49,7 +61,7 @@ function createTruncatingCircularReplacer(maxStringLength) {
   };
 }
 
-function createCdpLogger({ logFilePath, maxStringLength } = {}) {
+function createCdpLogger({ logFilePath, maxStringLength, maxFileSizeBytes } = {}) {
   const resolvedLogFilePath = logFilePath || process.env.BROWSERFORCE_CDP_LOG_FILE_PATH || LOG_CDP_FILE_PATH;
   const logDir = path.dirname(resolvedLogFilePath);
   fs.mkdirSync(logDir, { recursive: true });
@@ -58,14 +70,28 @@ function createCdpLogger({ logFilePath, maxStringLength } = {}) {
   chmodBestEffort(resolvedLogFilePath, 0o600);
 
   const resolvedMaxStringLength = resolveMaxStringLength(maxStringLength);
+  const resolvedMaxFileSizeBytes = resolveMaxFileSizeBytes(maxFileSizeBytes);
+  let currentFileSizeBytes = 0;
   let queue = Promise.resolve();
 
   return {
     logFilePath: resolvedLogFilePath,
     log(entry) {
       const line = JSON.stringify(entry, createTruncatingCircularReplacer(resolvedMaxStringLength));
+      const encodedLine = `${line}\n`;
+      const lineSizeBytes = Buffer.byteLength(encodedLine);
+      if (lineSizeBytes > resolvedMaxFileSizeBytes) {
+        return;
+      }
       queue = queue
-        .then(() => fs.promises.appendFile(resolvedLogFilePath, `${line}\n`))
+        .then(async () => {
+          if (currentFileSizeBytes + lineSizeBytes > resolvedMaxFileSizeBytes) {
+            await fs.promises.truncate(resolvedLogFilePath, 0);
+            currentFileSizeBytes = 0;
+          }
+          await fs.promises.appendFile(resolvedLogFilePath, encodedLine);
+          currentFileSizeBytes += lineSizeBytes;
+        })
         .catch(() => {});
     },
   };

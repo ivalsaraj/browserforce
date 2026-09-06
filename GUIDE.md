@@ -240,7 +240,7 @@ Need broader persona workflows? See [Actionable Use Cases](docs/USE_CASES.md).
 | Port already in use | Run `lsof -ti:19222 \| xargs kill -9` to kill stale process |
 | Need full traffic visibility | Popup → **View Full Logs** (polls relay logs while page is open) |
 
-CDP traffic log: `~/.browserforce/cdp.jsonl` (recreated each relay start).
+CDP traffic log: `~/.browserforce/cdp.jsonl` (capped at 10 MiB and recreated each relay start). Set `BROWSERFORCE_CDP_LOG_MAX_BYTES` to override the cap.
 
 Summarize CDP traffic by direction + method:
 

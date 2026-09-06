@@ -7,6 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { WebSocket } = require('ws');
 const { RelayServer, DEFAULT_PORT, BF_DIR } = require('../src/index.js');
+const { createCdpLogger } = require('../src/cdp-log.js');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -2557,6 +2558,36 @@ describe('CDP JSONL Logging', () => {
       secondRelay?.stop();
       firstRelay?.stop();
     }
+  });
+
+  it('keeps the CDP JSONL log within its configured byte limit', async () => {
+    const maxFileSizeBytes = 180;
+    const logger = createCdpLogger({ logFilePath, maxFileSizeBytes });
+
+    for (let id = 0; id < 10; id += 1) {
+      logger.log({ id, message: 'x'.repeat(40) });
+    }
+
+    await waitForCondition(
+      () => readJsonlEntries(logFilePath).at(-1)?.id === 9,
+      { description: 'final bounded CDP log entry' },
+    );
+
+    assert.ok(fs.statSync(logFilePath).size <= maxFileSizeBytes);
+  });
+
+  it('skips a CDP log entry larger than the configured byte limit', async () => {
+    const logger = createCdpLogger({ logFilePath, maxFileSizeBytes: 80 });
+
+    logger.log({ id: 'oversized', message: 'x'.repeat(100) });
+    logger.log({ id: 'small' });
+
+    await waitForCondition(
+      () => readJsonlEntries(logFilePath).at(-1)?.id === 'small',
+      { description: 'small CDP log entry after oversized entry' },
+    );
+
+    assert.deepEqual(readJsonlEntries(logFilePath).map((entry) => entry.id), ['small']);
   });
 
   it('logs command/event traffic with direction and method in JSONL entries', async () => {

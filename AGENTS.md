@@ -279,6 +279,14 @@ because reset runs inside the dead process).
   guard behavior must be tested in spawned subprocesses with REAL events,
   never via `process.emit()`.
 
+### CDP Traffic Log Retention
+
+`relay/src/cdp-log.js` keeps `~/.browserforce/cdp.jsonl` within a hard byte cap
+(10 MiB by default, configurable with `BROWSERFORCE_CDP_LOG_MAX_BYTES`). Rollover
+must remain inside the logger's serialized write queue so concurrent traffic
+cannot race truncation against appends. A single encoded entry larger than the
+cap is skipped; the file itself must never exceed the configured limit.
+
 ### Execute Timeout Cancellation
 
 `runCode()` is the single execution boundary for the MCP `exec` tool (formerly `execute`), the `browserforce` command tool's canned snippets, and `-e` (CLI). User code runs inside `node:vm` via `vm.runInContext(..., { timeout })` so a synchronous runaway is interrupted; remaining async work is raced against an outer timeout that calls `run.abort()`. `createRunController()` owns a per-run `AbortController` plus tracked timers; on timeout it aborts the signal (reason: `CodeExecutionTimeoutError`) and clears every pending run-scoped timer, so a continuation suspended on a run `setTimeout` never resumes and cannot mutate `state` afterward.

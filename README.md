@@ -1215,7 +1215,7 @@ curl -s http://127.0.0.1:19222/client-slot | jq
 cat ~/.browserforce/cdp-url
 ```
 
-CDP traffic is logged to `~/.browserforce/cdp.jsonl` (recreated on each relay start). Summarize traffic by direction + method:
+CDP traffic is logged to `~/.browserforce/cdp.jsonl`, capped at 10 MiB and recreated on each relay start. Set `BROWSERFORCE_CDP_LOG_MAX_BYTES` to override the cap. Summarize traffic by direction + method:
 
 ```bash
 jq -r '.direction + "\t" + (.message.method // "response")' ~/.browserforce/cdp.jsonl | uniq -c
