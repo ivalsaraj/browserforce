@@ -47,6 +47,8 @@ let isSyncingTabGroup = false;
 const tabLastActivity = new Map();
 /** Tracks tabs created by the agent via createTab() */
 const agentCreatedTabs = new Set();
+/** Windows this extension opened AS dedicated agent windows (windowId set) */
+const dedicatedWindowIds = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
 let isGhostCursorEnabled = false;
@@ -68,6 +70,7 @@ async function persistAutoManageState() {
       [AUTO_MANAGE_STATE_KEY]: {
         agentCreatedTabs: [...agentCreatedTabs],
         tabLastActivity: [...tabLastActivity],
+        dedicatedWindowIds: [...dedicatedWindowIds],
       },
     });
   } catch (e) {
@@ -87,6 +90,13 @@ async function hydrateAutoManageState() {
     }
     for (const [tabId, lastActivity] of saved.tabLastActivity || []) {
       if (openTabIds.has(tabId)) tabLastActivity.set(tabId, lastActivity);
+    }
+    // Without this, a service-worker restart forgets which windows are the
+    // agent's, every valid pin stops looking dedicated, and each create opens
+    // yet another window.
+    const openWindowIds = new Set((await chrome.windows.getAll()).map((w) => w.id));
+    for (const windowId of Array.isArray(saved.dedicatedWindowIds) ? saved.dedicatedWindowIds : []) {
+      if (openWindowIds.has(windowId)) dedicatedWindowIds.add(windowId);
     }
   } catch (e) {
     console.warn('[bf] Failed to hydrate auto-manage state:', e?.message || e);
@@ -112,6 +122,9 @@ let restrictionExplained = false;
   chrome.debugger.onDetach.addListener(onDebuggerDetach);
 
   // Tab lifecycle
+  chrome.windows.onRemoved.addListener((windowId) => {
+    if (dedicatedWindowIds.delete(windowId)) persistAutoManageState();
+  });
   chrome.tabs.onRemoved.addListener(onTabRemoved);
   chrome.tabs.onUpdated.addListener(onTabUpdated);
   chrome.tabs.onAttached.addListener(onTabAttachedToWindow);
@@ -375,6 +388,7 @@ async function resolveCreateTabWindowPlan(params, dedicatedWindowEnabled) {
   return resolveCreateWindowPlan({
     requestedWindowId,
     isRequestedWindowValid,
+    isRequestedWindowDedicated: dedicatedWindowIds.has(requestedWindowId),
     currentWindowId,
     dedicatedWindowEnabled,
   });
@@ -535,6 +549,10 @@ async function createTab(params) {
     });
     tab = win?.tabs?.[0];
     if (!tab) throw new Error('Failed to create dedicated agent window');
+    if (Number.isInteger(win?.id)) {
+      dedicatedWindowIds.add(win.id);
+      persistAutoManageState();
+    }
   } else {
     const createOptions = {
       url: params.url || 'about:blank',

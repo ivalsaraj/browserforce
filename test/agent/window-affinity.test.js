@@ -67,12 +67,37 @@ test('spawns a new dedicated window when enabled and the requested window is clo
   assert.deepEqual(plan, { action: 'new-window' });
 });
 
-test('still honors a valid requested window even when dedicated mode is enabled', () => {
+test('honors a valid requested window under dedicated mode only when the agent opened it', () => {
   const plan = resolveCreateWindowPlan({
     requestedWindowId: 222,
     isRequestedWindowValid: true,
+    isRequestedWindowDedicated: true,
     currentWindowId: 111,
     dedicatedWindowEnabled: true,
+  });
+  assert.deepEqual(plan, { action: 'use-window', windowId: 222 });
+});
+
+test('dedicated mode refuses to reuse a window the agent did not open as dedicated', () => {
+  // A pin established while dedicatedWindow was OFF names the USER's window and
+  // stays valid when the setting is later turned ON. Reusing it is the bug.
+  const plan = resolveCreateWindowPlan({
+    requestedWindowId: 222,
+    isRequestedWindowValid: true,
+    isRequestedWindowDedicated: false,
+    currentWindowId: 111,
+    dedicatedWindowEnabled: true,
+  });
+  assert.deepEqual(plan, { action: 'new-window' });
+});
+
+test('with dedicated mode off, any valid pinned window is still reused', () => {
+  const plan = resolveCreateWindowPlan({
+    requestedWindowId: 222,
+    isRequestedWindowValid: true,
+    isRequestedWindowDedicated: false,
+    currentWindowId: 111,
+    dedicatedWindowEnabled: false,
   });
   assert.deepEqual(plan, { action: 'use-window', windowId: 222 });
 });

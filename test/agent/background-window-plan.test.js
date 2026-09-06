@@ -45,3 +45,17 @@ test('listTabs surfaces agent-created provenance for hydrated tabs', () => {
 test('passive cdpCommands do not bump tabLastActivity', () => {
   assert.match(bg, /if \(!msg\.params\.passive\) tabLastActivity\.set\(msg\.params\.tabId, Date\.now\(\)\)/);
 });
+
+test('dedicated windows are tracked and consulted by the resolver', () => {
+  assert.match(bg, /const dedicatedWindowIds = new Set\(\)/);
+  assert.match(bg, /dedicatedWindowIds\.add\(win\.id\)/);
+  assert.match(bg, /isRequestedWindowDedicated: dedicatedWindowIds\.has\(requestedWindowId\)/);
+});
+
+test('dedicated windows survive a service-worker restart and are pruned', () => {
+  assert.match(bg, /dedicatedWindowIds: \[\.\.\.dedicatedWindowIds\]/);
+  assert.match(bg, /saved\.dedicatedWindowIds/);
+  assert.match(bg, /chrome\.windows\.getAll\(\)/);
+  assert.match(bg, /openWindowIds\.has\(windowId\)/);
+  assert.match(bg, /chrome\.windows\.onRemoved\.addListener/);
+});
