@@ -33,6 +33,10 @@ const noNewTabsCb = document.getElementById('bf-no-new-tabs');
 const readOnlyCb = document.getElementById('bf-read-only');
 const dedicatedWindowCb = document.getElementById('bf-dedicated-window');
 const ghostCursorCb = document.getElementById('bf-ghost-cursor');
+// Mirrors extension/agent-defaults.js — popup.js is a classic script and cannot
+// import ES modules. test/agent/agent-defaults.test.js asserts they agree.
+const DEFAULT_AUTO_CLOSE_MINUTES = 10;
+
 const autoDetachSelect = document.getElementById('bf-auto-detach');
 const autoCloseSelect = document.getElementById('bf-auto-close');
 const instructionsEl = document.getElementById('bf-instructions');
@@ -59,14 +63,18 @@ const SETTINGS_KEYS = [
 chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   relayUrlInput.value = s.relayUrl || RELAY_URL_DEFAULT;
   autoDetachSelect.value = String(s.autoDetachMinutes || 0);
-  autoCloseSelect.value = String(s.autoCloseMinutes || 0);
+  autoCloseSelect.value = String(
+    Number.isInteger(s.autoCloseMinutes) && s.autoCloseMinutes >= 0
+      ? s.autoCloseMinutes
+      : DEFAULT_AUTO_CLOSE_MINUTES,
+  );
   modeSelect.value = s.mode || 'auto';
   executionModeSelect.value = s.executionMode || 'parallel';
   parallelVisibilitySelect.value = s.parallelVisibilityMode || 'foreground-tab';
   lockUrlCb.checked = !!s.lockUrl;
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
-  dedicatedWindowCb.checked = !!s.dedicatedWindow;
+  dedicatedWindowCb.checked = s.dedicatedWindow !== false;
   ghostCursorCb.checked = !!s.ghostCursorEnabled;
   instructionsEl.value = s.userInstructions || '';
   setAutoModeState(s.mode || 'auto');

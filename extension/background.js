@@ -1,5 +1,6 @@
 import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
+import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
 import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
 
 // BrowserForce — MV3 Service Worker
@@ -537,7 +538,7 @@ async function createTab(params) {
   }
 
   const agentSettings = await getAgentExecutionSettings();
-  const plan = await resolveCreateTabWindowPlan(params, !!settings.dedicatedWindow);
+  const plan = await resolveCreateTabWindowPlan(params, resolveDedicatedWindow(settings));
 
   let tab;
   if (plan.action === 'new-window') {
@@ -843,7 +844,7 @@ function stopAutoManageTimer() {
 async function checkInactiveTabs() {
   const settings = await chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes']);
   const detachMs = (settings.autoDetachMinutes || 0) * 60_000;
-  const closeMs = (settings.autoCloseMinutes || 0) * 60_000;
+  const closeMs = resolveAutoCloseMinutes(settings) * 60_000;
 
   if (!detachMs && !closeMs) return;
 
@@ -885,7 +886,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
 
   if (changes.autoDetachMinutes || changes.autoCloseMinutes) {
     const settings = await chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes']);
-    const anyEnabled = (settings.autoDetachMinutes || 0) > 0 || (settings.autoCloseMinutes || 0) > 0;
+    const anyEnabled = (settings.autoDetachMinutes || 0) > 0 || resolveAutoCloseMinutes(settings) > 0;
     if (anyEnabled) {
       startAutoManageTimer();
     } else {
@@ -906,7 +907,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
 
 // Start timer on load if settings are configured
 chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) => {
-  if ((settings.autoDetachMinutes || 0) > 0 || (settings.autoCloseMinutes || 0) > 0) {
+  if ((settings.autoDetachMinutes || 0) > 0 || resolveAutoCloseMinutes(settings) > 0) {
     startAutoManageTimer();
   }
 });
@@ -1079,7 +1080,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     let nextAutoActionSecs = null;
     chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes', 'mode'], async (settings) => {
       const detachMs = (settings.autoDetachMinutes || 0) * 60_000;
-      const closeMs = (settings.autoCloseMinutes || 0) * 60_000;
+      const closeMs = resolveAutoCloseMinutes(settings) * 60_000;
       if ((detachMs || closeMs) && tabLastActivity.size > 0) {
         const now = Date.now();
         let earliest = Infinity;

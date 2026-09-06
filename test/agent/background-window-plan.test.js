@@ -6,7 +6,7 @@ const bg = fs.readFileSync('extension/background.js', 'utf8');
 
 test('createTab imports and uses the plan resolver', () => {
   assert.match(bg, /import \{ resolveCreateWindowPlan \} from '\.\/window-affinity\.js'/);
-  assert.match(bg, /resolveCreateTabWindowPlan\(params, !!settings\.dedicatedWindow\)/);
+  assert.match(bg, /resolveCreateTabWindowPlan\(params, resolveDedicatedWindow\(settings\)\)/);
 });
 
 test('createTab reads the dedicatedWindow setting from storage', () => {
@@ -58,4 +58,11 @@ test('dedicated windows survive a service-worker restart and are pruned', () => 
   assert.match(bg, /chrome\.windows\.getAll\(\)/);
   assert.match(bg, /openWindowIds\.has\(windowId\)/);
   assert.match(bg, /chrome\.windows\.onRemoved\.addListener/);
+});
+
+test('agent setting defaults come from the shared resolvers, never `|| 0`', () => {
+  assert.match(bg, /import \{ resolveAutoCloseMinutes, resolveDedicatedWindow \} from '\.\/agent-defaults\.js'/);
+  // `|| 0` cannot tell "never chosen" from an explicit Off, so it must be gone.
+  assert.doesNotMatch(bg, /settings\.autoCloseMinutes \|\| 0/);
+  assert.doesNotMatch(bg, /!!settings\.dedicatedWindow/);
 });
