@@ -220,3 +220,67 @@ describe('doctor: deployed skill drift', () => {
     assert.ok(seen.some((p) => p.startsWith(process.cwd())), 'project-local roots must be probed');
   });
 });
+
+describe('doctor: tab count', () => {
+  it('still reports when the relay is down, and never fires the tab check', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => { throw new Error('ECONNREFUSED'); },
+    }));
+    assert.equal(report.ok, false);
+    assert.equal(find(report, 'relay').status, FAIL);
+    assert.notEqual(find(report, 'tabs')?.status, FAIL,
+      'the tab check must not fire, and must not throw, when there is no relay');
+  });
+
+  it('never reaches the tab check on a malformed connected value', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: 'false', activeTargets: 3, attachedTabs: [] }),
+    }));
+    assert.equal(find(report, 'extension').status, FAIL);
+    assert.notEqual(find(report, 'tabs')?.status, FAIL);
+  });
+
+  it('does not claim zero tabs before discovery has run', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 0, attachedTabs: [] }),
+    }));
+    const tabs = find(report, 'tabs');
+    assert.notEqual(tabs?.status, FAIL);
+    assert.match(tabs.detail, /cannot determine|not yet/i);
+  });
+
+  it('never fails the tab check, in any state', async () => {
+    // It cannot connect a CDP client, so it has no evidence of emptiness.
+    for (const status of [
+      { connected: true, activeTargets: 0, attachedTabs: [] },
+      { connected: true, activeTargets: 2, attachedTabs: [{ tabId: 1 }, { tabId: 2 }] },
+    ]) {
+      const report = await runDoctor(healthyDeps({ probeExtensionStatus: async () => status }));
+      assert.notEqual(find(report, 'tabs')?.status, FAIL);
+    }
+  });
+
+  it('reports the count when discovery has run', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 2, attachedTabs: [{ tabId: 1 }, { tabId: 2 }] }),
+    }));
+    assert.match(find(report, 'tabs').detail, /2 tab/);
+  });
+
+  it('reads a self-contradictory status as unknown, not as zero tabs', async () => {
+    // The relay computes activeTargets from the same list, so 3-and-empty
+    // cannot occur; treating it as "discovered, zero tabs" would invent a
+    // NO_TABS that doctor has no evidence for.
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 3, attachedTabs: [] }),
+    }));
+    assert.match(find(report, 'tabs').detail, /cannot determine/i);
+  });
+
+  it('reads a malformed tab entry as unknown', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 1, attachedTabs: [{ tabId: 'abc' }] }),
+    }));
+    assert.match(find(report, 'tabs').detail, /cannot determine/i);
+  });
+});

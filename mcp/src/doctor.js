@@ -127,6 +127,30 @@ export async function runDoctor({
   readSkillText = defaultReadSkillText,
   readRawLock = defaultReadRawLock,
   lockAlive = (lock) => isLockAlive({ lock }),
+  // Returns { discovered, count }. Collapsing "not discovered" and
+  // "discovered, zero tabs" into one value makes the promised no-tabs state
+  // unreachable — the opposite failure from reporting it wrongly. Derived from
+  // the status ALREADY fetched at the top of runDoctor: a second probe throws
+  // in the relay-down state, which is precisely when doctor must still report.
+  deriveTabState = (status) => {
+    if (!Array.isArray(status?.attachedTabs)) return { discovered: false, count: 0 };
+    const tabs = status.attachedTabs;
+    // Integer tabId, not merely present: null, '' and 'abc' all pass a
+    // `!== undefined` check and would classify a malformed status as healthy.
+    const wellFormed = tabs.every((t) => t && typeof t === 'object' && Number.isInteger(t.tabId));
+    const active = status.activeTargets;
+    if (!wellFormed || (active !== undefined && !Number.isInteger(active))) {
+      return { discovered: false, count: 0 }; // malformed => unknown, never healthy-zero
+    }
+    // The relay derives activeTargets from the SAME target list, so
+    // { activeTargets: 3, attachedTabs: [] } is impossible — treat a
+    // disagreement as malformed, not as zero tabs.
+    if (Number.isInteger(active) && active !== tabs.length) return { discovered: false, count: 0 };
+    // Discovery cannot be inferred from a zero count: activeTargets is 0 both
+    // before Target.setAutoAttach and on a genuinely empty browser, so
+    // `discovered` is true only on positive evidence.
+    return { discovered: tabs.length > 0, count: tabs.length };
+  },
   probeSessiondStatus = defaultProbeSessiondStatus,
   removeFile = defaultRemoveFile,
   paths = defaultPaths(),
@@ -148,7 +172,9 @@ export async function runDoctor({
 
   if (!relayUp) {
     checks.push(check('extension', 'Chrome extension', WARN, 'cannot check — relay not reachable'));
-  } else if (relayStatus?.connected) {
+  } else if (relayStatus?.connected === true) {
+    // Strict, matching classifyReadiness: a malformed body such as
+    // { connected: "false" } is truthy and would report a broken relay healthy.
     checks.push(check('extension', 'Chrome extension', OK, 'connected to the relay'));
   } else {
     checks.push(check('extension', 'Chrome extension', FAIL,
@@ -179,6 +205,17 @@ export async function runDoctor({
     checks.push(check('skill', 'BrowserForce skill', FAIL,
       `stale — ${driftedSkills.map((d) => d.path).join(', ')} differ from the shipped guide. `
       + `Agents read the stale copy. Reinstall: \`${SKILL_INSTALL_HINT}\``));
+  }
+
+  // 2c. Tab count. doctor REPORTS it; it never adjudicates emptiness — it
+  // connects no CDP client, so it cannot tell "no tabs" from "discovery has not
+  // run" (activeTargets is 0 in both cases). NO_TABS belongs to the agent path,
+  // where discovery has actually happened. This check is never a FAIL.
+  if (relayUp && relayStatus?.connected === true) {
+    const { discovered, count } = deriveTabState(relayStatus);
+    checks.push(check('tabs', 'Browser tabs', OK, discovered
+      ? `${count} tab(s) attached`
+      : 'cannot determine without a connected agent (run any browserforce command)'));
   }
 
   // 3. Stale cdp-url sidecar: present on disk while the relay is unreachable.

@@ -52,7 +52,7 @@ function fakePage({ url = 'about:blank', title = '' } = {}) {
   return page;
 }
 
-function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
+function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false } = {}) {
   const list = [...pages];
   // Relay target ids, allocated per PAGE (never by list index — every id would
   // shift when a tab closes) and read off the LIVE list, so pages opened during
@@ -100,6 +100,12 @@ function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
     },
     initialPageDiscoveryTimeoutMs: 50,
     initialPageDiscoveryPollMs: 5,
+    // Recording deps, opt-in: without them a snippet-backed verb fails on the
+    // missing-dep check before it ever reaches the runtime's own gates.
+    ...(execDeps ? {
+      buildExecContext: (page) => ({ page }),
+      runCode: async () => ({ ok: true }),
+    } : {}),
   });
   // `opts` is an object, never a bare timeout: Task 12 passes { clientId } and
   // a positional timeout slot would swallow it silently.
@@ -1375,5 +1381,29 @@ describe('tabs refuses subcommands it does not have', () => {
     assert.deepEqual(commandToBody(parseBrowserforceCommand('tabs')),
       { all: false, match: undefined, limit: undefined });
     assert.equal(commandToBody(parseBrowserforceCommand('tabs --all')).all, true);
+  });
+});
+
+describe('an empty browser reports NO_TABS, not "no active page"', () => {
+  it('every inspect verb classifies as NO_TABS with an actionable message', async () => {
+    const { run } = tabRuntimeEnv({ pages: [], execDeps: true });
+    for (const cmd of ['tabs', 'snapshot', 'get url', 'click @e1', 'use t1']) {
+      await assert.rejects(() => run(cmd), (err) => {
+        assert.equal(err.code, 'NO_TABS', `${cmd} must classify as NO_TABS`);
+        assert.match(err.message, /open a tab/i);
+        assert.equal(err.resetHintAllowed, false, 'a missing tab is not a connection failure');
+        return true;
+      });
+    }
+  });
+
+  it('open still works on an empty browser', async () => {
+    const { run } = tabRuntimeEnv({ pages: [], execDeps: true });
+    await assert.doesNotReject(() => run('open https://a.test/'));
+  });
+
+  it('eval is not gated on an empty browser — it is how the escape hatch opens one', async () => {
+    const { run } = tabRuntimeEnv({ pages: [], execDeps: true });
+    await assert.doesNotReject(() => run('eval return typeof context'));
   });
 });

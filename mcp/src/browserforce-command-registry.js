@@ -344,6 +344,8 @@ const TAB_ERROR_SUGGESTIONS = {
   TAB_AMBIGUOUS: 'Use a stable t<N> handle or a more specific query.',
   TAB_NOT_USABLE: 'That tab is closed. Run "tabs" to list open tabs.',
   BAD_TAB_NAME: 'Use an identifier-like name such as docs or api-docs (t<N> is reserved for handles).',
+  // Never a reset hint: a missing tab is not a connection failure.
+  NO_TABS: 'Open a tab in Chrome, then retry.',
 };
 
 function wrapTabStateError(err) {
@@ -421,6 +423,10 @@ function wrapRunCommandError(err) {
   // Timeouts are rendered specially by callers (never with a reset hint) —
   // matched by name because this registry is import-free by design.
   if (err?.name === 'CodeExecutionTimeoutError') return err;
+  // A runtime tab-state error keeps its own code and suggestion. Falling
+  // through to COMMAND_FAILED would turn "Chrome has no tabs" into a generic
+  // "run snapshot and retry" — advice that cannot work.
+  if (TAB_ERROR_SUGGESTIONS[err?.code]) return wrapTabStateError(err);
   const message = String(err?.message || err);
   if (/^Unknown ref\b/i.test(message)) {
     return new BrowserforceCommandError(message, {
@@ -649,7 +655,9 @@ return { title };`;
     const page = await resolveVerbPage({ body, runtime });
     // The user's code IS the snippet — same guarded runCode() boundary as MCP
     // exec / CLI -e. Never eval()/new Function() at the caller.
-    return runCommandGuarded(runtime, { code, timeout, page });
+    // requiresPage: false — eval is the escape hatch, and `context.newPage()`
+    // inside it is a legitimate way to create the first tab in an empty browser.
+    return runCommandGuarded(runtime, { code, timeout, page, requiresPage: false });
   },
 };
 
@@ -669,7 +677,17 @@ export async function executeBrowserforceVerb({ verb, body = {}, runtime, timeou
     });
   }
   const effectiveTimeout = resolveTimeout(timeout ?? body?.timeout);
-  return executor({ body, runtime, timeout: effectiveTimeout });
+  try {
+    return await executor({ body, runtime, timeout: effectiveTimeout });
+  } catch (err) {
+    // Every runtime tab-state error reaches an agent with its code and its
+    // suggestion. Executors that map their own errors return a
+    // BrowserforceCommandError, which wrapTabStateError passes through; the
+    // ones that do not (tabs, and any verb added later) would otherwise fall
+    // to the transport's generic handler as COMMAND_FAILED, losing the code
+    // and, with it, `resetHintAllowed: false`.
+    throw wrapTabStateError(err);
+  }
 }
 
 // ─── Command-string execution (MCP `browserforce` tool + CLI direct verbs) ───

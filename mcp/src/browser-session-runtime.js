@@ -760,8 +760,23 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
   }
 
+  /**
+   * Inspect paths only. openNewPage() is how an empty browser gets its first
+   * tab, so it must never be gated on there being one — and neither must the
+   * raw eval escape hatch, which can legitimately call context.newPage().
+   *
+   * Raised HERE, not in ensureBrowser(): its context block ends in a bare catch
+   * that would swallow this silently.
+   */
+  function assertPagesAvailable() {
+    if (getPages().filter(isUsablePage).length === 0) {
+      throw tabStateError('NO_TABS', 'BrowserForce is connected but Chrome has no tabs. Open a tab and retry.');
+    }
+  }
+
   async function listTabRows() {
     await ensureBrowser();
+    assertPagesAvailable();
     beginOperation();
     try {
       const identified = await listIdentifiedPages();
@@ -801,6 +816,7 @@ export function createBrowserSessionRuntime(deps = {}) {
       throw tabStateError('TAB_NOT_FOUND', 'Empty tab target. Run tabs to list open tabs.');
     }
     await ensureBrowser();
+    assertPagesAvailable();
     beginOperation();
     try {
       const stable = await listIdentifiedPages();
@@ -907,11 +923,16 @@ export function createBrowserSessionRuntime(deps = {}) {
    *
    * Returns runCode()'s raw result.
    */
-  async function runCommand({ code, timeout = 30000, page: pinnedPage = null } = {}) {
+  async function runCommand({ code, timeout = 30000, page: pinnedPage = null, requiresPage = true } = {}) {
     if (typeof buildExecContext !== 'function' || typeof runCode !== 'function') {
       throw new Error('browser session runtime: buildExecContext and runCode deps are required for runCommand');
     }
     await ensureBrowser();
+    // One gate for the whole atomic-verb surface (CLI, sessiond and MCP all
+    // route through here), so a verb added later cannot silently miss it.
+    // Opting out is explicit: only `eval` does, because it can create the
+    // first tab itself.
+    if (requiresPage) assertPagesAvailable();
     beginOperation();
     try {
       const ctx = getContext();
@@ -993,6 +1014,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     setActivePage,
     getActivePage,
     assertValidTabName,
+    assertPagesAvailable,
     setNamedPage,
     getNamedPage,
     renamePageName,
