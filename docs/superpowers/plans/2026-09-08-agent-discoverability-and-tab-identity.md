@@ -65,7 +65,7 @@ The repo ships `skills/browserforce/SKILL.md`. Agents read whatever `npx skills 
 test('doctor fails when a deployed skill has drifted from the shipped one', async () => {
   const { checks } = await runDoctor({
     probeExtensionStatus: async () => ({ connected: true }),
-    readText: (p) => (p.includes('deployed') ? 'stale copy' : 'shipped copy'),
+    readSkillText: (p) => (p.includes('deployed') ? 'stale copy' : 'shipped copy'),
     readRawLock: () => null,
     paths: { ...basePaths, shippedSkillFile: '/repo/shipped/SKILL.md', deployedSkillFiles: ['/home/deployed/SKILL.md'] },
   });
@@ -75,10 +75,20 @@ test('doctor fails when a deployed skill has drifted from the shipped one', asyn
   assert.match(skill.detail, /npx -y skills add ivalsaraj\/browserforce/);
 });
 
+test('leading whitespace drift is a mismatch, not a pass', async () => {
+  const { checks } = await runDoctor({
+    probeExtensionStatus: async () => ({ connected: true }),
+    readSkillText: (p) => (p.includes('deployed') ? '\n same' : 'same'),
+    readRawLock: () => null,
+    paths: { ...basePaths, shippedSkillFile: '/repo/shipped/SKILL.md', deployedSkillFiles: ['/home/deployed/SKILL.md'] },
+  });
+  assert.equal(checks.find((c) => c.id === 'skill').status, 'fail');
+});
+
 test('doctor passes when the deployed skill matches, ignoring trailing whitespace', async () => {
   const { checks } = await runDoctor({
     probeExtensionStatus: async () => ({ connected: true }),
-    readText: (p) => (p.includes('deployed') ? 'same\n\n' : 'same'),
+    readSkillText: (p) => (p.includes('deployed') ? 'same\n\n' : 'same'),
     readRawLock: () => null,
     paths: { ...basePaths, shippedSkillFile: '/repo/shipped/SKILL.md', deployedSkillFiles: ['/home/deployed/SKILL.md'] },
   });
@@ -88,7 +98,7 @@ test('doctor passes when the deployed skill matches, ignoring trailing whitespac
 test('doctor reports no deployed skill without failing', async () => {
   const { checks } = await runDoctor({
     probeExtensionStatus: async () => ({ connected: true }),
-    readText: (p) => (p.includes('deployed') ? null : 'shipped copy'),
+    readSkillText: (p) => (p.includes('deployed') ? null : 'shipped copy'),
     readRawLock: () => null,
     paths: { ...basePaths, shippedSkillFile: '/repo/shipped/SKILL.md', deployedSkillFiles: ['/home/deployed/SKILL.md'] },
   });
@@ -123,6 +133,11 @@ Add above `defaultPaths()`:
 const SKILL_INSTALL_HINT = 'npx -y skills add ivalsaraj/browserforce';
 const SHIPPED_SKILL_FILE = fileURLToPath(new URL('../../skills/browserforce/SKILL.md', import.meta.url));
 
+/** Raw read: only trailing whitespace may differ between shipped and deployed. */
+function defaultReadSkillText(p) {
+  try { return readFileSync(p, 'utf8'); } catch { return null; }
+}
+
 function defaultDeployedSkillFiles() {
   const home = homedir();
   return [
@@ -144,9 +159,12 @@ Insert this check immediately after the `extension` check pushes:
 
 ```js
   // 2b. Deployed skill matches the shipped guide.
-  const shippedSkill = readText(paths.shippedSkillFile);
+  // NOT readText: defaultReadText trims BOTH ends (doctor.js:44), so a deployed
+  // copy with drifted leading whitespace or frontmatter would compare equal.
+  // Only trailing whitespace is tolerated.
+  const shippedSkill = readSkillText(paths.shippedSkillFile);
   const deployed = (paths.deployedSkillFiles || [])
-    .map((p) => ({ path: p, text: readText(p) }))
+    .map((p) => ({ path: p, text: readSkillText(p) }))
     .filter((d) => d.text !== null);
   const drifted = shippedSkill
     ? deployed.filter((d) => d.text.trimEnd() !== shippedSkill.trimEnd())
@@ -378,12 +396,15 @@ test('pairs unique URLs to their target id and title', () => {
   assert.deepEqual(out, [{ targetId: 'T1', title: 'A' }, { targetId: 'T2', title: 'B' }]);
 });
 
-test('pairs duplicate URLs positionally within their group', () => {
+test('duplicate URLs match nothing, even when the counts line up', () => {
+  // Fail closed: 2 pages and 2 targets at one URL could be paired positionally,
+  // but only if both lists share an order, which is unproven. A swap here is a
+  // silent wrong-tab action; renumbering is merely visible.
   const out = matchPagesToTargets(
     ['about:blank', 'about:blank'],
     [{ id: 'T1', url: 'about:blank', title: 'first' }, { id: 'T2', url: 'about:blank', title: 'second' }],
   );
-  assert.deepEqual(out, [{ targetId: 'T1', title: 'first' }, { targetId: 'T2', title: 'second' }]);
+  assert.deepEqual(out, [{ targetId: null, title: '' }, { targetId: null, title: '' }]);
 });
 
 test('a page with no matching target yields a null targetId rather than a guess', () => {
@@ -391,9 +412,7 @@ test('a page with no matching target yields a null targetId rather than a guess'
   assert.deepEqual(out, [{ targetId: null, title: '' }]);
 });
 
-test('an INCOMPLETE duplicate group matches nothing — never a partial guess', () => {
-  // 2 pages, 1 target at the same URL: the two lists disagree, so positional
-  // pairing could bind a page to the wrong tab. Refuse the whole group.
+test('an incomplete duplicate group also matches nothing', () => {
   const out = matchPagesToTargets(
     ['about:blank', 'about:blank'],
     [{ id: 'T1', url: 'about:blank', title: 'only' }],
@@ -401,7 +420,7 @@ test('an INCOMPLETE duplicate group matches nothing — never a partial guess', 
   assert.deepEqual(out, [{ targetId: null, title: '' }, { targetId: null, title: '' }]);
 });
 
-test('a unique URL still matches even when another group is incomplete', () => {
+test('a unique URL still matches even when another URL is duplicated', () => {
   const out = matchPagesToTargets(
     ['about:blank', 'about:blank', 'https://a.test/'],
     [{ id: 'T1', url: 'about:blank', title: 'x' }, { id: 'T9', url: 'https://a.test/', title: 'A' }],
@@ -471,16 +490,18 @@ Expected: FAIL — `Cannot find module '../src/tab-identity.js'`
 /**
  * Pair pages with relay targets, index-aligned to `pageUrls`.
  *
- * A page is only ever paired with a target carrying its EXACT URL, and only
- * when that URL's group is COMPLETE — the same number of pages as targets.
- * Within a complete group the k-th page is the k-th target, because both lists
- * are insertion-ordered subsets of the same relay target stream.
+ * A URL identifies a tab only when it is UNIQUE on both sides — exactly one
+ * page and exactly one target carry it. Everything else matches nothing.
  *
- * An incomplete group (a tab opened or closed between the two reads, or a URL
- * that went stale) matches NOTHING rather than pairing what it can. Partial
- * positional pairing is how two tabs showing the same page would silently swap
- * handles, and a wrong-tab action is the exact failure this module exists to
- * prevent. An unmatched page yields `targetId: null`; the caller falls back to
+ * No positional tie-breaking. Pairing the k-th duplicate page with the k-th
+ * duplicate target would rely on ctx.pages() and the relay target list sharing
+ * an insertion order, which is plausible but unproven; if it is ever false, two
+ * tabs showing the same page swap handles with no error, which is precisely the
+ * wrong-tab action this module exists to prevent. Duplicate-URL tabs therefore
+ * fall back to per-connection identity and renumber across a reconnect —
+ * visible, honest degradation instead of a silent mis-bind.
+ *
+ * An unmatched page yields `targetId: null`; the caller falls back to
  * per-connection identity, which is also what a relay-less managed backend gets.
  */
 export function matchPagesToTargets(pageUrls, targets) {
@@ -508,14 +529,17 @@ export function matchPagesToTargets(pageUrls, targets) {
   const out = urls.map(() => ({ targetId: null, title: '' }));
   for (const [url, indices] of pageIndicesByUrl) {
     const group = targetsByUrl.get(url);
-    if (!group || group.length !== indices.length) continue; // incomplete — refuse
-    indices.forEach((pageIndex, k) => {
-      const target = group[k];
-      out[pageIndex] = {
-        targetId: target.id,
-        title: typeof target.title === 'string' ? target.title : '',
-      };
-    });
+    // FAIL CLOSED on any duplicate. Pairing the k-th page with the k-th target
+    // assumes ctx.pages() and the relay target list share an order; that is
+    // plausible but unproven, and if it is ever false two tabs showing the same
+    // page swap handles silently — the exact wrong-tab action this module
+    // exists to prevent. Only a 1:1 URL identifies a tab.
+    if (!group || group.length !== 1 || indices.length !== 1) continue;
+    const target = group[0];
+    out[indices[0]] = {
+      targetId: target.id,
+      title: typeof target.title === 'string' ? target.title : '',
+    };
   }
   return out;
 }
@@ -633,7 +657,7 @@ Expected: PASS. Then `pnpm test:mcp` — same-origin `fetch` from Node ignores C
 
 - [ ] **Step 5: Document**
 
-Add to `AGENTS.md` under **Security Rules**:
+`README.md:1079` still describes the old wildcard behaviour and would leave a false security contract in the docs — rewrite it to the allowlist. Then add to `AGENTS.md` under **Security Rules**:
 
 ```markdown
 - Wildcard CORS is an ALLOWLIST (`WILDCARD_CORS_PATHS`), not a denylist. Only
@@ -648,7 +672,7 @@ Add to `AGENTS.md` under **Security Rules**:
 - [ ] **Step 6: Commit**
 
 ```bash
-git add relay/src/index.js relay/test/relay-server.test.js AGENTS.md
+git add relay/src/index.js relay/test/relay-server.test.js AGENTS.md README.md
 git commit -m "fix(relay): make wildcard CORS an allowlist so sensitive routes are denied by default\n\n/json, /json/list and /json/version all embed the CDP auth token in\nwebSocketDebuggerUrl and were wildcard-CORS readable by any page."
 ```
 
@@ -776,6 +800,24 @@ test('a transient relay failure keeps identity instead of renumbering', async ()
   const during = await runtime.listTabRows();
   assert.deepEqual(during.map((r) => r.handle), before.map((r) => r.handle));
   assert.equal(during[0].targetId, 'T1', 'a known page keeps its target id when the fetch fails');
+});
+```
+
+```js
+// relay/test/relay-server.test.js — the relay half. The predicate test below
+// only covers the extension's decision to SEND; this covers the relay applying
+// it, which is where the matching truthiness bug lives (:1184-1185).
+test('an emptied title is applied, not ignored', async () => {
+  const relay = new RelayServer(0);
+  await relay.start({ writeCdpUrl: false });
+  try {
+    const ext = await connectMockExtension(relay.port);
+    await seedTarget(ext, { tabId: 7, url: 'https://a.test/', title: 'Before' });
+    ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 7, title: '' } }));
+    await sleep(100);
+    const [entry] = await httpGetJson(`http://127.0.0.1:${relay.port}/json/list`);
+    assert.equal(entry.title, '', 'a cleared title must not leave the old one cached');
+  } finally { relay.stop(); }
 });
 ```
 
@@ -1027,6 +1069,23 @@ test('a handle names the same tab after an idle reconnect replaces every Page ob
   assert.equal(after[0].handle, 't1');
 });
 
+test('a fallback handle is promoted, not replaced, when the relay recovers', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  let fail = true;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: async (...a) => (fail ? Promise.reject(new Error('down')) : makeRelayFetch(targets)(...a)),
+  });
+  const first = (await runtime.listTabRows())[0].handle;   // fallback handle
+  fail = false;
+  const second = (await runtime.listTabRows())[0];
+  assert.equal(second.handle, first, 'the handle already handed out must not change');
+  assert.equal(second.targetId, 'T1');
+});
+
 test('handles still work per-connection when no relay target is available', async () => {
   const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/', title: async () => 'A' }];
   const runtime = createBrowserSessionRuntime({
@@ -1087,7 +1146,37 @@ Replace `getStablePageHandle`:
   }
 ```
 
-In `reset()` (`:734`), add `handlesByTargetId.clear();` beside the existing `stableHandles = new WeakMap();`.
+In `reset()` (`:734`), clear **every** identity cache, not just the handle map. Leaving any of them means a post-reset fetch failure applies stale identity or titles to a brand-new page graph:
+
+```js
+    stableHandles = new WeakMap();
+    handlesByTargetId.clear();
+    targetIdByPage = new WeakMap();     // declare with `let`, not `const`
+    activePageByClient.clear();         // Task 12
+    lastRelayTargets = null;
+    relayListingAuthoritative = false;
+    nextStableHandleNumber = 1;
+```
+
+```js
+test('reset drops the cached relay snapshot, so a later failure cannot reuse it', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/', title: async () => 'live' }];
+  let fail = false;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: async (...a) => (fail ? Promise.reject(new Error('down')) : makeRelayFetch(targets)(...a)),
+  });
+  await runtime.listTabRows();
+  await runtime.reset();
+  fail = true;
+  const [row] = await runtime.listTabRows();
+  assert.equal(row.targetId, null, 'a reset session must not resurrect the pre-reset target list');
+  assert.equal(row.handle, 't1', 'numbering restarts');
+});
+```
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1250,6 +1339,28 @@ test('a name is dropped only when an authoritative listing no longer has its tar
   assert.deepEqual(runtime.listPageNames().map((n) => n.name), []);
 });
 
+test('a name survives when its tab is present but unmatched', async () => {
+  // Two tabs share a URL, so the matcher fails closed and neither is
+  // identified — but both are in /json/list, so neither name is gone.
+  let targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: async () => ({ ok: true, json: async () => targets }),
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+
+  // Same tab, now duplicated -> matcher fails closed, target still present.
+  targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://a.test/', title: 'A2' }];
+  pages.push({ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' });
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'unmatched is not the same as gone');
+});
+
 test('a failed relay fetch never deletes a name', async () => {
   const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
   const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
@@ -1366,11 +1477,18 @@ Pruning and re-binding:
    */
   function rebindNamedPages(identified) {
     const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
+    // Existence comes from the RAW target list, never from `identified`. A tab
+    // can be present in /json/list yet unmatched here — its URL changed, or it
+    // shares a URL with another tab so the matcher failed closed. Treating
+    // "unmatched" as "gone" deletes a name for a tab that is plainly still open.
+    const liveTargetIds = new Set(
+      (lastRelayTargets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
+    );
     for (const [name, entry] of namedPages) {
       if (!entry.targetId) continue;
       const page = byTargetId.get(entry.targetId);
-      if (page) entry.page = page;
-      else if (relayListingAuthoritative) namedPages.delete(name);
+      if (page) { entry.page = page; continue; }
+      if (relayListingAuthoritative && !liveTargetIds.has(entry.targetId)) namedPages.delete(name);
     }
     pruneNamedPages();
   }
@@ -1895,7 +2013,7 @@ In `mcp/src/startup.js:78-93`, wrap **both** `ensureRelay()` (`:78`) and `getExt
 
 Not inside `ensureBrowser()`. Its context block ends in a bare `catch { /* context not ready yet */ }` (`mcp/src/browser-session-runtime.js:288-299`) that swallows everything thrown after `waitForInitialPageDiscovery` — a `NO_TABS` thrown there vanishes silently. Moving it outside that catch is worse: `openNewPage()` also calls `ensureBrowser()`, and an empty browser is exactly when opening the first tab must succeed.
 
-So raise it at the **inspect** entry points, not the connect path. `listTabRows()` and `resolveTabTarget()` know the real page count and are only reached when the caller wants an existing tab:
+So raise it at the **inspect** entry points, not the connect path. But `tabs` and `use` are not the only ones: `snapshot`, `get`, `click`, `fill`, `press`, `wait` and `hover` without `--tab` never call `resolveTabTarget` — they go straight to `runCommand()` and fail with a generic "No active page". Gate every inspect path, and shape the code once in `runCommand()` so all of them report the same fix:
 
 ```js
   // Only inspect paths care: openNewPage() is how an empty browser gets its
@@ -1907,17 +2025,60 @@ So raise it at the **inspect** entry points, not the connect path. `listTabRows(
   }
 ```
 
+Call it from `listTabRows()`, `resolveTabTarget()`, and at the top of `runCommand()` for every verb except `open` — `open` is how an empty browser gets its first tab. A single check in `runCommand()` covers the whole atomic-verb surface (CLI, sessiond and MCP all route through it), so no verb can be added later that silently misses the gate.
+
+```js
+test('every inspect verb reports NO_TABS, not "no active page"', async () => {
+  const { run } = tabRuntimeEnv({ pages: [] });
+  for (const cmd of ['tabs', 'snapshot', 'get url', 'click @e1', 'use t1']) {
+    await assert.rejects(() => run(cmd), (err) => {
+      assert.equal(err.code, 'NO_TABS', `${cmd} must classify as NO_TABS`);
+      assert.match(err.message, /open a tab/i);
+      assert.equal(err.resetHintAllowed, false, 'a missing tab is not a connection failure');
+      return true;
+    });
+  }
+});
+
+test('open still works on an empty browser', async () => {
+  const { run } = tabRuntimeEnv({ pages: [] });
+  await assert.doesNotReject(() => run('open https://a.test/'));
+});
+```
+
 Propagation is already solved and needs no new import: `tabStateError` (`:118`) attaches a stable `code`, and the registry maps runtime codes to agent-facing `BrowserforceCommandError` suggestions — the documented contract in `AGENTS.md`. Add `NO_TABS` to that map with `resetHintAllowed: false`; a missing tab is not a connection failure and must never draw a reset hint.
 
 - [ ] **Step 6: Give doctor a page-count probe**
 
 `runDoctor` cannot currently tell "connected, zero tabs" from "healthy" — it never asks for a page list, so the four-state live proof in the next step is impossible and a zero-tab user gets a clean bill of health. Add an injectable probe alongside `probeExtensionStatus`:
 
+A bare `/json/list` read is wrong here: the relay populates `targets` only after a CDP client sends `Target.setAutoAttach`, and standalone `browserforce doctor` never connects one — measured on a healthy 72-tab browser, `/extension/status` reported `activeTargets: 0`. A `/json/list` probe would therefore report `NO_TABS` on a perfectly good session, which is the same bug this task removes elsewhere.
+
+Use the extension-backed count, and report **unknown** rather than guessing when discovery has not happened:
+
 ```js
-  probePageCount = async () => (await (await fetch(`${relayHttpUrl}/json/list`)).json()).length,
+  // Returns a number, or null when nothing has triggered target discovery yet.
+  // null => report "cannot determine", never "no tabs".
+  probePageCount = async () => {
+    const status = await probeExtensionStatus();
+    if (!Array.isArray(status?.attachedTabs)) return null;
+    return status.attachedTabs.length > 0 ? status.attachedTabs.length : null;
+  },
 ```
 
-and feed it into the same classifier so `doctor` and the agent-facing error agree.
+Feed it into the same classifier so `doctor` and the agent-facing error agree, and keep every doctor test on the injected probe — the existing fixtures must never reach the real network.
+
+```js
+test('doctor does not claim zero tabs before discovery has run', async () => {
+  const { checks } = await runDoctor({
+    probeExtensionStatus: async () => ({ connected: true, attachedTabs: [] }),
+    readRawLock: () => null, paths: basePaths,
+  });
+  const tabs = checks.find((c) => c.id === 'tabs');
+  assert.notEqual(tabs?.status, 'fail');
+  assert.match(tabs.detail, /cannot determine|not yet/i);
+});
+```
 
 - [ ] **Step 7: Run to verify it passes**
 
@@ -2159,6 +2320,22 @@ test('a client falls back to the shared tab before it picks one', async () => {
     'a subagent inherits the parent tab until it chooses its own — that is the point of sharing');
 });
 
+test('a client slot rebinds across a reconnect instead of falling back', async () => {
+  // The regression that matters: a Page-keyed slot dies on reconnect and the
+  // client silently lands on the SHARED page — another agent's tab.
+  const { runtime, pages, __fireDisconnect } = tabRuntimeEnv({
+    pages: [fakePage({ url: 'https://a.test/' }), fakePage({ url: 'https://b.test/' })],
+  });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[1], { clientId: 'agent-2', targetId: rows[1].targetId });
+  runtime.setActivePage(pages[0]);                       // shared slot = tab A
+  __fireDisconnect();
+  const after = await runtime.listTabRows();
+  const own = runtime.getActivePage({ clientId: 'agent-2' });
+  assert.equal(own?.url(), 'https://b.test/', 'agent-2 must still be on its own tab');
+  assert.notEqual(own, runtime.getActivePage(), 'and must not have fallen back to the shared tab');
+});
+
 test('a closed page clears only its own client slot', async () => {
   const { runtime, pages } = tabRuntimeEnv({
     pages: [fakePage({ url: 'https://a.test/' }), fakePage({ url: 'https://b.test/' })],
@@ -2184,29 +2361,66 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
   // runs `use`, and agent-1's next unpinned command acts on agent-2's tab.
   // Identified clients get their own slot; unidentified ones share, so every
   // existing sequential caller is unaffected.
-  const activePageByClient = new Map(); // clientId → page
+  // clientId → { targetId, page }. Storing the PAGE alone would repeat the bug
+  // this whole arc fixes: reconnect replaces every Page object, the slot would
+  // look dead, and the client would silently fall back to the SHARED page —
+  // i.e. onto another agent's tab. targetId is what survives, so the slot
+  // rebinds instead.
+  const activePageByClient = new Map();
 
-  function setActivePage(page, { clientId = null } = {}) {
-    if (clientId) { activePageByClient.set(clientId, page); return; }
+  function setActivePage(page, { clientId = null, targetId = null } = {}) {
+    if (clientId) { activePageByClient.set(clientId, { targetId, page }); return; }
     userState.page = page;
   }
 
   function getActivePage({ clientId = null } = {}) {
-    const own = clientId ? activePageByClient.get(clientId) : null;
-    // Falling back to the shared page is deliberate: a fresh subagent should
-    // inherit the parent's tab, which is what makes delegation worth doing.
-    const page = own ?? userState.page ?? null;
-    if (page && !isUsablePage(page)) {
-      if (own) activePageByClient.delete(clientId); else userState.page = null;
-      return null;
+    if (clientId) {
+      const slot = activePageByClient.get(clientId);
+      if (slot) {
+        if (isUsablePage(slot.page)) return slot.page;
+        // Stale page: rebind by target id before giving up.
+        const rebound = slot.targetId ? pageForTargetId(slot.targetId) : null;
+        if (rebound) { slot.page = rebound; return rebound; }
+        // Fail closed. Falling through to the shared page here would hand this
+        // client another agent's tab, which is exactly what it opted out of.
+        activePageByClient.delete(clientId);
+        return null;
+      }
+      // No slot yet: inherit the shared page. That is what makes a delegated
+      // subagent useful before it picks its own tab.
     }
+    const page = userState.page ?? null;
+    if (page && !isUsablePage(page)) { userState.page = null; return null; }
     return page;
   }
 ```
 
+`pageForTargetId(targetId)` is a small lookup over the last `listIdentifiedPages()` result; cache that result alongside `lastRelayTargets`.
+
 `resolveActivePage(ctx, { clientId } = {})` threads the same option through. Every existing caller passes nothing and is unchanged.
 
-In `cli/sessiond.js`, read `req.headers['x-browserforce-client']` once per request and pass `{ clientId }` into `runCommand`; `--tab` still wins for a single run.
+Threading the id is most of the work, and none of it is optional — an id that stops halfway leaves the stomp in place:
+
+| Layer | Change |
+|---|---|
+| `bin.js` | read `process.env.BROWSERFORCE_CLIENT_ID`; pass to the session client |
+| `cli/session-client.js` | send it as `X-BrowserForce-Client` on every state request |
+| `cli/sessiond.js` | read `req.headers['x-browserforce-client']`, sanitize (`/^[A-Za-z0-9._-]{1,64}$/`, else ignore), pass `{ clientId }` into `runCommand` |
+| `mcp/src/browserforce-command-registry.js` | carry `clientId` through `executeBrowserforceVerb` / `executeBrowserforceCommand` into every `runtime.*` active-page call |
+| `mcp/src/browser-session-runtime.js` | `runCommand({ clientId })` → `buildExecContext` resolves `page` via `getActivePage({ clientId })`, not raw `state.page` |
+
+`--tab` still wins for a single run. Add the end-to-end test at the CLI layer, since that is where a broken link shows up:
+
+```js
+test('two CLI clients keep separate active tabs against one daemon', async () => {
+  const a = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-a' };
+  const b = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-b' };
+  await exec('node', ['bin.js', 'use', 't1'], { cwd: ROOT, env: a });
+  await exec('node', ['bin.js', 'use', 't2'], { cwd: ROOT, env: b });
+  const { stdout } = await exec('node', ['bin.js', 'get', 'url'], { cwd: ROOT, env: a });
+  assert.match(stdout, /fake\.test/, 'agent-a must still be on the tab it selected');
+});
+```
 
 - [ ] **Step 4: Run to verify they pass**
 
