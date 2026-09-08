@@ -7,15 +7,32 @@
 import { chromium } from 'playwright-core';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, globSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
 const exec = promisify(execFile);
 const EXT = new URL('../extension', import.meta.url).pathname;
 const ROOT = new URL('..', import.meta.url).pathname;
-const CHROME = process.env.BF_VERIFY_CHROME
-  || '/private/tmp/chrome/mac_arm-153.0.8010.36/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
+// Resolved, never a pinned developer-local path: the documented install writes
+// a version-stamped directory, so a hardcoded one only works on the machine
+// that produced it.
+function resolveChrome() {
+  if (process.env.BF_VERIFY_CHROME) return process.env.BF_VERIFY_CHROME;
+  for (const root of [join(process.cwd(), 'chrome'), '/private/tmp/chrome', join(tmpdir(), 'chrome')]) {
+    let builds;
+    try { builds = readdirSync(root).sort().reverse(); } catch { continue; }
+    for (const build of builds) {
+      const hit = globSync(join(root, build, '*', 'Google Chrome for Testing.app',
+        'Contents', 'MacOS', 'Google Chrome for Testing'))[0]
+        ?? globSync(join(root, build, '*', 'chrome-linux64', 'chrome'))[0];
+      if (hit) return hit;
+    }
+  }
+  throw new Error('Chrome for Testing not found. Install it with '
+    + '`npx -y @puppeteer/browsers install chrome@stable`, then set BF_VERIFY_CHROME to the binary it prints.');
+}
+const CHROME = resolveChrome();
 const RELAY = 'http://127.0.0.1:19222';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const status = async () => (await fetch(`${RELAY}/extension/status`)).json();
@@ -26,6 +43,14 @@ let failed = false;
 const check = (ok, msg) => { console.log(`${ok ? 'PASS' : 'FAIL'}: ${msg}`); if (!ok) failed = true; };
 
 try {
+  // The relay has a SINGLE extension slot. If one is already connected, the
+  // extension this harness launches gets a 409 and every assertion below would
+  // silently describe the OTHER browser — verifying the wrong thing, which is
+  // worse than not verifying at all.
+  if ((await status().catch(() => ({}))).connected) {
+    throw new Error('another extension already holds the relay extension slot — '
+      + 'disconnect it (or point this harness at an isolated relay) so the launched one can connect');
+  }
   ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'bf-verify-')), {
     executablePath: CHROME,
     headless: false,
@@ -92,15 +117,24 @@ try {
   // 5. THE defect this whole arc exists for: handles and titles survive the
   //    browser idle disconnect. Run the repro harness against this live session.
   console.log('=== handle durability across the idle reconnect ===');
+  // Release the slot first: under BF_CLIENT_MODE=single-active a second /cdp
+  // client is refused with 409 indefinitely, so the repro could never run.
+  await agent.close();
+  await sleep(500);
+  let reproOut = '';
   try {
     const { stdout } = await exec('node', ['scripts/repro-tab-handles.mjs'], { cwd: ROOT });
-    console.log(stdout.trim().split('\n').map((l) => `  ${l}`).join('\n'));
-    check(true, 'handles and titles survive the idle reconnect');
+    reproOut = stdout;
   } catch (err) {
-    console.log((err.stdout || '').trim().split('\n').map((l) => `  ${l}`).join('\n'));
-    console.log((err.stderr || '').trim().slice(0, 400));
-    check(false, 'handles and titles survive the idle reconnect');
+    reproOut = `${err.stdout || ''}${err.stderr || ''}`;
+    failed = true;
   }
+  console.log(reproOut.trim().split('\n').map((l) => `  ${l}`).join('\n'));
+  // The repro exits 0 on SKIP. A SKIP is not a pass — treating a zero exit as
+  // success would report ALL PASSED having verified nothing.
+  check(!/\bSKIP\b/.test(reproOut) && /titled=/.test(reproOut),
+    'the reconnect proof actually ran (not skipped)');
+  check(!failed, 'handles and titles survive the idle reconnect');
 } catch (err) {
   console.log(`FAIL: ${err.message}`);
   failed = true;
