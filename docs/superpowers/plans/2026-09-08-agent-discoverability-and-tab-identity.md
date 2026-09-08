@@ -453,6 +453,14 @@ test('ignores targets with no id and tolerates a missing title', () => {
   assert.deepEqual(matchPagesToTargets(['u'], [{ id: 'T1', url: 'u' }]), [{ targetId: 'T1', title: '' }]);
 });
 
+test('a malformed target makes its whole URL group ambiguous', () => {
+  const out = matchPagesToTargets(['https://a.test/'], [
+    { id: 'T1', url: 'https://a.test/', title: 'good' },
+    { url: 'https://a.test/', title: 'no id' },
+  ]);
+  assert.deepEqual(out, [{ targetId: null, title: '' }]);
+});
+
 test('malformed targets and unreadable page URLs never match', () => {
   // A page whose url() threw is recorded as ''. Coercing a target's missing URL
   // to '' too would pair them and hand a real handle to an unrelated target.
@@ -526,12 +534,17 @@ export function matchPagesToTargets(pageUrls, targets) {
   // Reject malformed entries instead of coercing them to ''. Coercion let a
   // target with a missing URL collide with a page whose url() read threw (also
   // ''), handing a real handle to an unrelated target — a wrong-tab action.
+  // A malformed entry POISONS its URL group rather than being dropped. Dropping
+  // it left a valid same-URL sibling looking unique, so a page could take a
+  // handle for a tab that may not be the one it is showing.
   const targetsByUrl = new Map();
+  const poisonedUrls = new Set();
   for (const target of Array.isArray(targets) ? targets : []) {
-    if (typeof target?.id !== 'string' || !target.id) continue;
-    if (typeof target.url !== 'string' || !target.url) continue;
-    if (!targetsByUrl.has(target.url)) targetsByUrl.set(target.url, []);
-    targetsByUrl.get(target.url).push(target);
+    const url = typeof target?.url === 'string' && target.url ? target.url : null;
+    const id = typeof target?.id === 'string' && target.id ? target.id : null;
+    if (!url || !id) { if (url) poisonedUrls.add(url); continue; }
+    if (!targetsByUrl.has(url)) targetsByUrl.set(url, []);
+    targetsByUrl.get(url).push(target);
   }
 
   // An empty page URL means the read failed; it can never identify a tab.
@@ -544,6 +557,7 @@ export function matchPagesToTargets(pageUrls, targets) {
 
   const out = urls.map(() => ({ targetId: null, title: '' }));
   for (const [url, indices] of pageIndicesByUrl) {
+    if (poisonedUrls.has(url)) continue;   // ambiguous: a malformed sibling exists
     const group = targetsByUrl.get(url);
     // FAIL CLOSED on any duplicate. Pairing the k-th page with the k-th target
     // assumes ctx.pages() and the relay target list share an order; that is
@@ -856,19 +870,23 @@ test('an emptied title is applied, not ignored', async () => {
     await seedOneTarget(ext, { tabId: 7, url: 'https://a.test/', title: 'Before' });
     ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 7, title: '' } }));
     await sleep(100);
-    const [entry] = JSON.parse(await httpGet(`http://127.0.0.1:${relay.port}/json/list`));
+    // httpGet returns { status, body } (relay-server.test.js:20-30).
+    const { body } = await httpGet(`http://127.0.0.1:${relay.port}/json/list`);
+    const [entry] = JSON.parse(body);
     assert.equal(entry.title, '', 'a cleared title must not leave the old one cached');
     ext.close();
   } finally { relay.stop(); }
 });
 ```
 
+`seedOneTarget(ext, tab)` is a new local helper for this file: await the relay's `listTabs` command, reply `{ tabs: [tab] }` so exactly one target registers, then resolve. Define it beside `connectWs` (`:135`); read the expected reply shape from `relay/src/index.js:1447-1520` when writing it.
+
 ```js
 // test/agent/extension-tab-updates.test.js — the extension gate, tested the way
 // extension logic is tested here: on the pure predicate, not via Chrome APIs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldReportTabUpdate } from '../../extension/tab-update-policy.js';
+import { shouldReportTabUpdate, shouldReportTabRemoval } from '../../extension/tab-update-policy.js';
 
 test('reports url and title changes for tabs that are not attached', () => {
   assert.equal(shouldReportTabUpdate({ isAttached: false, changeInfo: { url: 'https://a.test/' } }), true);
@@ -974,6 +992,20 @@ Then the runtime. Add beside `listStablePages()`:
   let lastRelayTargets = null;
   let targetIdByPage = new WeakMap();
 
+  // Connection generation and the identity cache live HERE, not in Task 12,
+  // because Task 7 (names) needs both and runs first; Task 12 only consumes
+  // them. `connectionGeneration` increments in the `disconnected` handler
+  // (:281-286) — a Page from a previous generation is orphaned, not closed, so
+  // isClosed() alone can never decide whether a stored page is still live.
+  let connectionGeneration = 0;
+  let identityCache = { generation: -1, rows: [] };
+
+  /** Live Page for a relay target id, from the last identity refresh. */
+  function pageForTargetId(targetId) {
+    if (!targetId || identityCache.generation !== connectionGeneration) return null;
+    return identityCache.rows.find((r) => r.targetId === targetId)?.page ?? null;
+  }
+
   /**
    * Relay target list: id, url and title for EVERY tab, with no debugger attach.
    *
@@ -985,9 +1017,14 @@ Then the runtime. Add beside `listStablePages()`:
    * so a null backend means "use the relay".
    */
   async function fetchRelayTargets({ timeoutMs = 1500 } = {}) {
-    if (!relayBackendActive()) return [];
+    // Returns { targets, authoritative } and NEVER sets a shared flag. A
+    // module-level authority flag read after an await races with the parallel
+    // clients Task 12 deliberately enables: a concurrent listing could read
+    // another call's flag, treat a stale cached snapshot as authoritative, and
+    // assign a closed target to a fresh page — undoing the round-6 fix.
+    if (!relayBackendActive()) return { targets: [], authoritative: false };
     const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
-    if (!relayHttpUrl) return [];
+    if (!relayHttpUrl) return { targets: [], authoritative: false };
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -996,12 +1033,12 @@ Then the runtime. Add beside `listStablePages()`:
           const body = await response.json();
           if (Array.isArray(body)) {
             lastRelayTargets = body;
-            return body;
+            return { targets: body, authoritative: true };
           }
         }
       } catch { /* retry once, then fall through to the last good snapshot */ }
     }
-    return lastRelayTargets ?? [];
+    return { targets: lastRelayTargets ?? [], authoritative: false };
   }
 
   /**
@@ -1014,9 +1051,11 @@ Then the runtime. Add beside `listStablePages()`:
    * bounded read stays as the fallback for backends with no relay.
    */
   async function listIdentifiedPages() {
+    await ensureBrowser();   // callers may run before any connection exists
     const pages = getPages().filter((page) => isUsablePage(page));
     const urls = pages.map((page) => { try { return page.url() || ''; } catch { return ''; } });
-    const identities = matchPagesToTargets(urls, await fetchRelayTargets());
+    const { targets, authoritative } = await fetchRelayTargets();
+    const identities = matchPagesToTargets(urls, targets);
     return Promise.all(pages.map(async (page, i) => {
       // A page already identified in this connection keeps its target id even if
       // this round's match failed (stale URL, incomplete duplicate group, failed
@@ -1026,8 +1065,8 @@ Then the runtime. Add beside `listStablePages()`:
       // Rematching a fresh Page against cached targets lets a replacement tab
       // at the same URL inherit the closed tab's target id — and its handle.
       const knownId = targetIdByPage.get(page) ?? null;
-      const targetId = (relayListingAuthoritative ? matched.targetId : null) ?? knownId;
-      if (relayListingAuthoritative && matched.targetId) targetIdByPage.set(page, matched.targetId);
+      const targetId = (authoritative ? matched.targetId : null) ?? knownId;
+      if (authoritative && matched.targetId) targetIdByPage.set(page, matched.targetId);
       return {
         page,
         url: urls[i],
@@ -1216,7 +1255,7 @@ In `reset()` (`:734`), clear **every** identity cache, not just the handle map. 
     handlesByTargetId.clear();
     targetIdByPage = new WeakMap();
     lastRelayTargets = null;
-    relayListingAuthoritative = false;
+    identityCache = { generation: -1, rows: [] };
     nextStableHandleNumber = 1;
 ```
 
@@ -1484,16 +1523,16 @@ State (`:114`):
 Make the relay listing's authority explicit — `byTargetId.size > 0` cannot tell a successful empty listing from a failed fetch, and both delete-every-name and delete-nothing are wrong answers to the other case. Add beside `lastRelayTargets`:
 
 ```js
-  let relayListingAuthoritative = false;
 ```
 
-Set it `true` immediately before `lastRelayTargets = body` in `fetchRelayTargets`, and `false` on the fall-through to the cached snapshot and on the early returns (non-real backend, no relay URL).
+`fetchRelayTargets` returns it per call; `listIdentifiedPages` passes it to `rebindNamedPages` with the rows, then caches `{ generation: connectionGeneration, rows }` in `identityCache`. Nothing stores authority at module scope.
 
 Accessors — the options object carries identity:
 
 ```js
   function setNamedPage(name, page, { replace = false, targetId = null } = {}) {
     const key = assertValidTabName(name);
+    pruneNamedPages();   // kept: a closed no-target page must not block its name
     const existing = namedPages.get(key);
     if (existing && !replace) {
       // TAB_NAME_IN_USE, not a new code: TAB_ERROR_SUGGESTIONS
@@ -1552,7 +1591,7 @@ Pruning and re-binding:
    * and does not contain its target — an unreachable relay is not evidence that
    * a tab closed, and deleting on a failed fetch silently loses user names.
    */
-  function rebindNamedPages(identified) {
+  function rebindNamedPages(identified, authoritative) {
     const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
     // Existence comes from the RAW target list, never from `identified`. A tab
     // can be present in /json/list yet unmatched here — its URL changed, or it
@@ -1565,19 +1604,19 @@ Pruning and re-binding:
       if (!entry.targetId) continue;
       const page = byTargetId.get(entry.targetId);
       if (page) { entry.page = page; entry.gen = connectionGeneration; continue; }
-      if (relayListingAuthoritative && !liveTargetIds.has(entry.targetId)) namedPages.delete(name);
+      if (authoritative && !liveTargetIds.has(entry.targetId)) namedPages.delete(name);
     }
     pruneNamedPages();
   }
 ```
 
-Call `rebindNamedPages(identified)` inside `listIdentifiedPages()` on the resolved array before returning it, and pass the id through in `listTabRows()`: `name: nameForPage(page, targetId)`.
+Call `rebindNamedPages(identified, authoritative)` inside `listIdentifiedPages()` on the resolved array before returning it, and pass the id through in `listTabRows()`: `name: nameForPage(page, targetId)`.
 
 - [ ] **Step 4: Refresh identity around name lookups AND after page creation**
 
 Two distinct problems in `open --as` (`mcp/src/browserforce-command-registry.js:445-489`), and they need opposite fixes:
 
-1. **The conflict check runs too early against stale entries.** Order today is: validate name (`:465`) → `getNamedPage(name)` conflict check (`:466-479`) → `openNewPage()` (`:482`) → `setNamedPage` (`:483`) → `activeTabRow()` (`:484`, the only listing). Straight after a reconnect the conflict check consults un-rebound entries. Fix: `await runtime.listIdentifiedPages()` **before** the conflict check.
+1. **The conflict check runs too early against stale entries.** Order today is: validate name (`:465`) → `getNamedPage(name)` conflict check (`:466-479`) → `openNewPage()` (`:482`) → `setNamedPage` (`:483`) → `activeTabRow()` (`:484`, the only listing). Straight after a reconnect the conflict check consults un-rebound entries. Fix: `await runtime.listIdentifiedPages()` **before** the conflict check. It calls `ensureBrowser()` first (Task 5), so a first named `open` on a fresh runtime connects instead of failing with "Not connected".
 2. **A brand-new page has no target id yet.** `openNewPage()` returns a Playwright `Page` and nothing else (`mcp/src/browser-session-runtime.js:646-672`), so at `:483` there is no id to store and the name would be page-keyed — lost on the next reconnect, which is the whole defect. Fix: list **after** creation to learn the new page's `targetId`, set the name, then list **again** for the row that is returned. Merely moving the existing `activeTabRow()` above `setNamedPage` is not enough — the returned row would be built before the name exists, so `data.tab.name` comes back `null` and the CLI assertions reading it fail:
 
 ```js
@@ -2173,14 +2212,20 @@ Use the extension-backed count, and report **unknown** rather than guessing when
     // Strict: a malformed body reads as "unknown", never as a healthy zero.
     // Number('') is 0 and Number('3abc') is NaN, and a garbage array member
     // must not be counted as a tab.
-    const tabs = status.attachedTabs.filter((t) => t && typeof t === 'object');
-    if (tabs.length !== status.attachedTabs.length) return { discovered: false, count: 0 };
+    const tabs = status.attachedTabs;
+    const wellFormed = tabs.every((t) => t && typeof t === 'object' && t.tabId !== undefined);
     const active = status.activeTargets;
-    if (active !== undefined && !Number.isInteger(active)) return { discovered: false, count: 0 };
-    // activeTargets is the relay's discovery signal: > 0 only once a CDP client
-    // has sent Target.setAutoAttach.
-    const discovered = (Number.isInteger(active) && active > 0) || tabs.length > 0;
-    return { discovered, count: tabs.length };
+    if (!wellFormed || (active !== undefined && !Number.isInteger(active))) {
+      return { discovered: false, count: 0 };  // malformed => unknown, never healthy-zero
+    }
+    // The relay derives activeTargets from the SAME target list
+    // (relay/src/index.js:772-780), so { activeTargets: 3, attachedTabs: [] } is
+    // impossible — treat a disagreement as malformed, not as zero tabs.
+    if (Number.isInteger(active) && active !== tabs.length) return { discovered: false, count: 0 };
+    // Discovery cannot be inferred from a zero count: activeTargets is 0 both
+    // before Target.setAutoAttach and on a genuinely empty browser, so
+    // `discovered` is true only on positive evidence.
+    return { discovered: tabs.length > 0, count: tabs.length };
   },
 ```
 
@@ -2219,14 +2264,14 @@ test('doctor does not claim zero tabs before discovery has run', async () => {
   assert.match(tabs.detail, /cannot determine|not yet/i);
 });
 
-test('doctor DOES report no tabs once discovery ran and found none', async () => {
-  // The other half. Without it the four-state doctor can never reach NO_TABS
-  // and the state is decorative.
+test('a self-contradictory status reads as unknown, not as zero tabs', async () => {
+  // The relay computes activeTargets from the same list, so 3-and-empty cannot
+  // occur; treating it as "discovered, zero tabs" would invent a NO_TABS.
   const { checks } = await runDoctor({
     probeExtensionStatus: async () => ({ connected: true, activeTargets: 3, attachedTabs: [] }),
     readRawLock: () => null, paths: basePaths,
   });
-  assert.match(checks.find((c) => c.id === 'tabs').detail, /open a tab/i);
+  assert.notEqual(checks.find((c) => c.id === 'tabs')?.status, 'fail');
 });
 ```
 
@@ -2635,9 +2680,15 @@ test('state.page is client-scoped for reads and writes', async () => {
   const stateA = runtime.stateViewFor('a');
   const stateB = runtime.stateViewFor('b');
   assert.equal(stateA.page.url(), 'https://one.test/');
-  stateB.page = pages[0];
+  assert.equal(stateB.page.url(), 'https://two.test/');
+  // B assigns a page A does NOT hold. Assigning A's own page would pass even
+  // against a shared implementation, leaving the stomp untested.
+  const third = fakePage({ url: 'https://three.test/' });
+  pages.push(third);
+  await runtime.listTabRows();
+  stateB.page = third;
+  assert.equal(stateB.page.url(), 'https://three.test/');
   assert.equal(stateA.page.url(), 'https://one.test/', 'b assigning state.page must not move a');
-  assert.equal(runtime.getActivePage({ clientId: 'b' }).url(), 'https://one.test/');
 });
 
 test('open and tabs report the caller own active tab', async () => {
