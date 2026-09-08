@@ -453,6 +453,14 @@ test('ignores targets with no id and tolerates a missing title', () => {
   assert.deepEqual(matchPagesToTargets(['u'], [{ id: 'T1', url: 'u' }]), [{ targetId: 'T1', title: '' }]);
 });
 
+test('a malformed target with no URL makes the whole listing ambiguous', () => {
+  const out = matchPagesToTargets(['https://a.test/'], [
+    { id: 'T1', url: 'https://a.test/', title: 'good' },
+    { id: 'T2', title: 'no url' },
+  ]);
+  assert.deepEqual(out, [{ targetId: null, title: '' }]);
+});
+
 test('a malformed target makes its whole URL group ambiguous', () => {
   const out = matchPagesToTargets(['https://a.test/'], [
     { id: 'T1', url: 'https://a.test/', title: 'good' },
@@ -539,10 +547,17 @@ export function matchPagesToTargets(pageUrls, targets) {
   // handle for a tab that may not be the one it is showing.
   const targetsByUrl = new Map();
   const poisonedUrls = new Set();
+  let globallyAmbiguous = false;
   for (const target of Array.isArray(targets) ? targets : []) {
     const url = typeof target?.url === 'string' && target.url ? target.url : null;
     const id = typeof target?.id === 'string' && target.id ? target.id : null;
-    if (!url || !id) { if (url) poisonedUrls.add(url); continue; }
+    if (!url || !id) {
+      // A malformed entry with no usable URL cannot be scoped to a group, so it
+      // could belong to any of them. Global ambiguity beats letting some other
+      // group look unique and hand out a handle on a guess.
+      if (url) poisonedUrls.add(url); else globallyAmbiguous = true;
+      continue;
+    }
     if (!targetsByUrl.has(url)) targetsByUrl.set(url, []);
     targetsByUrl.get(url).push(target);
   }
@@ -556,6 +571,7 @@ export function matchPagesToTargets(pageUrls, targets) {
   });
 
   const out = urls.map(() => ({ targetId: null, title: '' }));
+  if (globallyAmbiguous) return out;
   for (const [url, indices] of pageIndicesByUrl) {
     if (poisonedUrls.has(url)) continue;   // ambiguous: a malformed sibling exists
     const group = targetsByUrl.get(url);
@@ -578,7 +594,7 @@ export function matchPagesToTargets(pageUrls, targets) {
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `node --test mcp/test/tab-identity.test.js`
-Expected: PASS (9 tests)
+Expected: PASS (11 tests)
 
 - [ ] **Step 5: Register the test file**
 
@@ -1071,18 +1087,33 @@ Then the runtime. Add beside `listStablePages()`:
         page,
         url: urls[i],
         targetId,
-        title: matched.title || (targetId ? '' : await pageTitleBounded(page)),
+        // A stale snapshot may not supply a TITLE to a page it never identified
+        // either: a replacement tab at the same URL would show the dead tab's
+        // title, and could then be selected by it.
+        title: (authoritative || knownId) ? (matched.title || '') : await pageTitleBounded(page),
         handle: getStablePageHandle(page, targetId),
       };
     }));
   }
 ```
 
+`listIdentifiedPages` finishes by caching what it resolved and rebinding from that same local snapshot, never from shared state:
+
+```js
+    const rows = await Promise.all(/* … the map above … */);
+    identityCache = { generation: connectionGeneration, rows };
+    rebindNamedPages(rows, { authoritative, targets });
+    return rows;
+```
+
 Rewrite the body of `listTabRows()` to consume it:
 
 ```js
-      const active = resolveActivePage(getContext());
+      // Identity first: resolveActivePage consults client slots, and after a
+      // reconnect those rebind only once listIdentifiedPages has run. Resolving
+      // first marked the shared tab — or nothing — as active.
       const identified = await listIdentifiedPages();
+      const active = resolveActivePage(getContext(), { clientId });
       return identified.map(({ page, handle, title, url, targetId }, index) => ({
         handle,
         index,
@@ -1591,14 +1622,17 @@ Pruning and re-binding:
    * and does not contain its target — an unreachable relay is not evidence that
    * a tab closed, and deleting on a failed fetch silently loses user names.
    */
-  function rebindNamedPages(identified, authoritative) {
+  function rebindNamedPages(identified, { authoritative, targets }) {
     const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
     // Existence comes from the RAW target list, never from `identified`. A tab
     // can be present in /json/list yet unmatched here — its URL changed, or it
     // shares a URL with another tab so the matcher failed closed. Treating
     // "unmatched" as "gone" deletes a name for a tab that is plainly still open.
+    // The LOCAL snapshot, not lastRelayTargets: a concurrent listing can
+    // overwrite the shared one between this call's fetch and this line, and a
+    // live name would be deleted on another client's result.
     const liveTargetIds = new Set(
-      (lastRelayTargets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
+      (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
     );
     for (const [name, entry] of namedPages) {
       if (!entry.targetId) continue;
@@ -1610,7 +1644,7 @@ Pruning and re-binding:
   }
 ```
 
-Call `rebindNamedPages(identified, authoritative)` inside `listIdentifiedPages()` on the resolved array before returning it, and pass the id through in `listTabRows()`: `name: nameForPage(page, targetId)`.
+`listIdentifiedPages()` calls `rebindNamedPages(rows, { authoritative, targets })` on its own local snapshot before returning; `listTabRows()` passes the id through as `name: nameForPage(page, targetId)`.
 
 - [ ] **Step 4: Refresh identity around name lookups AND after page creation**
 
@@ -1623,6 +1657,9 @@ Two distinct problems in `open --as` (`mcp/src/browserforce-command-registry.js:
     const page = await runtime.openNewPage({ url, timeout });
     const created = (await runtime.listIdentifiedPages()).find((i) => i.page === page);
     if (name) runtime.setNamedPage(name, page, { replace, targetId: created?.targetId ?? null });
+    // The client slot needs the id too, or a tab this client opened cannot
+    // rebind after a reconnect — the case Task 12 exists to fix.
+    if (clientId) runtime.setActivePageForClient(page, clientId);
     const active = await activeTabRow(runtime);   // re-listed, so the row carries the new name
     return { opened: url, tab: active };
 ```
@@ -2213,7 +2250,9 @@ Use the extension-backed count, and report **unknown** rather than guessing when
     // Number('') is 0 and Number('3abc') is NaN, and a garbage array member
     // must not be counted as a tab.
     const tabs = status.attachedTabs;
-    const wellFormed = tabs.every((t) => t && typeof t === 'object' && t.tabId !== undefined);
+    // Integer tabId, not merely present: null, '' and 'abc' all pass a
+    // !== undefined check and would classify a malformed status as healthy.
+    const wellFormed = tabs.every((t) => t && typeof t === 'object' && Number.isInteger(t.tabId));
     const active = status.activeTargets;
     if (!wellFormed || (active !== undefined && !Number.isInteger(active))) {
       return { discovered: false, count: 0 };  // malformed => unknown, never healthy-zero
@@ -2229,7 +2268,12 @@ Use the extension-backed count, and report **unknown** rather than guessing when
   },
 ```
 
-Run it only when `relayUp && relayStatus?.connected === true` — strict equality, matching the classifier, so a malformed truthy `connected` cannot reach the tab check. Feed the classifier `discovered ? count : undefined`; passing `count: 0` while undiscovered is what would misclassify a healthy browser as `NO_TABS`. Every doctor test stays on injected values — the fixtures must never reach the real network.
+**`doctor` reports the tab count; it does not adjudicate emptiness.** It never connects a CDP client, so it cannot distinguish "no tabs" from "discovery has not run" — `activeTargets` is 0 in both cases. Two rounds of this plan oscillated between inventing a false `NO_TABS` and making the state unreachable; the honest split ends that:
+
+- `doctor` — the `tabs` check reports `N tabs attached` when discovered, else `cannot determine without a connected agent (run any browserforce command)`. It is **never** a `fail`.
+- The **agent path** owns `NO_TABS`: `assertPagesAvailable()` runs after `waitForInitialPageDiscovery`, where a zero count is real evidence.
+
+Run the probe only when `relayUp && relayStatus?.connected === true` — strict equality matching the classifier, so a malformed truthy `connected` never reaches it. Every doctor test stays on injected values — the fixtures must never reach the real network.
 
 ```js
 test('doctor still reports when the relay is down', async () => {
@@ -2264,6 +2308,20 @@ test('doctor does not claim zero tabs before discovery has run', async () => {
   assert.match(tabs.detail, /cannot determine|not yet/i);
 });
 
+test('doctor never fails the tab check, in any state', async () => {
+  // It cannot connect a CDP client, so it has no evidence of emptiness.
+  // NO_TABS is the agent path's call, where discovery has actually run.
+  for (const status of [
+    { connected: true, activeTargets: 0, attachedTabs: [] },
+    { connected: true, activeTargets: 2, attachedTabs: [{ tabId: 1 }, { tabId: 2 }] },
+  ]) {
+    const { checks } = await runDoctor({
+      probeExtensionStatus: async () => status, readRawLock: () => null, paths: basePaths,
+    });
+    assert.notEqual(checks.find((c) => c.id === 'tabs')?.status, 'fail');
+  }
+});
+
 test('a self-contradictory status reads as unknown, not as zero tabs', async () => {
   // The relay computes activeTargets from the same list, so 3-and-empty cannot
   // occur; treating it as "discovered, zero tabs" would invent a NO_TABS.
@@ -2284,7 +2342,9 @@ Expected: PASS — including the existing `assert.doesNotMatch(..., /assertExten
 
 - [ ] **Step 8: Prove each state on the live machine**
 
-Four runs of `node bin.js doctor`, each in its own state, recording the message: relay stopped; relay up with Chrome quit; Chrome open with every tab closed; normal. Each must name its own fix, and the healthy case must pass — the pre-fix code would have failed the third and, with a naive `attachedTabs` check, the fourth as well.
+Three via `node bin.js doctor`: relay stopped; relay up with Chrome quit; normal. Each must name its own fix and the healthy case must pass.
+
+The fourth is proven on the **agent path**, where the evidence exists: with Chrome open and every tab closed, `node bin.js snapshot` must report `NO_TABS` naming "open a tab", not a generic no-active-page error. In that same state `doctor` must report the count as undetermined and must **not** fail — it has connected no client, so it has no evidence either way.
 
 - [ ] **Step 9: Commit**
 
@@ -2535,6 +2595,23 @@ test('a client slot rebinds across a reconnect instead of falling back', async (
   assert.notEqual(own, runtime.getActivePage(), 'and must not have fallen back to the shared tab');
 });
 
+test('a blocked slot stays blocked instead of silently sharing', async () => {
+  // Two consecutive failures. If the slot is deleted on the first, the second
+  // finds none and falls back to the shared tab — the stomp, one call later.
+  const { runtime, pages, __fireDisconnect } = tabRuntimeEnv({
+    pages: [fakePage({ url: 'https://one.test/' }), fakePage({ url: 'https://two.test/' })],
+  });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[1], { clientId: 'b', targetId: rows[1].targetId });
+  runtime.setActivePage(pages[0]);            // shared slot = tab one
+  pages.length = 1;                            // b's tab is gone entirely
+  __fireDisconnect();
+  await runtime.listTabRows();
+  assert.equal(runtime.getActivePage({ clientId: 'b' }), null);
+  assert.equal(runtime.getActivePage({ clientId: 'b' }), null,
+    'the second call must not fall back to the shared tab');
+});
+
 test('a closed page clears only its own client slot', async () => {
   const { runtime, pages } = tabRuntimeEnv({
     pages: [fakePage({ url: 'https://a.test/' }), fakePage({ url: 'https://b.test/' })],
@@ -2583,9 +2660,11 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
         if (slot.gen === connectionGeneration && isUsablePage(slot.page)) return slot.page;
         const rebound = slot.targetId ? pageForTargetId(slot.targetId) : null;
         if (rebound) { slot.page = rebound; slot.gen = connectionGeneration; return rebound; }
-        // Fail closed. Falling through to the shared page would hand this client
-        // another agent's tab — exactly what it opted out of.
-        activePageByClient.delete(clientId);
+        // Fail closed AND keep the slot. Deleting it means the next command
+        // finds no slot, falls through to the shared page, and the cross-agent
+        // stomp is back one call later. A blocked slot clears only on explicit
+        // reselection (use/open) or reset.
+        slot.page = null;
         return null;
       }
       // No slot yet: inherit the shared page. That is what makes a delegated
@@ -2599,7 +2678,7 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
 
 Add `activePageByClient.clear();` to `reset()` **in this task** — Task 6 must not clear a map that does not exist until now.
 
-`connectionGeneration` is a counter incremented in the `disconnected` handler (`:281-286`), which is also what invalidates the identity cache: `pageForTargetId(targetId)` reads the last `listIdentifiedPages()` result cached beside `lastRelayTargets`, and that cache is stale exactly when a slot needs rebinding. `runCommand()` therefore `await`s `listIdentifiedPages()` before resolving a client slot whenever `identityCacheGeneration !== connectionGeneration`. Without it the first post-reconnect command fails closed and the agent sees a spurious "no active tab".
+`connectionGeneration` is a counter incremented in the `disconnected` handler (`:281-286`), which is also what invalidates the identity cache: `pageForTargetId(targetId)` reads the last `listIdentifiedPages()` result cached beside `lastRelayTargets`, and that cache is stale exactly when a slot needs rebinding. `runCommand()` therefore `await`s `listIdentifiedPages()` before resolving a client slot whenever `identityCache.generation !== connectionGeneration` — that field is set by `listIdentifiedPages` when it caches its rows. Without it the first post-reconnect command fails closed and the agent sees a spurious "no active tab".
 
 ```js
 test('an orphaned Page from the previous connection is never returned', async () => {
