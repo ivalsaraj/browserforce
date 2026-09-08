@@ -7,6 +7,7 @@ import assert from 'node:assert';
 
 import {
   parseBrowserforceCommand,
+  commandToBody,
   executeBrowserforceCommand,
   executeBrowserforceVerb,
   normalizeRef,
@@ -1336,5 +1337,43 @@ describe('tabs is capped and filterable', () => {
     assert.equal(data.tabs.length, 2);
     assert.ok(data.total < 72, 'total is the post-filter count');
     assert.equal(data.omitted, data.total - 2);
+  });
+});
+
+describe('tabs refuses subcommands it does not have', () => {
+  it('rejects a positional argument instead of discarding it', () => {
+    // commandToBody, not parseBrowserforceCommand: parse never calls it.
+    const parsed = parseBrowserforceCommand('tabs close t5');
+    assert.equal(parsed.verb, 'tabs');
+    assert.deepEqual(parsed.args, ['close', 't5'], 'parse still tokenizes; the refusal happens later');
+
+    assert.throws(() => commandToBody(parsed), (err) => {
+      assert.match(err.message, /tabs takes no positional arguments/);
+      assert.match(err.message, /close/i, 'must name the thing the user actually tried');
+      return true;
+    });
+  });
+
+  it('surfaces the refusal through the real execution path', async () => {
+    const { run } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await assert.rejects(
+      () => run('tabs close t5'),
+      (err) => { assert.match(err.message, /tabs takes no positional arguments/); return true; },
+    );
+  });
+
+  it('never points at a bare close that would target an arbitrary tab', async () => {
+    const { run } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await assert.rejects(() => run('tabs close t5'), (err) => {
+      assert.match(err.message, /use <handle>/, 'the fix must be selection, never a default target');
+      return true;
+    });
+  });
+
+  it('leaves bare tabs and its flags working', () => {
+    assert.equal(parseBrowserforceCommand('tabs').verb, 'tabs');
+    assert.deepEqual(commandToBody(parseBrowserforceCommand('tabs')),
+      { all: false, match: undefined, limit: undefined });
+    assert.equal(commandToBody(parseBrowserforceCommand('tabs --all')).all, true);
   });
 });

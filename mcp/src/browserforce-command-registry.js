@@ -710,6 +710,19 @@ const WAIT_KIND_FLAGS = ['text', 'url', 'load', 'fn', 'selector'];
 export function commandToBody({ verb, args, flags }) {
   switch (verb) {
     case 'tabs':
+      // `tabs close t5` used to parse as verb `tabs` with the arguments
+      // discarded: it reported success and closed nothing. There is no close
+      // verb — refuse rather than no-op.
+      if (args.length > 0) {
+        throw usageError(
+          `tabs takes no positional arguments (got "${args.join(' ')}"). `
+          // No bare getBrowserforcePageForTab(): with no selector it falls back
+          // to availableTabs[0], so following that advice closes an arbitrary
+          // tab. Point at selection, never hand over a default.
+          + 'There is no "tabs close" verb. Select the tab first (use <handle>), then close it from exec. '
+          + 'Filter the listing with --match <text>, --limit <n> or --all.',
+        );
+      }
       // Raw values: parseTabLimit runs in the EXECUTOR so the sessiond
       // direct-verb path, which never passes through commandToBody, validates
       // too.
