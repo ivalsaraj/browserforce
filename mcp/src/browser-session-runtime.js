@@ -114,7 +114,8 @@ export function createBrowserSessionRuntime(deps = {}) {
   // assigned once per page in first-listed order and NEVER renumber when other
   // tabs close or when the page's URL/title changes.
   const namedPages = new Map(); // name → page
-  let stableHandles = new WeakMap(); // page → 't<N>'
+  const handlesByTargetId = new Map(); // relay targetId → 't<N>' — survives reconnect
+  let stableHandles = new WeakMap(); // page → 't<N>' — fallback when no relay target
   let nextStableHandleNumber = 1;
 
   // ─── Relay-target identity ─────────────────────────────────────────────────
@@ -424,13 +425,32 @@ export function createBrowserSessionRuntime(deps = {}) {
     return null;
   }
 
-  /** Stable `t<N>` handle for a page — assigned once, permanent for the page. */
-  function getStablePageHandle(page) {
+  /**
+   * Stable `t<N>` handle. Keyed by relay target id when one is known, because
+   * Playwright rebuilds every Page object on the idle reconnect — a Page-keyed
+   * map renumbered every tab on every reconnect and an agent acting on a stale
+   * handle silently hit the WRONG TAB. Falls back to page identity (valid for
+   * one connection) when there is no relay target: a managed/headless backend
+   * has no target ids.
+   */
+  function getStablePageHandle(page, targetId = null) {
     if (!page) return null;
+    if (targetId) {
+      let handle = handlesByTargetId.get(targetId);
+      if (!handle) {
+        // PROMOTE an existing fallback handle instead of minting a new number.
+        // A failed first fetch gives the page a per-connection handle;
+        // allocating a fresh one on recovery would change a handle already
+        // handed to an agent and strand the old one.
+        handle = stableHandles.get(page) ?? `t${nextStableHandleNumber++}`;
+        handlesByTargetId.set(targetId, handle);
+      }
+      stableHandles.set(page, handle); // fast path for lookups with no id to hand
+      return handle;
+    }
     let handle = stableHandles.get(page);
     if (!handle) {
-      handle = `t${nextStableHandleNumber}`;
-      nextStableHandleNumber += 1;
+      handle = `t${nextStableHandleNumber++}`;
       stableHandles.set(page, handle);
     }
     return handle;
@@ -561,6 +581,15 @@ export function createBrowserSessionRuntime(deps = {}) {
       };
     }));
     await resolveAmbiguousTargetIds(ctx, rows);
+    if (authoritative) {
+      // The relay synthesizes bf-target-<tabId> when the extension has no real
+      // CDP target id, and CHROME REUSES TAB IDS — so a closed-then-reopened
+      // tab can present the same synthesized id and inherit the previous tab's
+      // handle. Evict ids the relay no longer lists. Only on an authoritative
+      // listing: a failed fetch is not evidence that a tab closed.
+      const live = new Set(targets.map((t) => t?.id).filter(Boolean));
+      for (const id of handlesByTargetId.keys()) if (!live.has(id)) handlesByTargetId.delete(id);
+    }
     if (startedAt !== connectionGeneration) return listIdentifiedPages(); // retry on the new connection
     identityCache = { generation: connectionGeneration, rows };
     return rows;
@@ -880,7 +909,14 @@ export function createBrowserSessionRuntime(deps = {}) {
     contextListenerAttached = false;
     consoleLogs.clear();
     namedPages.clear();
+    // Every identity cache, not just the handle map: leaving any of them means
+    // a post-reset fetch failure applies stale identity or titles to a brand-new
+    // page graph.
     stableHandles = new WeakMap();
+    handlesByTargetId.clear();
+    targetIdByPage = new WeakMap();
+    lastRelayTargets = null;
+    identityCache = { generation: -1, rows: [] };
     nextStableHandleNumber = 1;
   }
 

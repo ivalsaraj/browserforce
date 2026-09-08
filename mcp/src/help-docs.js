@@ -32,7 +32,7 @@ browserforce "click @e2 --tab app"
     summary: 'Choose existing, manual, and new tabs without creating blanks by accident.',
     text: `# Tabs
 
-- Prefer the command surface for tab work: browserforce "tabs" (stable t<N> handles + names), "use <handle|name|text>", "open <url> --as <name>". The rules below cover exec-scope tab work.
+- Prefer the command surface for tab work: browserforce "tabs" (t<N> handles, stable for the session — a handle names the same tab across calls and across reconnects), "use <handle|name|text>", "open <url> --as <name>". The rules below cover exec-scope tab work.
 - For attached/manual/current-tab listing, call getBrowserforceStatus() first; use status.manualAttachedTabs and status.activeManualTargets.
 - Fast path: const status = await getBrowserforceStatus(); return status.manualAttachedTabs;
 - To inspect the attached tab, use: state.page = await getBrowserforcePageForTab();

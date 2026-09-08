@@ -907,3 +907,89 @@ test('exact resolution never runs on a managed backend', async () => {
   assert.equal(rows.filter((r) => r.targetId).length, 0);
   assert.equal(cdpSessions.length, 0);
 });
+
+// ─── Handles keyed by relay target id ────────────────────────────────────────
+
+test('a handle names the same tab after an idle reconnect replaces every Page object', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://b.test/', title: 'B' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+
+  const before = await runtime.listTabRows();
+  browser.fireDisconnected();
+  // Reconnect: brand-new Page objects for the same tabs. The old ones stay
+  // open() — orphaned, not closed — exactly as Playwright leaves them.
+  pages.splice(0, pages.length, ...targets.map((t) => makeTabPage({ url: t.url })));
+  const after = await runtime.listTabRows();
+
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle));
+  assert.equal(after[0].handle, 't1');
+});
+
+test('a fallback handle is promoted, not replaced, when the relay recovers', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = true;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+    relayUrl: 'http://relay.test',
+  });
+  const first = (await runtime.listTabRows())[0].handle; // fallback handle
+  fail = false;
+  const second = (await runtime.listTabRows())[0];
+  assert.equal(second.handle, first, 'the handle already handed out must not change');
+  assert.equal(second.targetId, 'T1');
+});
+
+test('handles still work per-connection when no relay target is available', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'A' })];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getRelayHttpUrl: () => '',
+    fetch: async () => { throw new Error('no relay'); },
+  });
+  assert.equal((await runtime.listTabRows())[0].handle, 't1');
+  assert.equal((await runtime.listTabRows())[0].handle, 't1');
+});
+
+test('a reopened tab reusing a Chrome tab id does not inherit the old handle', async () => {
+  // The relay synthesizes bf-target-<tabId> and Chrome reuses tab ids, so
+  // without eviction the new tab silently answers to the closed tab's handle.
+  let targets = [{ id: 'bf-target-7', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets, relayUrl: 'http://relay.test' });
+  const before = (await runtime.listTabRows())[0].handle;
+  targets = []; pages.length = 0; // tab closed, relay says so
+  await runtime.listTabRows();
+  targets = [{ id: 'bf-target-7', url: 'https://b.test/', title: 'B' }]; // id reused
+  pages.push(makeTabPage({ url: 'https://b.test/' }));
+  assert.notEqual((await runtime.listTabRows())[0].handle, before,
+    'a different tab must not answer to the closed tab handle');
+});
+
+test('reset drops the cached relay snapshot, so a later failure cannot reuse it', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'live' })];
+  let fail = false;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+    relayUrl: 'http://relay.test',
+  });
+  await runtime.listTabRows();
+  await runtime.reset();
+  fail = true;
+  const [row] = await runtime.listTabRows();
+  // Identity may only come from a live source. 'T1' would mean the pre-reset
+  // relay snapshot survived; the exact CDP probe is ground truth and may.
+  assert.notEqual(row.targetId, 'T1', 'a reset session must not resurrect the pre-reset target list');
+  assert.equal(row.handle, 't1', 'numbering restarts');
+});

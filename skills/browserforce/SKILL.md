@@ -72,7 +72,8 @@ names are unique; pass `--replace` only when you intentionally want to move a
 name to another tab.
 
 Stable handles and names persist for the lifetime of the session; use
-`browserforce tabs` to discover them.
+`browserforce tabs` to discover them. A handle survives the idle reconnect; it
+is invalidated only by `reset`.
 
 ### Command reference
 
