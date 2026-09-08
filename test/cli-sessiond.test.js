@@ -1205,3 +1205,24 @@ describe('sessiond crash guard contract', () => {
     );
   });
 });
+
+describe('sessiond CDP client label', () => {
+  // client-label.js reads the env once at module load, so the override must be
+  // exercised in a subprocess.
+  const readUrl = async (labelEnv) => {
+    const { stdout } = await exec('node', ['-e',
+      "import('./cli/sessiond.js').then(m => m.buildRealCdpUrl()).then(u => console.log(u))"],
+      { cwd: ROOT, env: { ...process.env, BROWSERFORCE_CDP_CLIENT_LABEL: labelEnv } });
+    return stdout;
+  };
+
+  it('labels its CDP connection so window affinity survives a reconnect', async () => {
+    assert.match(await readUrl('shared-team-window'), /[?&]label=shared-team-window\b/);
+  });
+
+  it('falls back to the per-process label when none is set', async () => {
+    // Documents WHY the label matters: without one the relay keys affinity on
+    // the connection id and the window pin dies on disconnect.
+    assert.match(await readUrl(''), /[?&]label=browserforce-mcp-[0-9a-f]{8}/);
+  });
+});

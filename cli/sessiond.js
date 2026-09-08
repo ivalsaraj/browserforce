@@ -43,6 +43,7 @@ import {
   executeBrowserforceVerb,
   BrowserforceCommandError,
 } from '../mcp/src/browserforce-command-registry.js';
+import { withClientLabel } from '../mcp/src/client-label.js';
 import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
 import { installProcessCrashGuard } from '../mcp/src/process-crash-guard.js';
 
@@ -53,13 +54,26 @@ const DEFAULT_IDLE_MS = 5 * 60 * 1000;
 // ─── Backend connect factories (lazy: the browser is launched/connected only on
 // the first command, never during startup negotiation) ──────────────────────
 
+/**
+ * The CDP URL sessiond connects with, label included. Exported so the label
+ * contract is testable without a real browser — connectRealBrowser is private
+ * and the tests replace it wholesale via BF_SESSIOND_CONNECT_MODULE.
+ *
+ * Without a label the relay keys window affinity on the ephemeral connection
+ * id, so sessiond's agent-window pin was discarded on every disconnect and the
+ * next created tab could land in the user's own window.
+ */
+export async function buildRealCdpUrl() {
+  return withClientLabel(await getCdpUrl());
+}
+
 async function connectRealBrowser() {
   // Mirror bin.js connectBrowser: relay is already ensured by negotiation.
   const cReq = createRequire(fileURLToPath(new URL('../mcp/src/exec-engine.js', import.meta.url)));
   const pwPath = cReq.resolve('playwright-core');
   const { default: pw } = await import(pwPath);
   const { chromium } = pw;
-  const cdpUrl = await getCdpUrl();
+  const cdpUrl = await buildRealCdpUrl();
   const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
   await assertExtensionConnected({ baseUrl });
   return chromium.connectOverCDP(cdpUrl);

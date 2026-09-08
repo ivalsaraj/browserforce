@@ -1,9 +1,10 @@
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   getHelpSection,
   listHelpSections,
+  HELP_SECTION_NAMES,
 } from '../src/help-docs.js';
 
 describe('MCP help docs', () => {
@@ -95,4 +96,22 @@ describe('MCP help docs', () => {
       );
     }
   });
+});
+
+test('help exposes a subagents section naming both modes and the shared-tab hazard', () => {
+  assert.ok(HELP_SECTION_NAMES.includes('subagents'));
+  const text = getHelpSection('subagents');
+  assert.match(text, /BROWSERFORCE_CLIENT_ID/);
+  assert.match(text, /--tab/);
+  assert.match(text, /BF_SESSIOND_LOCK_PATH/);
+  assert.match(text, /shared active tab|share/i);
+  assert.ok(listHelpSections().some((sec) => sec.name === 'subagents' && sec.summary));
+});
+
+test('the subagents section never claims a separate daemon isolates tab access', () => {
+  // It does not: _autoAttachAllTabs loops the global target map and every CDP
+  // client can drive every tab. Claiming a sandbox would be a lie an agent acts on.
+  const text = getHelpSection('subagents');
+  assert.doesNotMatch(text, /cannot (see|touch|reach) (your|other)/i);
+  assert.match(text, /not a sandbox|every .*client can/i, 'the non-isolation must be stated outright');
 });

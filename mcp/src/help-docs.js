@@ -135,6 +135,18 @@ browserforce "click @e2 --tab app"
 - Use one tab/page per task with a small concurrency cap, then aggregate results.
 - Return useful telemetry for swarm runs: peakConcurrentTasks, wallClockMs, sumTaskDurationsMs, failures, and retries.`,
   },
+  subagents: {
+    title: 'Handing Browser Work to a Subagent',
+    summary: 'Delegate browser work: shared tabs by default, one active tab per agent.',
+    text: `# Handing Browser Work to a Subagent
+
+- Subagents share your browser session automatically — one daemon per machine, so they see your tabs, your logins and your snapshot refs with no setup.
+- Give each parallel subagent \`BROWSERFORCE_CLIENT_ID=<name>\`. It then has its OWN active tab: \`use\` and \`open\` move its tab, never yours. Without an id, every client shares one active tab and they overwrite each other mid-run.
+- Fallback for a client that cannot set the id: pass \`--tab <handle>\` on every command that accepts it (snapshot, click, fill, type, press, hover, wait, get, eval) and do not run \`use\`/\`open\`. \`tabs\` needs no \`--tab\` and does not accept one.
+- A subagent that should keep its own session state: export \`BF_SESSIOND_LOCK_PATH=/tmp/bf-<name>.json\` and \`BROWSERFORCE_CDP_CLIENT_LABEL=<name>\`. It gets its own session state and its own Chrome window for tabs it creates.
+- That is NOT a sandbox: every BrowserForce client can see and drive every tab in the browser. If a tab must not be touched, do not delegate work that reaches it.
+- Handles are stable for the session (see help(tabs)), so a handle you pass to a subagent still names the same tab when it runs.`,
+  },
   'cli-session': {
     title: 'CLI Session Daemon',
     summary: 'Persistent CLI browser session + session commands vs one-shot -e.',
@@ -216,6 +228,7 @@ export const HELP_SECTION_NAMES = Object.freeze([
   'errors',
   'parallel',
   'cli-session',
+  'subagents',
   'backends',
   'examples',
 ]);

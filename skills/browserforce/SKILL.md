@@ -75,6 +75,43 @@ Stable handles and names persist for the lifetime of the session; use
 `browserforce tabs` to discover them. A handle survives the idle reconnect; it
 is invalidated only by `reset`.
 
+## Handing browser work to a subagent
+
+Subagents share your browser session automatically — one daemon per machine, so
+they see your tabs, your logins and your snapshot refs with no setup. Paste one
+of these into the subagent's prompt.
+
+**Sequential subagents.** They share your active tab:
+
+> Browser: use the `browserforce` CLI. It is already connected to the user's real
+> Chrome and shares this session's tabs. Run `browserforce tabs` to see them,
+> `browserforce use <handle>` to pick one, then `snapshot` / `click @eN` /
+> `fill @eN <text>`.
+
+**Parallel subagents.** Give each one its own id, and its active tab is its own:
+
+> Browser: use the `browserforce` CLI with `BROWSERFORCE_CLIENT_ID=<your-name>`
+> exported. You share the session's tabs and logins with the other agents, but
+> your active tab is your own — `use` and `open` will not move theirs.
+
+For a client that cannot set the id, pin every run instead: pass
+`--tab <handle>` on `snapshot`, `click`, `fill`, `type`, `press`, `hover`,
+`wait`, `get` and `eval`, and do not run `use` or `open`. `tabs` needs no
+`--tab` and does not accept one.
+
+**A subagent that should keep its own session.** Give it its own daemon:
+
+> Browser: use the `browserforce` CLI with `BF_SESSIOND_LOCK_PATH=/tmp/bf-<name>.json`
+> and `BROWSERFORCE_CDP_CLIENT_LABEL=<name>` exported. You get your own session
+> state and your own Chrome window for tabs you create.
+
+That last one separates session state and where new tabs open. It is **not** a
+sandbox: every BrowserForce client can see and drive every tab in the browser.
+If a tab must not be touched, do not delegate work that reaches it.
+
+Handles (`t<N>`) are stable for the session, so a handle you pass to a subagent
+still names the same tab when it runs.
+
 ### Command reference
 
 ```bash
