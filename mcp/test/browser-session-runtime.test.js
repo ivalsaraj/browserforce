@@ -13,7 +13,7 @@ function makeFakePage() {
   };
 }
 
-function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null } = {}) {
+function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null, cdpFail = () => false } = {}) {
   let connected = true;
   let disconnectedCb = null;
   const context = {
@@ -26,6 +26,7 @@ function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null } = {})
       cdpSessions?.push(page);
       return {
         async send(method) {
+          if (cdpFail()) throw new Error('CDP probe failed');
           if (method !== 'Target.getTargetInfo') return {};
           return { targetInfo: { targetId: `cdp-${index}` } };
         },
@@ -768,10 +769,10 @@ function makeUntitleablePage(url) {
   return { ...makeTabPage({ url }), title: async () => new Promise(() => {}) };
 }
 
-function makeRelayRuntime({ pages, targets, fail = () => false, relayUrl = 'http://127.0.0.1:19222', onFetch, cdpSessions = null }) {
+function makeRelayRuntime({ pages, targets, fail = () => false, relayUrl = 'http://127.0.0.1:19222', onFetch, cdpSessions = null, cdpFail = () => false }) {
   const fetchImpl = makeRelayFetch(() => targets(), { fail });
   return createBrowserSessionRuntime({
-    connectBrowser: async () => makeFakeBrowser({ pages, cdpSessions }),
+    connectBrowser: async () => makeFakeBrowser({ pages, cdpSessions, cdpFail }),
     getRelayHttpUrl: () => relayUrl,
     fetch: async (url, ...rest) => { onFetch?.(String(url)); return fetchImpl(url, ...rest); },
     initialPageDiscoveryTimeoutMs: 50,
@@ -1362,4 +1363,45 @@ test('a skipped resolution round is not evidence that an exact id is gone', asyn
   pages.splice(3, 20);
   const after = (await runtime.listTabRows()).slice(0, 3).map((r) => r.handle);
   assert.deepEqual(after, before, 'a skipped round must not evict live exact ids');
+});
+
+test('a failed exact-resolution probe is not proof that an exact id is dead', async () => {
+  // The per-row catch leaves a row unresolved, but "the resolver ran" was still
+  // reported as full evidence — so a transient Target.getTargetInfo failure
+  // dropped the handle and name of a tab that is plainly still open.
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  let cdpFail = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => {
+      browser = makeFakeBrowser({ pages, cdpFail: () => cdpFail });
+      return browser;
+    },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const fireDisconnect = () => {
+    browser.fireDisconnected();
+    pages.splice(0, pages.length, makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' }));
+  };
+  const before = await runtime.listTabRows();
+  assert.deepEqual(before.map((r) => r.handle), ['t1', 't2']);
+  runtime.setNamedPage('dup', pages[0], { targetId: before[0].targetId });
+
+  // The reconnect is what makes this bite: targetIdByPage is a WeakMap keyed on
+  // the OLD Page objects, so after it the rows carry no remembered id and the
+  // probe is the only evidence there is.
+  fireDisconnect();
+  cdpFail = true;                       // transient probe failure, tabs untouched
+  await runtime.listTabRows();
+  cdpFail = false;
+  const after = await runtime.listTabRows();
+
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle),
+    'a failed probe must not renumber a live tab');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup'],
+    'nor delete its name');
 });

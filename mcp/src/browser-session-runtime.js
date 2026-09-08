@@ -617,7 +617,13 @@ export function createBrowserSessionRuntime(deps = {}) {
    * listing cannot be done this way (the relay mints an alias session per
    * Target.attachToTarget). Sessions are detached immediately.
    */
-  /** @returns {boolean} whether resolution actually ran over the unresolved set. */
+  /**
+   * @returns {boolean} whether this listing produced COMPLETE evidence — the
+   * resolver ran over the whole unresolved set AND every probe answered. A
+   * failed probe leaves its row unresolved for reasons that say nothing about
+   * whether the tab is open, so treating it as evidence drops the handle and
+   * name of a live tab.
+   */
   async function resolveAmbiguousTargetIds(ctx, rows) {
     // Only where relay identity is the identity source. A managed backend has
     // no target ids to be durable across, and a runtime with no relay URL is
@@ -628,6 +634,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     const unresolved = rows.filter((r) => !r.targetId);
     if (unresolved.length > AMBIGUOUS_RESOLUTION_LIMIT) return false;
     if (unresolved.length === 0) return true; // nothing to resolve is still full evidence
+    let complete = true;
     await Promise.all(unresolved.map(async (row) => {
       let session;
       try {
@@ -638,12 +645,19 @@ export function createBrowserSessionRuntime(deps = {}) {
           exactlyResolvedTargetIds.add(targetInfo.targetId);
           targetIdByPage.set(row.page, targetInfo.targetId);
           row.handle = getStablePageHandle(row.page, targetInfo.targetId);
+        } else {
+          complete = false; // answered, but with nothing usable
         }
-      } catch { /* leave it on a per-connection handle */ } finally {
+      } catch {
+        // Leave it on a per-connection handle — and mark the round incomplete,
+        // because an unresolved row here is a tab we failed to READ, not a tab
+        // that is gone.
+        complete = false;
+      } finally {
         try { await session?.detach(); } catch { /* already gone */ }
       }
     }));
-    return true;
+    return complete;
   }
 
   /**
@@ -695,7 +709,7 @@ export function createBrowserSessionRuntime(deps = {}) {
         handle: getStablePageHandle(page, targetId),
       };
     }));
-    const resolutionRan = await resolveAmbiguousTargetIds(ctx, rows);
+    const resolutionComplete = await resolveAmbiguousTargetIds(ctx, rows);
     const rowTargetIds = new Set(rows.map((r) => r.targetId).filter(Boolean));
     const relayTargetIds = new Set(
       (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
@@ -707,10 +721,11 @@ export function createBrowserSessionRuntime(deps = {}) {
       if (!id) return false;
       if (relayTargetIds.has(id)) return true;
       // An exact CDP id is never in the relay listing. This listing's own rows
-      // are its evidence — but only when the resolver actually ran; past
-      // AMBIGUOUS_RESOLUTION_LIMIT it is skipped and absence says nothing.
+      // are its evidence — but ONLY when resolution was complete: past
+      // AMBIGUOUS_RESOLUTION_LIMIT it is skipped, and a failed probe leaves a
+      // live tab unresolved. Absence is evidence of death in neither case.
       if (!exactlyResolvedTargetIds.has(id)) return false;
-      return rowTargetIds.has(id) || !resolutionRan;
+      return rowTargetIds.has(id) || !resolutionComplete;
     };
     if (authoritative) {
       // The relay synthesizes bf-target-<tabId> when the extension has no real
