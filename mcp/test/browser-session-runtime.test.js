@@ -13,7 +13,7 @@ function makeFakePage() {
   };
 }
 
-function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null, cdpFail = () => false } = {}) {
+function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null, cdpFail = () => false, cdpTargetId = (i) => `cdp-${i}` } = {}) {
   let connected = true;
   let disconnectedCb = null;
   const context = {
@@ -28,7 +28,7 @@ function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null, cdpFai
         async send(method) {
           if (cdpFail()) throw new Error('CDP probe failed');
           if (method !== 'Target.getTargetInfo') return {};
-          return { targetInfo: { targetId: `cdp-${index}` } };
+          return { targetInfo: { targetId: cdpTargetId(index) } };
         },
         async detach() {},
       };
@@ -769,10 +769,10 @@ function makeUntitleablePage(url) {
   return { ...makeTabPage({ url }), title: async () => new Promise(() => {}) };
 }
 
-function makeRelayRuntime({ pages, targets, fail = () => false, relayUrl = 'http://127.0.0.1:19222', onFetch, cdpSessions = null, cdpFail = () => false }) {
+function makeRelayRuntime({ pages, targets, fail = () => false, relayUrl = 'http://127.0.0.1:19222', onFetch, cdpSessions = null, cdpFail = () => false, cdpTargetId }) {
   const fetchImpl = makeRelayFetch(() => targets(), { fail });
   return createBrowserSessionRuntime({
-    connectBrowser: async () => makeFakeBrowser({ pages, cdpSessions, cdpFail }),
+    connectBrowser: async () => makeFakeBrowser({ pages, cdpSessions, cdpFail, ...(cdpTargetId ? { cdpTargetId } : {}) }),
     getRelayHttpUrl: () => relayUrl,
     fetch: async (url, ...rest) => { onFetch?.(String(url)); return fetchImpl(url, ...rest); },
     initialPageDiscoveryTimeoutMs: 50,
@@ -1404,4 +1404,54 @@ test('a failed exact-resolution probe is not proof that an exact id is dead', as
     'a failed probe must not renumber a live tab');
   assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup'],
     'nor delete its name');
+});
+
+test('exact resolution refuses a duplicate target id rather than sharing a handle', async () => {
+  // matchPagesToTargets rejects duplicate ids; the probe path must too. Two
+  // tabs answering with one id would share a t<N> and route a name to the
+  // wrong tab — the exact failure this arc exists to prevent.
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets, cdpTargetId: () => 'SAME' });
+  const rows = await runtime.listTabRows();
+  assert.deepEqual(rows.map((r) => r.targetId), [null, null], 'a duplicate id identifies nothing');
+  assert.equal(new Set(rows.map((r) => r.handle)).size, 2, 'and the two tabs keep distinct handles');
+});
+
+test('exact resolution refuses a malformed target id', async () => {
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  for (const bad of [42, '', { nope: true }, null]) {
+    const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+    const runtime = makeRelayRuntime({ pages, targets: () => targets, cdpTargetId: () => bad });
+    const rows = await runtime.listTabRows();
+    assert.deepEqual(rows.map((r) => r.targetId), [null, null], `id ${JSON.stringify(bad)} must not be accepted`);
+  }
+});
+
+test('a malformed probe answer leaves the round incomplete, so nothing is evicted', async () => {
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  let bad = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => {
+      browser = makeFakeBrowser({ pages, cdpTargetId: (i) => (bad ? 42 : `cdp-${i}`) });
+      return browser;
+    },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const before = await runtime.listTabRows();
+  runtime.setNamedPage('dup', pages[0], { targetId: before[0].targetId });
+
+  browser.fireDisconnected();
+  pages.splice(0, pages.length, makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' }));
+  bad = true;
+  await runtime.listTabRows();
+  bad = false;
+  const after = await runtime.listTabRows();
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle));
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup']);
 });

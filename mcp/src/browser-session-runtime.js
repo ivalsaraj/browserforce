@@ -634,29 +634,50 @@ export function createBrowserSessionRuntime(deps = {}) {
     const unresolved = rows.filter((r) => !r.targetId);
     if (unresolved.length > AMBIGUOUS_RESOLUTION_LIMIT) return false;
     if (unresolved.length === 0) return true; // nothing to resolve is still full evidence
+    // Two phases: probe everything, then commit only ids that are valid AND
+    // unique across the round. Committing as each probe returns would let two
+    // tabs answering with one id share a t<N> handle and route a name to the
+    // wrong tab — matchPagesToTargets rejects exactly this, and the probe path
+    // must hold the same contract.
     let complete = true;
-    await Promise.all(unresolved.map(async (row) => {
+    const probed = await Promise.all(unresolved.map(async (row) => {
       let session;
       try {
         session = await ctx.newCDPSession(row.page);
         const { targetInfo } = await session.send('Target.getTargetInfo');
-        if (targetInfo?.targetId) {
-          row.targetId = targetInfo.targetId;
-          exactlyResolvedTargetIds.add(targetInfo.targetId);
-          targetIdByPage.set(row.page, targetInfo.targetId);
-          row.handle = getStablePageHandle(row.page, targetInfo.targetId);
-        } else {
-          complete = false; // answered, but with nothing usable
-        }
+        const id = typeof targetInfo?.targetId === 'string' && targetInfo.targetId
+          ? targetInfo.targetId
+          : null;
+        if (!id) complete = false; // answered, but with nothing usable
+        return { row, id };
       } catch {
         // Leave it on a per-connection handle — and mark the round incomplete,
         // because an unresolved row here is a tab we failed to READ, not a tab
         // that is gone.
         complete = false;
+        return { row, id: null };
       } finally {
         try { await session?.detach(); } catch { /* already gone */ }
       }
     }));
+
+    const seen = new Map();
+    for (const { id } of probed) {
+      if (id) seen.set(id, (seen.get(id) ?? 0) + 1);
+    }
+    for (const { row, id } of probed) {
+      if (!id) continue;
+      if (seen.get(id) > 1) {
+        // A duplicate identifies neither tab. Fail closed, exactly as the URL
+        // matcher does, and treat the round as inconclusive.
+        complete = false;
+        continue;
+      }
+      row.targetId = id;
+      exactlyResolvedTargetIds.add(id);
+      targetIdByPage.set(row.page, id);
+      row.handle = getStablePageHandle(row.page, id);
+    }
     return complete;
   }
 
