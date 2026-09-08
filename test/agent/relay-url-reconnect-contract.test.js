@@ -30,7 +30,10 @@ test('background reconciles tab groups when attached tabs move between windows',
 
 test('background suppresses recursive group resync while BrowserForce is applying its own group changes', () => {
   assert.match(backgroundJs, /let isSyncingTabGroup = false;/);
-  assert.match(backgroundJs, /if \(changeInfo\.groupId !== undefined && !isSyncingTabGroup\) \{/);
+  // Group reconciliation is meaningful only where the relay tracks the tab, so
+  // the guard also requires isAttached — url/title updates are now reported for
+  // every tab, attached or not, to keep the relay's metadata cache fresh.
+  assert.match(backgroundJs, /if \(isAttached && changeInfo\.groupId !== undefined && !isSyncingTabGroup\) \{/);
   assert.match(backgroundJs, /isSyncingTabGroup = true;/);
   assert.match(backgroundJs, /isSyncingTabGroup = false;/);
 });
