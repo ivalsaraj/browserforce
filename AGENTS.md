@@ -379,6 +379,13 @@ rewrites JS (`getByRole('button')` became `getByRole(button)` →
 - CDP clients require auth token in query param. Token is random 32 bytes (base64url).
 - Token file permissions: `0o600` (owner read/write only).
 - Single extension slot. Second extension connection gets HTTP 409.
+- Wildcard CORS is an ALLOWLIST (`WILDCARD_CORS_PATHS`), not a denylist. Only
+  `/` (counts-only health) is readable cross-origin. Everything else is denied
+  by default — the previous denylist silently exempted `/json/version`,
+  `/json/list` (both embed the CDP auth token in `webSocketDebuggerUrl`),
+  `/restrictions` and `/agent-preferences` (user settings, including free-text
+  instructions). Never add a route to the allowlist without establishing that
+  its body is safe for any page the user visits to read.
 
 ## Operational Non-Goals
 

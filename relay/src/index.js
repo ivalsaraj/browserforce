@@ -77,13 +77,18 @@ function parseHttpHostHeader(hostHeader) {
   return host || null;
 }
 
-// Introspection endpoints carry local browsing metadata (tab URLs/titles) and
-// must not be readable cross-origin by arbitrary websites. Wildcard CORS stays
-// the default for CDP-discovery/health routes only.
-const NO_WILDCARD_CORS_PATHS = new Set(['/extension/status', '/attached-tabs']);
+// Allowlist, not a denylist. Routes here are readable by any page the user
+// visits, so the default must be "denied": the old denylist exempted
+// /extension/status and /attached-tabs, then four sensitive routes were added
+// without being listed — /json/version and /json/list embed the CDP auth token
+// in webSocketDebuggerUrl, and /restrictions and /agent-preferences return the
+// user's settings including their free-text instructions.
+// `/` returns counts only. Extension pages are unaffected: they carry host
+// permissions and bypass CORS entirely.
+const WILDCARD_CORS_PATHS = new Set(['/']);
 
 function shouldAllowWildcardCors(pathname) {
-  return !NO_WILDCARD_CORS_PATHS.has(pathname);
+  return WILDCARD_CORS_PATHS.has(pathname);
 }
 
 // ─── Token Persistence ──────────────────────────────────────────────────────

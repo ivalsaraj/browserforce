@@ -4041,3 +4041,44 @@ describe('CDP Explicit Session Handshake (newCDPSession alias)', () => {
     }
   });
 });
+
+describe('wildcard CORS is an allowlist', () => {
+  // Every route that returns the CDP auth token, tab metadata, or user
+  // settings. `/` is the only wildcard route, so this list is the inverse of
+  // the allowlist and a new sensitive route is covered without editing it.
+  const SENSITIVE_ROUTES = [
+    '/json', '/json/list', '/json/version',
+    '/extension/status', '/attached-tabs',
+    '/restrictions', '/agent-preferences',
+  ];
+
+  it('serves no sensitive route cross-origin', async () => {
+    const relay = new RelayServer(getRandomPort());
+    await relay.start({ writeCdpUrl: false });
+    try {
+      for (const route of SENSITIVE_ROUTES) {
+        const res = await fetch(`http://127.0.0.1:${relay.port}${route}`, {
+          headers: { Origin: 'https://evil.test' },
+        });
+        await res.arrayBuffer();
+        assert.equal(res.headers.get('access-control-allow-origin'), null,
+          `${route} must not send wildcard CORS`);
+      }
+    } finally {
+      relay.stop();
+    }
+  });
+
+  it('keeps the health route wildcard-readable', async () => {
+    const relay = new RelayServer(getRandomPort());
+    await relay.start({ writeCdpUrl: false });
+    try {
+      const res = await fetch(`http://127.0.0.1:${relay.port}/`, { headers: { Origin: 'https://evil.test' } });
+      await res.arrayBuffer();
+      assert.equal(res.headers.get('access-control-allow-origin'), '*');
+      assert.equal(res.status, 200);
+    } finally {
+      relay.stop();
+    }
+  });
+});
