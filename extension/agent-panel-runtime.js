@@ -677,15 +677,21 @@ export function formatMessageTimestampForHover(value, { now = Date.now(), locale
   return timestamp.toLocaleString(locale || undefined, formatOptions);
 }
 
+// Pinned locale, never the host's: a bare toLocaleString() groups digits by
+// the machine's locale, so the same session read "258,400" on one machine and
+// "2,58,400" (en-IN) on another. Token counts are diagnostics that get pasted
+// into reports and compared across machines.
+const TOKEN_LOCALE = 'en-US';
+
 export function formatContextUsage({ totalTokens, cachedInputTokens, modelContextWindow } = {}) {
   const total = normalizeUsageValue(totalTokens);
   if (total == null) return null;
   const cached = normalizeUsageValue(cachedInputTokens) || 0;
   const effectiveTotal = Math.max(0, total - cached);
   const windowSize = normalizeUsageValue(modelContextWindow);
-  if (windowSize == null || effectiveTotal > windowSize) return { label: 'Tokens', text: `${effectiveTotal.toLocaleString()} tokens` };
+  if (windowSize == null || effectiveTotal > windowSize) return { label: 'Tokens', text: `${effectiveTotal.toLocaleString(TOKEN_LOCALE)} tokens` };
   const percent = ((effectiveTotal / windowSize) * 100).toFixed(1);
-  return { label: 'Context', text: `${effectiveTotal.toLocaleString()} / ${windowSize.toLocaleString()} (${percent}%)` };
+  return { label: 'Context', text: `${effectiveTotal.toLocaleString(TOKEN_LOCALE)} / ${windowSize.toLocaleString(TOKEN_LOCALE)} (${percent}%)` };
 }
 
 function slugifyFilePart(value, fallback = 'browserforce-response') {
