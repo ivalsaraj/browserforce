@@ -202,7 +202,9 @@ git add mcp/src/doctor.js test/doctor.test.js README.md
 git commit -m "fix(doctor): fail when a deployed BrowserForce skill has drifted from the shipped guide"
 ```
 
-- [ ] **Step 7: Repair this machine (manual, not committed)**
+- [ ] **Step 7: Repair this machine (manual, not committed) — RUN THIS AFTER TASK 12**
+
+Tasks 2, 6, 11 and 12 all edit `skills/browserforce/SKILL.md`. Installing now deploys a copy every later task invalidates, and the Task 13 `doctor` check would then fail on drift this step created. Do the repair once the last skill edit has landed; Task 13 Step 3 re-runs `doctor` to confirm.
 
 The stale copy is `~/.claude/skills/browserforce` → `~/brainvault/skills/browserforce` (July fork). Replace the symlink with a real install from the repo, then confirm:
 
@@ -700,12 +702,13 @@ A tab list exists so something can choose a tab. Without titles it cannot, and `
 
 **Three defects sit between "the relay has the data" and "the runtime can trust it", all found in review:**
 
+0. **Closed tabs are never reported.** `onTabRemoved` (`extension/background.js:805`) carries the same gate — `if (!attachedTabs.has(tabId)) return;` — so closing a lazily-attached tab never reaches the relay. Its target list, and every row, handle and name derived from it, keeps pointing at a tab that no longer exists until something forces rediscovery. Send `tabDetached` for **every** tab; the relay ignores unknown tab ids (`relay/src/index.js:1178-1181`), so a message about an undiscovered tab is harmless. Keep the `cleanupTab`/`updateBadge` work inside an `if (isAttached)` block.
 1. **The relay's cache goes stale.** `extension/background.js:816` opens `onTabUpdated` with `if (!attachedTabs.has(tabId)) return;` — URL and title changes are reported only for *attached* tabs, and attachment is lazy. After a user navigates an unattached tab the relay serves the URL from discovery time. A stale URL does not just show a wrong title: it breaks the match, so that tab silently drops back to a renumbering handle. Fixed at the source; `_handleTabUpdated` (`relay/src/index.js:1177-1181`) already drops updates for tabs it does not know, so widening emission is safe.
 2. **Relay identity is not backend-scoped.** `cli/sessiond.js:195` passes `getRelayHttpUrl` unconditionally and *before* `negotiateBackend()` runs. A managed or headless session with a relay running on the same machine would match its own pages against the real Chrome's targets. Gate on the negotiated backend.
 3. **A transient fetch failure renumbers every handle.** Returning `[]` on failure means no page matches, every page falls back to per-connection identity, and the next call mints fresh handles — reintroducing the exact defect this arc removes. Remember identity per page and reuse the last good snapshot.
 
 **Files:**
-- Modify: `extension/background.js:815-817` (`onTabUpdated` gate)
+- Modify: `extension/background.js:805` (`onTabRemoved` gate) and `:815-817` (`onTabUpdated` gate)
 - Modify: `relay/src/index.js:1184-1185` (same truthiness bug: `if (url)` / `if (title)` → `!== undefined`)
 - Test: `relay/test/relay-server.test.js` — the emptied-title regression below
 - Modify: `mcp/src/browser-session-runtime.js` — import, `fetchRelayTargets()` + `listIdentifiedPages()` near `listStablePages()` (`:404`), `listTabRows()` (`:531-548`), `resolveTabTarget()` (`:575+`)
@@ -801,6 +804,25 @@ test('the discovery probe is also backend-gated', async () => {
   assert.deepEqual(urls, [], 'a managed session has no relay to ask about anything');
 });
 
+test('a stale snapshot never identifies a page it has not seen before', async () => {
+  // The hazard: a tab closes, a new tab opens at the same URL, the relay fetch
+  // fails, and the cached target list hands the newcomer the dead tab's id.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  let fail = false;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: async (...a) => (fail ? Promise.reject(new Error('down')) : makeRelayFetch(targets)(...a)),
+  });
+  await runtime.listTabRows();
+  pages[0] = { ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }; // replacement
+  fail = true;
+  const [row] = await runtime.listTabRows();
+  assert.equal(row.targetId, null, 'a page never seen before must not inherit a cached id');
+});
+
 test('a transient relay failure keeps identity instead of renumbering', async () => {
   const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
   const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
@@ -827,12 +849,16 @@ test('an emptied title is applied, not ignored', async () => {
   const relay = new RelayServer(0);
   await relay.start({ writeCdpUrl: false });
   try {
-    const ext = await connectMockExtension(relay.port);
-    await seedTarget(ext, { tabId: 7, url: 'https://a.test/', title: 'Before' });
+    // Helpers this file already has: connectWs (:135) and httpGet (:20).
+    // connectMockExtension/httpGetJson live in test/cli.test.js — not in scope.
+    const ext = await connectWs(`ws://127.0.0.1:${relay.port}/extension`,
+      { headers: { Origin: 'chrome-extension://test' } });
+    await seedOneTarget(ext, { tabId: 7, url: 'https://a.test/', title: 'Before' });
     ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 7, title: '' } }));
     await sleep(100);
-    const [entry] = await httpGetJson(`http://127.0.0.1:${relay.port}/json/list`);
+    const [entry] = JSON.parse(await httpGet(`http://127.0.0.1:${relay.port}/json/list`));
     assert.equal(entry.title, '', 'a cleared title must not leave the old one cached');
+    ext.close();
   } finally { relay.stop(); }
 });
 ```
@@ -856,6 +882,13 @@ test('still reports for attached tabs', () => {
 test('ignores changes that carry neither url nor title', () => {
   assert.equal(shouldReportTabUpdate({ isAttached: true, changeInfo: { status: 'loading' } }), false);
   assert.equal(shouldReportTabUpdate({ isAttached: false, changeInfo: {} }), false);
+});
+
+test('closing an unattached tab is still reported', () => {
+  // Otherwise the relay keeps serving a target for a tab that is gone, and
+  // rows, handles and names built from it point at nothing.
+  assert.equal(shouldReportTabRemoval({ isAttached: false }), true);
+  assert.equal(shouldReportTabRemoval({ isAttached: true }), true);
 });
 
 test('an emptied title or url is still reported', () => {
@@ -895,6 +928,11 @@ First, the extension. Extract the gate as a pure predicate (the house pattern �
 // is LAZY, so almost no tab qualified. A user navigating an unattached tab left
 // the relay serving the discovery-time URL, which breaks page-to-target
 // matching and drops that tab back to a renumbering handle.
+
+/** A closed tab is always worth reporting — the relay drops ids it does not know. */
+export function shouldReportTabRemoval() {
+  return true;
+}
 
 /** Report url/title changes for every tab; group changes only where the relay tracks the tab. */
 export function shouldReportTabUpdate({ isAttached, changeInfo }) {
@@ -984,8 +1022,12 @@ Then the runtime. Add beside `listStablePages()`:
       // this round's match failed (stale URL, incomplete duplicate group, failed
       // fetch). Identity may only be learned, never silently forgotten.
       const matched = identities[i] ?? { targetId: null, title: '' };
-      const targetId = matched.targetId ?? targetIdByPage.get(page) ?? null;
-      if (matched.targetId) targetIdByPage.set(page, matched.targetId);
+      // A STALE snapshot may only CONFIRM identity for a Page we already knew.
+      // Rematching a fresh Page against cached targets lets a replacement tab
+      // at the same URL inherit the closed tab's target id — and its handle.
+      const knownId = targetIdByPage.get(page) ?? null;
+      const targetId = (relayListingAuthoritative ? matched.targetId : null) ?? knownId;
+      if (relayListingAuthoritative && matched.targetId) targetIdByPage.set(page, matched.targetId);
       return {
         page,
         url: urls[i],
@@ -1459,7 +1501,7 @@ Accessors — the options object carries identity:
       // unmapped code loses its structured suggestion.
       throw tabStateError('TAB_NAME_IN_USE', `Tab name "${key}" is already in use. Pass --replace to move it.`);
     }
-    namedPages.set(key, { targetId, page });
+    namedPages.set(key, { targetId, page, gen: connectionGeneration });
     return { name: key, replaced: Boolean(existing) };
   }
 
@@ -1467,8 +1509,14 @@ Accessors — the options object carries identity:
     const key = String(name ?? '').trim();
     const entry = namedPages.get(key);
     if (!entry) return null;
-    if (!entry.targetId && !isUsablePage(entry.page)) { namedPages.delete(key); return null; }
-    return isUsablePage(entry.page) ? entry.page : null;
+    // Generation before usability, same reason as client slots: a Page from a
+    // dead connection is orphaned, not closed, so isClosed() is false and this
+    // would hand back a handle onto a dead CDP session.
+    if (entry.gen === connectionGeneration && isUsablePage(entry.page)) return entry.page;
+    const rebound = entry.targetId ? pageForTargetId(entry.targetId) : null;
+    if (rebound) { entry.page = rebound; entry.gen = connectionGeneration; return rebound; }
+    if (!entry.targetId) { namedPages.delete(key); return null; }
+    return null; // target-keyed but unresolved: fail closed, keep the name
   }
 
   function listPageNames() {
@@ -1516,7 +1564,7 @@ Pruning and re-binding:
     for (const [name, entry] of namedPages) {
       if (!entry.targetId) continue;
       const page = byTargetId.get(entry.targetId);
-      if (page) { entry.page = page; continue; }
+      if (page) { entry.page = page; entry.gen = connectionGeneration; continue; }
       if (relayListingAuthoritative && !liveTargetIds.has(entry.targetId)) namedPages.delete(name);
     }
     pruneNamedPages();
@@ -1569,8 +1617,20 @@ test('open --as records a durable target id for the page it just created', async
 
 `tabRuntimeEnv({ pages })` and `fakePage({ url, title })` are the existing fixtures at `mcp/test/browserforce-command-registry.test.js:36` and `:53`. Two additions to `tabRuntimeEnv`, both shared by every durability test in this arc:
 
-1. **Serve `/json/list`.** Its injected `fetch` answers `/restrictions` only and returns `{}` for everything else, so `row.targetId` is always `null` and no test can exercise `pageForTargetId` or slot rebinding — they would pass vacuously. Derive the target list from the fixture's own pages so the two stay synchronized: `pages.map((pg, i) => ({ id: `T${i + 1}`, url: pg.url(), title: pg.__title ?? '' }))`, recomputed per request.
-2. **`__fireDisconnect()`** fires the fake browser's `disconnected` handler and swaps in fresh page objects carrying the same URLs, leaving the old ones **open but orphaned** — which is what Playwright actually does, and what the generation check above exists to catch.
+1. **Serve `/json/list`.** Its injected `fetch` answers `/restrictions` only and returns `{}` for everything else, so `row.targetId` is always `null` and no test can exercise `pageForTargetId` or slot rebinding — they would pass vacuously.
+
+   Three details the obvious recipe gets wrong: `fakePage` keeps no title property, so extend it to hold one; allocate ids from a **per-page WeakMap counter**, never the array index, or every id shifts when a tab closes; and read the **live mutable list** the fixture mutates, not the `pages` argument captured at construction, or pages opened during a test are invisible.
+
+   ```js
+   const idFor = new WeakMap();
+   let nextTargetId = 1;
+   const targetsNow = () => livePages.map((pg) => {
+     if (!idFor.has(pg)) idFor.set(pg, `T${nextTargetId++}`);
+     return { id: idFor.get(pg), url: pg.url(), title: pg.pageTitle ?? '' };
+   });
+   ```
+2. **`run(command, opts)` must forward `opts`.** The helper is `(command, timeout) => executeBrowserforceCommand({ command, runtime, timeout })` (`:82`); Task 12 calls `run(cmd, { clientId })`, which would silently land in the `timeout` slot. Widen it to take an options object.
+3. **`__fireDisconnect()`** fires the fake browser's `disconnected` handler and swaps in fresh page objects carrying the same URLs, leaving the old ones **open but orphaned** — which is what Playwright actually does, and what the generation check above exists to catch.
 
 - [ ] **Step 5: Run to verify they pass**
 
@@ -2110,10 +2170,17 @@ Use the extension-backed count, and report **unknown** rather than guessing when
   // is precisely when doctor must still produce a report.
   deriveTabState = (status) => {
     if (!Array.isArray(status?.attachedTabs)) return { discovered: false, count: 0 };
+    // Strict: a malformed body reads as "unknown", never as a healthy zero.
+    // Number('') is 0 and Number('3abc') is NaN, and a garbage array member
+    // must not be counted as a tab.
+    const tabs = status.attachedTabs.filter((t) => t && typeof t === 'object');
+    if (tabs.length !== status.attachedTabs.length) return { discovered: false, count: 0 };
+    const active = status.activeTargets;
+    if (active !== undefined && !Number.isInteger(active)) return { discovered: false, count: 0 };
     // activeTargets is the relay's discovery signal: > 0 only once a CDP client
     // has sent Target.setAutoAttach.
-    const discovered = Number(status.activeTargets) > 0 || status.attachedTabs.length > 0;
-    return { discovered, count: status.attachedTabs.length };
+    const discovered = (Number.isInteger(active) && active > 0) || tabs.length > 0;
+    return { discovered, count: tabs.length };
   },
 ```
 
@@ -2509,6 +2576,19 @@ test('an orphaned Page from the previous connection is never returned', async ()
 ```
 
 `resolveActivePage(ctx, { clientId } = {})` threads the same option through. Every existing caller passes nothing and is unchanged.
+
+`setActivePage` defaults `targetId` to `null`, and `use`, `open` and a `state.page` assignment each write the slot from a different place — any one passing nothing leaves a slot that cannot rebind after reconnect, which is the entire point of the task. Derive the id in **one** place rather than at three call sites:
+
+```js
+  // Every client-slot write funnels through here, so no path can store a null
+  // id by omission. A page with no relay identity (managed backend) still
+  // legitimately stores null.
+  function setActivePageForClient(page, clientId) {
+    setActivePage(page, { clientId, targetId: targetIdByPage.get(page) ?? null });
+  }
+```
+
+`use`, `open` and the `state.page` setter all call it. Add a reconnect test per path: a slot written by `use` and one written by `open` must both survive `__fireDisconnect()`.
 
 Threading the id is most of the work, and none of it is optional — an id that stops halfway leaves the stomp in place:
 
