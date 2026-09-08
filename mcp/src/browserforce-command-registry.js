@@ -30,6 +30,11 @@ export class BrowserforceCommandError extends Error {
 
 const HELP_SUGGESTION = 'Run browserforce "help" to see available commands.';
 
+// A first `tabs` call against a real Chrome returned 72 rows (~1,400 tokens).
+// An expensive entry point teaches an agent to avoid the tool, so cap by
+// default and always say what was omitted and how to see it.
+const DEFAULT_TAB_LIST_LIMIT = 20;
+
 // ─── Command language ────────────────────────────────────────────────────────
 // Flag spec per verb: value flags consume the next token (or =value); boolean
 // flags do not. Unknown flags and missing values fail loudly (agent-browser
@@ -37,7 +42,7 @@ const HELP_SUGGESTION = 'Run browserforce "help" to see available commands.';
 
 export const COMMAND_SPECS = Object.freeze({
   open: { flags: { as: 'value', replace: 'boolean' } },
-  tabs: { flags: {} },
+  tabs: { flags: { all: 'boolean', match: 'value', limit: 'value' } },
   use: { flags: {} },
   snapshot: { flags: { tab: 'value', selector: 'value', search: 'value', interactive: 'boolean' } },
   click: { flags: { tab: 'value' } },
@@ -313,6 +318,18 @@ function waitSnippet(kind, value, timeout) {
 // out first with a precise message before the hard run abort.
 const WAIT_RUN_HEADROOM_MS = 5000;
 
+// Value flags are raw strings; `slice(0, '-1')` and `slice(0, 'abc')` both
+// silently return the wrong rows rather than failing. 0 means "no cap", which
+// is how --limit expresses --all. Called from the executor so the sessiond
+// direct-verb path (executeBrowserforceVerb) is covered too.
+function parseTabLimit(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (!/^\d+$/.test(String(raw))) {
+    throw usageError(`--limit takes a non-negative whole number (got "${raw}"). Use --limit 0 or --all for every tab.`);
+  }
+  return Number(raw);
+}
+
 function usageError(message, { code = 'BAD_COMMAND_USAGE' } = {}) {
   return new BrowserforceCommandError(message, { code, suggestion: HELP_SUGGESTION });
 }
@@ -429,8 +446,18 @@ async function runCommandGuarded(runtime, params) {
 }
 
 const VERB_EXECUTORS = {
-  async tabs({ runtime }) {
-    return { tabs: await runtime.listTabRows() };
+  async tabs({ body, runtime }) {
+    const limit = parseTabLimit(body?.limit);
+    const match = String(body?.match ?? '').trim().toLowerCase();
+    const all = body?.all === true || limit === 0;
+
+    let rows = await runtime.listTabRows();
+    // Filter BEFORE capping, so the cap applies to matches.
+    if (match) rows = rows.filter((row) => `${row.title} ${row.url}`.toLowerCase().includes(match));
+    const total = rows.length;
+    const cap = all ? total : (limit ?? DEFAULT_TAB_LIST_LIMIT);
+    const tabs = rows.slice(0, cap);
+    return { tabs, total, omitted: total - tabs.length };
   },
 
   async use({ body, runtime }) {
@@ -683,7 +710,10 @@ const WAIT_KIND_FLAGS = ['text', 'url', 'load', 'fn', 'selector'];
 export function commandToBody({ verb, args, flags }) {
   switch (verb) {
     case 'tabs':
-      return {};
+      // Raw values: parseTabLimit runs in the EXECUTOR so the sessiond
+      // direct-verb path, which never passes through commandToBody, validates
+      // too.
+      return { all: flags.all === true, match: flags.match, limit: flags.limit };
     case 'use':
       // Multiword soft-match targets ("use quarterly reports") join back up.
       return { target: args.join(' ') };
@@ -740,15 +770,19 @@ export function commandToBody({ verb, args, flags }) {
 // structured data as --json / sessiond envelopes — stable handles and names can
 // never exist in one surface's output and not another's.
 
-function renderTabRowsText(rows) {
+function renderTabRowsText(rows, { total = rows?.length ?? 0, omitted = 0 } = {}) {
   if (!Array.isArray(rows) || rows.length === 0) return 'No tabs open.';
-  return rows
-    .map((row) => {
-      const marker = row.active ? '*' : ' ';
-      const name = row.name ? ` (${row.name})` : '';
-      return `${marker} ${row.handle}${name} ${row.title || '(untitled)'}\n    ${row.url}`;
-    })
-    .join('\n');
+  const lines = rows.map((row) => {
+    const marker = row.active ? '*' : ' ';
+    const name = row.name ? ` (${row.name})` : '';
+    return `${marker} ${row.handle}${name} ${row.title || '(untitled)'}\n    ${row.url}`;
+  });
+  // A capped list that cannot say it was capped is the same trap as a handle
+  // that cannot say it went stale.
+  if (omitted > 0) {
+    lines.push(`\n${omitted} more of ${total} tabs not shown. Narrow with --match <text>, or list all with --all.`);
+  }
+  return lines.join('\n');
 }
 
 function renderSnapshotDataText(data) {
@@ -778,7 +812,7 @@ export function renderBrowserforceCommandText(verb, data) {
   if (typeof data === 'string') return data;
   switch (verb) {
     case 'tabs':
-      return renderTabRowsText(data?.tabs);
+      return renderTabRowsText(data?.tabs, data);
     case 'snapshot':
       return renderSnapshotDataText(data);
     case 'use': {

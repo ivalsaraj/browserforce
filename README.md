@@ -433,8 +433,10 @@ when you intentionally want to move a name to another tab.
 Refs accept `@e1`, `e1`, or `ref=e1` and go stale the moment the page changes —
 re-snapshot before the next ref interaction. Every command routes through the
 same guarded `runCode()` boundary as the MCP `exec` tool; add `--json` for a
-`{ success, data, error, warning }` envelope (`tabs --json` prints the rows
-array directly, a superset of the old `index`/`title`/`url` shape).
+`{ success, data, error, warning }` envelope (`tabs --json` prints
+`{ tabs, total, omitted }`; each row is a superset of the old
+`index`/`title`/`url` shape). `tabs` lists the first 20 tabs — narrow with
+`--match <text>`, widen with `--limit <n>`, or list everything with `--all`.
 
 One-shot `-e` stays independent (state does not persist between `-e` calls) for
 self-contained scripts. For a persistent session, use the session commands

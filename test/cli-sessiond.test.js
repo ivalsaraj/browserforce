@@ -661,8 +661,11 @@ describe('CLI session daemon', () => {
       const viaRun = (await exec('node', ['bin.js', 'run', 'tabs', '--json'], { cwd: ROOT, env })).stdout;
       assert.equal(viaRun, direct, 'run and direct verbs share output formatting');
 
-      const rows = JSON.parse(direct);
-      assert.ok(Array.isArray(rows), 'tabs --json keeps the pre-registry top-level array shape');
+      const parsed = JSON.parse(direct);
+      assert.ok(Array.isArray(parsed.tabs), 'rows move under .tabs so a capped listing can report what it withheld');
+      assert.equal(typeof parsed.total, 'number');
+      assert.equal(typeof parsed.omitted, 'number');
+      const rows = parsed.tabs;
       const row = rows[0];
       // Superset contract: old fields kept, registry fields added.
       assert.equal(row.index, 0);
@@ -824,7 +827,7 @@ describe('CLI session daemon', () => {
     });
 
     it('tabs lists every opened tab with unique stable handles and its name', async () => {
-      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       assert.equal(rows.length, TAB_COUNT + 1, 'the original fixture tab plus every opened tab');
 
       const handles = rows.map((row) => row.handle);
@@ -853,7 +856,7 @@ describe('CLI session daemon', () => {
       });
 
       // Parallel --tab reads never moved the active tab.
-      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       assert.equal(rows.find((row) => row.active)?.name, `job-${TAB_COUNT - 1}`);
     });
 
@@ -872,14 +875,14 @@ describe('CLI session daemon', () => {
       assert.equal(replaced.data.tab.name, 'job-3');
       assert.equal(replaced.data.tab.url, 'https://newer.test/');
 
-      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       const named = rows.filter((row) => row.name === 'job-3');
       assert.equal(named.length, 1, 'exactly one tab holds the name after --replace');
       assert.equal(named[0].url, 'https://newer.test/');
     });
 
     it('invalid tab names are rejected over the wire with the teaching suggestion', async () => {
-      const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
 
       for (const bad of ['my tab', 't2']) {
         const fail = await execFail(['open', 'https://invalid-name.test/', '--as', bad, '--json']);
@@ -890,7 +893,7 @@ describe('CLI session daemon', () => {
         assert.match(resp.error, /api-docs|docs/, 'the wire error keeps the teaching suggestion');
       }
 
-      const after = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const after = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       assert.equal(after.length, before.length, 'rejected names never created a tab');
     });
   });

@@ -21,6 +21,7 @@ browserforce "snapshot --tab docs"
 browserforce "click @e2 --tab app"
 
 - tabs lists stable t<N> handles, names, and the active marker. Handles never shift when other tabs close — target tabs by handle or name, never by list position.
+- "tabs" lists the first 20 tabs and reports how many it omitted. Narrow with --match <text>, widen with --limit <n>, or list everything with --all.
 - use <t handle|name|text> soft-matches names, handles, and title/url text; ambiguity fails with candidates instead of guessing.
 - Name conflicts fail by default. Use --replace only when you intentionally want to move a name to another tab.
 - Refs (@e1, @e2, ...) come from the latest snapshot of that tab and go stale when the page changes — re-run "snapshot" after navigation or UI changes.
@@ -145,7 +146,7 @@ browserforce "click @e2 --tab app"
 - Every command routes through the same guarded runCode() boundary as MCP exec. \`eval --stdin\` runs piped Playwright JS in the session with persistent \`state\` (and \`page\`, \`context\`, \`snapshot()\`, \`locatorForRef()\`).
 - In a command STRING (\`run "eval ..."\`, MCP browserforce tool), eval code is taken VERBATIM after the verb — quotes and newlines survive. Put \`--tab\` BEFORE the code: \`eval --tab app return page.url()\`.
 - One-shot \`-e\` stays independent — no persisted state — for self-contained scripts.
-- Add \`--json\` for a { success, data, error, warning } envelope; commands exit non-zero on failure (\`tabs --json\` prints the rows array directly).
+- Add \`--json\` for a { success, data, error, warning } envelope; commands exit non-zero on failure (\`tabs --json\` prints { tabs, total, omitted }).
 - Lifecycle: \`browserforce session start | status | stop\`. The daemon auto-starts on the first command and idles out after 5 minutes.`,
   },
   backends: {
