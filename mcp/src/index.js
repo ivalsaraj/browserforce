@@ -132,7 +132,7 @@ Call help({ section: 'tabs' }) for a section. Repeated section reads return a re
 
 server.tool(
   'help',
-  'Read BrowserForce docs by section. No Chrome connection. First read returns docs; repeats return a receipt unless force:true.',
+  'BrowserForce documentation by section: tabs, snapshots, commands, recovery. Reference only. No Chrome connection. First read returns docs; repeats return a receipt unless force:true.',
   {
     section: z.enum([...HELP_SECTION_NAMES, 'all']).optional(),
     force: z.boolean().optional(),
@@ -158,7 +158,7 @@ server.tool(
 
 // ─── Exec Tool Prompt ────────────────────────────────────────────────────────
 
-const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome. Escape hatch — prefer the browserforce command tool for simple browser work.
+const EXECUTE_PROMPT = `Escape hatch for the browserforce command tool: run raw Playwright JS when no command can express the task. Prefer the browserforce tool.
 
 HELP GATE:
 Read each needed help section once per MCP session.
@@ -258,7 +258,7 @@ function registerExecTool(skillAppendix = '') {
 function registerBrowserforceTool() {
   server.tool(
     'browserforce',
-    'Run high-level BrowserForce commands. Use this first for browser work: tabs, use, open, snapshot, click, fill, press, wait, get, eval. Use exec only when this command cannot express the task.',
+    'Control the browser: the real Chrome the user already has open, with their tabs, logins, cookies and extensions. Use for any web page work — open a page, click, fill, press, wait, get, snapshot, screenshot, scrape, sign in, check what a page renders. Commands: tabs, use, open, snapshot, click, fill, press, wait, get, eval. Start here; reach for exec only when a command cannot express the task.',
     {
       command: z.string().describe('CLI-compatible command string, e.g. "snapshot", "click @e2", "open https://example.com --as docs". Run the "help" command to list all commands.'),
       timeout: z.number().optional().describe('Max execution time in ms (default: 30000)'),

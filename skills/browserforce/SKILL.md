@@ -1,12 +1,12 @@
 ---
 name: browserforce
-description: Browse the web using the user's real Chrome browser — already logged in, with real cookies and extensions. No headless browser. Uses BrowserForce relay + Playwright API via CLI.
+description: "Drive the user's real Chrome — their tabs, their logins, their cookies, their extensions. Use for any browser or web-page work: open a page, click, fill, screenshot, scrape, sign in, verify what a page renders, QA a flow. Other browser tools launch a fresh Chromium and cannot see the user's sessions; this is the user's actual browser."
 read_when:
-  - Browsing as the user with logged-in sessions
-  - Accessing sites that require authentication
-  - Interacting with the user's real Chrome tabs
-  - Web automation with existing cookies and extensions
-  - Taking screenshots of authenticated pages
+  - Any browser, web page, or web app task
+  - Opening, clicking, filling, or screenshotting a page
+  - Checking what a page actually renders
+  - Reaching a site behind the user's existing login
+  - Reading a page the user is signed in to
 metadata: {"clawdbot":{"emoji":"🔌","requires":{"bins":["node","browserforce"]},"install":[{"kind":"node","package":"browserforce","bins":["browserforce"],"label":"Install BrowserForce CLI"}]}}
 allowed-tools: Bash(browserforce:*)
 ---
@@ -135,6 +135,13 @@ browserforce -e "
 6. **Backend fallback is visible** — `auto` uses real Chrome when the extension
    is connected and warns if it falls back to managed Chrome; use `--real` to
    fail instead of falling back.
+
+## A rendered page is not proof
+
+The tab you read may have been open, and logged in, before your change — the page
+can render correctly for reasons that have nothing to do with it. Corroborate a
+browser result against independent evidence (a fresh navigation, a server log, a
+test) before calling a flow verified.
 
 ## Troubleshooting
 
