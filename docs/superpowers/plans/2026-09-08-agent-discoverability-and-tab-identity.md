@@ -56,6 +56,7 @@ The repo ships `skills/browserforce/SKILL.md`. Agents read whatever `npx skills 
 
 **Interfaces:**
 - Consumes: existing `runDoctor({ readText, paths })` injection points.
+- Produces: a **new** `readSkillText = defaultReadSkillText` parameter, declared alongside `readText` rather than replacing it — the CDP-sidecar checks still use `readText`, and collapsing the two would break their fixtures' isolation.
 - Produces: check id `skill`, statuses `OK`/`FAIL`; `paths.shippedSkillFile: string` and `paths.deployedSkillFiles: string[]`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -205,14 +206,23 @@ git commit -m "fix(doctor): fail when a deployed BrowserForce skill has drifted 
 
 The stale copy is `~/.claude/skills/browserforce` → `~/brainvault/skills/browserforce` (July fork). Replace the symlink with a real install from the repo, then confirm:
 
+**This step touches files outside this repository. Back up first, and do not run it without the owner's explicit go-ahead** — `~/brainvault` is a separate git repo holding shared agent guidance, and the fork may contain edits that exist nowhere else.
+
 ```bash
-rm ~/.claude/skills/browserforce                      # removes the symlink only, not brainvault
-cd ~/Documents/projects/browserforce
+# 1. Back up, unconditionally.
+cp -R ~/brainvault/skills/browserforce /tmp/browserforce-skill-backup-$(date +%s)
+
+# 2. Diff the fork against the shipped guide and READ it. Port anything worth
+#    keeping into skills/browserforce/SKILL.md before going further.
+diff ~/brainvault/skills/browserforce/SKILL.md skills/browserforce/SKILL.md
+
+# 3. Replace the symlink with a real install (removes the symlink, not its target).
+rm ~/.claude/skills/browserforce
 npx -y skills add . --skill browserforce --copy --yes
 node bin.js doctor                                    # expect: ✔ skill
 ```
 
-Delete `~/brainvault/skills/browserforce/` and commit that removal in the brainvault repo so `brainvault-sync` stops republishing the fork.
+Removing `~/brainvault/skills/browserforce/` afterwards is **optional and the owner's call**. Doctor now fails loudly on drift either way; deleting it only stops `brainvault-sync` republishing the fork. If the owner declines, nothing in this plan breaks.
 
 ---
 
@@ -281,6 +291,8 @@ test('only the browserforce tool claims browser work, so ToolSearch ranking is d
   const execFirstLine = src.match(/const EXECUTE_PROMPT = `([^\n]+)/)?.[1] ?? '';
   assert.match(execFirstLine, /escape hatch/i,
     'exec must present as the escape hatch, not as the browser tool');
+  assert.doesNotMatch(execFirstLine, /real Chrome|browser work|web page/i,
+    'exec must not claim the browser category — it outranks browserforce in ToolSearch if it does');
 });
 
 test('no tool description contains a raw apostrophe that would break single-quoted source', () => {
@@ -337,8 +349,10 @@ Write all three apostrophe-free. `user's` inside a single-quoted JS literal need
 `mcp/src/index.js:161`, first line of `EXECUTE_PROMPT` — escape hatch first:
 
 ```js
-const EXECUTE_PROMPT = `Escape hatch: raw Playwright JS against the real Chrome, for browser work the browserforce command tool cannot express. Prefer that tool.
+const EXECUTE_PROMPT = `Escape hatch for the browserforce command tool: run raw Playwright JS when no command can express the task. Prefer the browserforce tool.
 ```
+
+It must not restate the category. "real Chrome" and "browser work" here make `exec` a direct competitor in `ToolSearch("browser")`, and it registers first (`:161` before `:261`).
 
 `mcp/src/index.js:261` (`browserforce`) — the only one that claims the category:
 
@@ -918,7 +932,7 @@ Then the runtime. Add beside `listStablePages()`:
   // fall everything back to per-connection identity, and mint fresh handles on
   // the next call — reintroducing the exact defect this arc removes.
   let lastRelayTargets = null;
-  const targetIdByPage = new WeakMap();
+  let targetIdByPage = new WeakMap();
 
   /**
    * Relay target list: id, url and title for EVERY tab, with no debugger attach.
@@ -1131,7 +1145,11 @@ Replace `getStablePageHandle`:
     if (targetId) {
       let handle = handlesByTargetId.get(targetId);
       if (!handle) {
-        handle = `t${nextStableHandleNumber++}`;
+        // PROMOTE an existing fallback handle instead of minting a new number.
+        // A failed first fetch gives the page a per-connection handle; allocating
+        // a fresh one on recovery would change a handle already handed to an
+        // agent and strand the old one.
+        handle = stableHandles.get(page) ?? `t${nextStableHandleNumber++}`;
         handlesByTargetId.set(targetId, handle);
       }
       stableHandles.set(page, handle); // fast path for lookups with no target id to hand
@@ -1151,8 +1169,7 @@ In `reset()` (`:734`), clear **every** identity cache, not just the handle map. 
 ```js
     stableHandles = new WeakMap();
     handlesByTargetId.clear();
-    targetIdByPage = new WeakMap();     // declare with `let`, not `const`
-    activePageByClient.clear();         // Task 12
+    targetIdByPage = new WeakMap();
     lastRelayTargets = null;
     relayListingAuthoritative = false;
     nextStableHandleNumber = 1;
@@ -1428,7 +1445,10 @@ Accessors — the options object carries identity:
     const key = assertValidTabName(name);
     const existing = namedPages.get(key);
     if (existing && !replace) {
-      throw tabStateError('TAB_NAME_TAKEN', `Tab name "${key}" is already in use. Pass --replace to move it.`);
+      // TAB_NAME_IN_USE, not a new code: TAB_ERROR_SUGGESTIONS
+      // (mcp/src/browserforce-command-registry.js:323-325) maps that one, and an
+      // unmapped code loses its structured suggestion.
+      throw tabStateError('TAB_NAME_IN_USE', `Tab name "${key}" is already in use. Pass --replace to move it.`);
     }
     namedPages.set(key, { targetId, page });
     return { name: key, replaced: Boolean(existing) };
@@ -1501,7 +1521,15 @@ Call `rebindNamedPages(identified)` inside `listIdentifiedPages()` on the resolv
 Two distinct problems in `open --as` (`mcp/src/browserforce-command-registry.js:445-489`), and they need opposite fixes:
 
 1. **The conflict check runs too early against stale entries.** Order today is: validate name (`:465`) → `getNamedPage(name)` conflict check (`:466-479`) → `openNewPage()` (`:482`) → `setNamedPage` (`:483`) → `activeTabRow()` (`:484`, the only listing). Straight after a reconnect the conflict check consults un-rebound entries. Fix: `await runtime.listIdentifiedPages()` **before** the conflict check.
-2. **A brand-new page has no target id yet.** `openNewPage()` returns a Playwright `Page` and nothing else (`mcp/src/browser-session-runtime.js:646-672`), so at `:483` there is no id to store and the name would be page-keyed — lost on the next reconnect, which is the whole defect. Fix: re-list **after** creation and take the new page's `targetId` from that result, then `setNamedPage(name, page, { replace, targetId })`. The existing `activeTabRow()` call already lists after creation; move it above `setNamedPage` and read `targetId` off it.
+2. **A brand-new page has no target id yet.** `openNewPage()` returns a Playwright `Page` and nothing else (`mcp/src/browser-session-runtime.js:646-672`), so at `:483` there is no id to store and the name would be page-keyed — lost on the next reconnect, which is the whole defect. Fix: list **after** creation to learn the new page's `targetId`, set the name, then list **again** for the row that is returned. Merely moving the existing `activeTabRow()` above `setNamedPage` is not enough — the returned row would be built before the name exists, so `data.tab.name` comes back `null` and the CLI assertions reading it fail:
+
+```js
+    const page = await runtime.openNewPage({ url, timeout });
+    const created = (await runtime.listIdentifiedPages()).find((i) => i.page === page);
+    if (name) runtime.setNamedPage(name, page, { replace, targetId: created?.targetId ?? null });
+    const active = await activeTabRow(runtime);   // re-listed, so the row carries the new name
+    return { opened: url, tab: active };
+```
 
 Apply the same before-lookup refresh to `rename`. Export `listIdentifiedPages` from the runtime.
 
@@ -1649,7 +1677,7 @@ test('tabs --json reports total and omitted alongside the rows', async () => {
 });
 ```
 
-`manyTabsEnv(n)` is a small generalisation of the existing local fixture at `mcp/test/browserforce-command-registry.test.js:446-455`: parameterise its hard-coded `84` and return `{ ...tabRuntimeEnv({ pages }), … }`, whose `run(command)` is `(command) => executeBrowserforceCommand({ command, runtime })` (`:82`). Note the real signature takes **one object**, not `(command, opts)`. Also `import { commandToBody } from '../src/browserforce-command-registry.js'` — it is exported (`:671`) but not currently imported by that test file.
+`manyTabsEnv(n)` generalises the existing local fixture at `mcp/test/browserforce-command-registry.test.js:446-455`. **`n` is the TOTAL tab count, so the loop runs `n - 3`** — the fixture splices in three named tabs (`mrr`, `dashOne`, `dashTwo`) afterwards. Parameterising the hard-coded `84` directly would make `manyTabsEnv(72)` yield 75 tabs and every count assertion wrong. It returns `{ ...tabRuntimeEnv({ pages }), … }`, whose `run(command)` is `(command) => executeBrowserforceCommand({ command, runtime })` (`:82`). Note the real signature takes **one object**, not `(command, opts)`. Also `import { commandToBody } from '../src/browserforce-command-registry.js'` — it is exported (`:671`) but not currently imported by that test file.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1843,7 +1871,10 @@ Expected: FAIL — `commandToBody` returns `{}` and throws nothing. Verified liv
       if (args.length > 0) {
         throw usageError(
           `tabs takes no positional arguments (got "${args.join(' ')}"). ` +
-          'There is no "tabs close" — close a tab with exec: (await getBrowserforcePageForTab()).close(). ' +
+          // No bare getBrowserforcePageForTab(): with no selector it falls back
+          // to availableTabs[0], so following this advice closes an arbitrary
+          // tab. Point at selection, never hand over a default.
+          'There is no "tabs close" verb. Select the tab first (use <handle>), then close it from exec. ' +
           'Filter the listing with --match <text>, --limit <n> or --all.'
         );
       }
@@ -2059,10 +2090,16 @@ Use the extension-backed count, and report **unknown** rather than guessing when
 ```js
   // Returns a number, or null when nothing has triggered target discovery yet.
   // null => report "cannot determine", never "no tabs".
-  probePageCount = async () => {
+  // { discovered, count }. Collapsing "not discovered" and "discovered, zero
+  // tabs" into one value makes the promised no-tabs state unreachable — the
+  // opposite failure from reporting it wrongly.
+  probeTabState = async () => {
     const status = await probeExtensionStatus();
-    if (!Array.isArray(status?.attachedTabs)) return null;
-    return status.attachedTabs.length > 0 ? status.attachedTabs.length : null;
+    if (!Array.isArray(status?.attachedTabs)) return { discovered: false, count: 0 };
+    // activeTargets is the relay's discovery signal: > 0 only once a CDP client
+    // has sent Target.setAutoAttach.
+    const discovered = Number(status.activeTargets) > 0 || status.attachedTabs.length > 0;
+    return { discovered, count: status.attachedTabs.length };
   },
 ```
 
@@ -2071,12 +2108,22 @@ Feed it into the same classifier so `doctor` and the agent-facing error agree, a
 ```js
 test('doctor does not claim zero tabs before discovery has run', async () => {
   const { checks } = await runDoctor({
-    probeExtensionStatus: async () => ({ connected: true, attachedTabs: [] }),
+    probeExtensionStatus: async () => ({ connected: true, activeTargets: 0, attachedTabs: [] }),
     readRawLock: () => null, paths: basePaths,
   });
   const tabs = checks.find((c) => c.id === 'tabs');
   assert.notEqual(tabs?.status, 'fail');
   assert.match(tabs.detail, /cannot determine|not yet/i);
+});
+
+test('doctor DOES report no tabs once discovery ran and found none', async () => {
+  // The other half. Without it the four-state doctor can never reach NO_TABS
+  // and the state is decorative.
+  const { checks } = await runDoctor({
+    probeExtensionStatus: async () => ({ connected: true, activeTargets: 3, attachedTabs: [] }),
+    readRawLock: () => null, paths: basePaths,
+  });
+  assert.match(checks.find((c) => c.id === 'tabs').detail, /open a tab/i);
 });
 ```
 
@@ -2395,7 +2442,9 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
   }
 ```
 
-`pageForTargetId(targetId)` is a small lookup over the last `listIdentifiedPages()` result; cache that result alongside `lastRelayTargets`.
+Add `activePageByClient.clear();` to `reset()` **in this task** — Task 6 must not clear a map that does not exist until now.
+
+`pageForTargetId(targetId)` looks up the last `listIdentifiedPages()` result, cached beside `lastRelayTargets`. That cache is stale immediately after a reconnect — which is exactly when a slot needs rebinding — so `runCommand()` must `await listIdentifiedPages()` before resolving a client slot whenever the connection was re-established since the cache was filled. Track it with an `identityCacheConnectionId` bumped in the `disconnected` handler; refresh on mismatch. Without this the first post-reconnect command fails closed and the agent sees a spurious "no active tab".
 
 `resolveActivePage(ctx, { clientId } = {})` threads the same option through. Every existing caller passes nothing and is unchanged.
 
@@ -2406,12 +2455,32 @@ Threading the id is most of the work, and none of it is optional — an id that 
 | `bin.js` | read `process.env.BROWSERFORCE_CLIENT_ID`; pass to the session client |
 | `cli/session-client.js` | send it as `X-BrowserForce-Client` on every state request |
 | `cli/sessiond.js` | read `req.headers['x-browserforce-client']`, sanitize (`/^[A-Za-z0-9._-]{1,64}$/`, else ignore), pass `{ clientId }` into `runCommand` |
-| `mcp/src/browserforce-command-registry.js` | carry `clientId` through `executeBrowserforceVerb` / `executeBrowserforceCommand` into every `runtime.*` active-page call |
-| `mcp/src/browser-session-runtime.js` | `runCommand({ clientId })` → `buildExecContext` resolves `page` via `getActivePage({ clientId })`, not raw `state.page` |
+| `mcp/src/browserforce-command-registry.js` | carry `clientId` into every `runtime.*` active-page call — **including `use` (`:440-442`)**, which calls `setActivePage(page)` today and would keep writing the shared slot |
+| `mcp/src/browser-session-runtime.js` | `resolveTabTarget()` must return `targetId` beside `page` so `use` can pass `{ clientId, targetId }`; `open` gets it from the post-create listing above. Without the id a slot stores `null` and cannot rebind after reconnect |
+| `mcp/src/browser-session-runtime.js` | `runCommand({ clientId })` resolves the page via `getActivePage({ clientId })` |
+| `mcp/src/exec-engine.js:541-545` | **`buildExecContext.activePage()` reads shared `userState.page` before its `defaultPage`.** Picking the right page before construction is not enough — helpers and `state.page` inside a snippet still reach the shared tab. Pass a client-scoped resolver in |
 
 `--tab` still wins for a single run. Add the end-to-end test at the CLI layer, since that is where a broken link shows up:
 
+Assert **exact distinct URLs**, not merely non-equality — two clients both landing on the shared tab would pass a weaker check.
+
 ```js
+test('unpinned commands are client-scoped end to end', async () => {
+  // The whole chain: env -> header -> sessiond -> registry -> runtime ->
+  // buildExecContext. A break anywhere puts both clients on one tab.
+  const a = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-a' };
+  const b = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-b' };
+  await exec('node', ['bin.js', 'use', 't1'], { cwd: ROOT, env: a });
+  await exec('node', ['bin.js', 'use', 't2'], { cwd: ROOT, env: b });
+  for (const [who, want] of [[a, 'one.test'], [b, 'two.test']]) {
+    for (const verb of [['get', 'url'], ['eval', 'return page.url()']]) {
+      const { stdout } = await exec('node', ['bin.js', ...verb], { cwd: ROOT, env: who });
+      assert.ok(stdout.includes(want),
+        `${verb[0]} must resolve the caller's own tab, not the shared one`);
+    }
+  }
+});
+
 test('two CLI clients keep separate active tabs against one daemon', async () => {
   const a = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-a' };
   const b = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-b' };
@@ -2505,15 +2574,21 @@ Handles (`t<N>`) and names are keyed by **relay target id**, not by Playwright
 disconnect drops the CDP connection, so a `Page`-keyed map renumbers every
 handle and deletes every name on each reconnect — and an agent acting on a
 stale handle hits the WRONG TAB silently. `mcp/src/tab-identity.js`
-(`matchPagesToTargets`) pairs pages to relay targets by URL, positionally
-within a duplicate-URL group, since both lists derive from the relay's target
-map in insertion order. A page with no matching target falls back to
-per-connection page identity — a managed/headless backend has no relay.
+(`matchPagesToTargets`) pairs a page to a relay target **only when the URL is
+unique on both sides** — exactly one page and exactly one target carry it. There
+is no positional tie-breaking: that would assume `ctx.pages()` and the relay
+target list share an insertion order, which is unproven, and if it were ever
+false two tabs showing the same page would swap handles silently. Duplicate-URL
+tabs fall back to per-connection identity and renumber across a reconnect —
+visible degradation, never a silent mis-bind. Relay identity is additionally
+gated on the negotiated backend; a managed/headless session has no relay.
 
 Titles come from the relay for the same reason `page.title()` is bounded: on a
 lazily-attached tab the relay acks `Runtime.enable` synthetically, no execution
-context ever arrives, and the read never settles. Never re-source titles from
-`page.title()`.
+context ever arrives, and the read never settles. Never issue an **unbounded**
+`page.title()` against a relay-backed tab. `pageTitleBounded()` stays as the
+fallback for pages with no relay identity — a managed/headless backend has no
+target list, and removing it would leave those sessions untitled.
 ```
 
 Under **Key Files Quick Reference**, add: `| \`mcp/src/tab-identity.js\` | ~30 | Pure page↔relay-target pairing — the rule handles and names are keyed by |`
