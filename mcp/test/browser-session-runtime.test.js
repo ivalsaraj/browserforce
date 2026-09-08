@@ -963,14 +963,16 @@ test('handles still work per-connection when no relay target is available', asyn
 test('a reopened tab reusing a Chrome tab id does not inherit the old handle', async () => {
   // The relay synthesizes bf-target-<tabId> and Chrome reuses tab ids, so
   // without eviction the new tab silently answers to the closed tab's handle.
-  let targets = [{ id: 'bf-target-7', url: 'https://a.test/', title: 'A' }];
-  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  // A second tab stays open throughout so the browser is never empty.
+  const keep = { id: 'T9', url: 'https://keep.test/', title: 'Keep' };
+  let targets = [{ id: 'bf-target-7', url: 'https://a.test/', title: 'A' }, keep];
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://keep.test/' })];
   const runtime = makeRelayRuntime({ pages, targets: () => targets, relayUrl: 'http://relay.test' });
   const before = (await runtime.listTabRows())[0].handle;
-  targets = []; pages.length = 0; // tab closed, relay says so
+  targets = [keep]; pages.shift(); // tab closed, relay says so
   await runtime.listTabRows();
-  targets = [{ id: 'bf-target-7', url: 'https://b.test/', title: 'B' }]; // id reused
-  pages.push(makeTabPage({ url: 'https://b.test/' }));
+  targets = [{ id: 'bf-target-7', url: 'https://b.test/', title: 'B' }, keep]; // id reused
+  pages.unshift(makeTabPage({ url: 'https://b.test/' }));
   assert.notEqual((await runtime.listTabRows())[0].handle, before,
     'a different tab must not answer to the closed tab handle');
 });
@@ -1031,13 +1033,18 @@ test('a tab name still resolves after an idle reconnect', async () => {
 });
 
 test('a name is dropped only when an authoritative listing no longer has its target', async () => {
-  let targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
-  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  // A second, unrelated tab stays open: an empty browser is a different case
+  // (NO_TABS), and this test is about the named tab specifically closing.
+  let targets = [
+    { id: 'T1', url: 'https://a.test/', title: 'A' },
+    { id: 'T9', url: 'https://keep.test/', title: 'Keep' },
+  ];
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://keep.test/' })];
   const runtime = makeRelayRuntime({ pages, targets: () => targets });
   const [row] = await runtime.listTabRows();
   runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
 
-  targets = []; pages.length = 0; // the tab really closed
+  targets = [targets[1]]; pages.shift(); // the named tab really closed
   await runtime.listTabRows();
   assert.deepEqual(runtime.listPageNames().map((n) => n.name), []);
 });
@@ -1115,4 +1122,145 @@ test('a name whose target is unresolved fails closed instead of soft-matching an
   await runtime.listTabRows();
   assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
     'an unreachable relay is not evidence the tab closed — keep the name');
+});
+
+// ─── Per-client active tab ───────────────────────────────────────────────────
+
+test('two identified clients keep separate active tabs in one shared session', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0], { clientId: 'agent-1' });
+  runtime.setActivePage(pages[1], { clientId: 'agent-2' });
+  assert.equal(runtime.getActivePage({ clientId: 'agent-1' }), pages[0],
+    'agent-1 must not see agent-2 switch tabs underneath it');
+  assert.equal(runtime.getActivePage({ clientId: 'agent-2' }), pages[1]);
+});
+
+test('unidentified clients still share one active tab', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0]);
+  runtime.setActivePage(pages[1]);
+  assert.equal(runtime.getActivePage(), pages[1], 'sequential CLI behaviour is unchanged');
+});
+
+test('a client falls back to the shared tab before it picks one', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0]);
+  assert.equal(runtime.getActivePage({ clientId: 'fresh-agent' }), pages[0],
+    'a subagent inherits the parent tab until it chooses its own — that is the point of sharing');
+});
+
+test('a client slot rebinds across a reconnect instead of falling back', async () => {
+  // The regression that matters: a Page-keyed slot dies on reconnect and the
+  // client silently lands on the SHARED page — another agent's tab.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://b.test/', title: 'B' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[1], { clientId: 'agent-2', targetId: rows[1].targetId });
+  runtime.setActivePage(pages[0]); // shared slot = tab A
+  fireDisconnect();
+  await runtime.listTabRows();
+  const own = runtime.getActivePage({ clientId: 'agent-2' });
+  assert.equal(own?.url(), 'https://b.test/', 'agent-2 must still be on its own tab');
+  assert.notEqual(own, runtime.getActivePage(), 'and must not have fallen back to the shared tab');
+});
+
+test('an orphaned Page from the previous connection is never returned', async () => {
+  // Playwright Pages from a dead connection are NOT closed, so isClosed() is
+  // false and a usability-first check hands back a dead handle.
+  const targets = [{ id: 'T1', url: 'https://one.test/', title: '1' }, { id: 'T2', url: 'https://two.test/', title: '2' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const rows = await runtime.listTabRows();
+  const stale = pages[1];
+  runtime.setActivePage(stale, { clientId: 'agent-2', targetId: rows[1].targetId });
+  fireDisconnect();
+  assert.equal(stale.isClosed(), false, 'fixture must model the real hazard');
+  await runtime.listTabRows();
+  const got = runtime.getActivePage({ clientId: 'agent-2' });
+  assert.notEqual(got, stale, 'must not return the orphaned Page');
+  assert.equal(got.url(), 'https://two.test/', 'must rebind to the live page for that target');
+});
+
+test('a blocked slot stays blocked instead of silently sharing', async () => {
+  // Two consecutive failures. If the slot is deleted on the first, the second
+  // finds none and falls back to the shared tab — the stomp, one call later.
+  let targets = [{ id: 'T1', url: 'https://one.test/', title: '1' }, { id: 'T2', url: 'https://two.test/', title: '2' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[1], { clientId: 'b', targetId: rows[1].targetId });
+  runtime.setActivePage(pages[0]); // shared slot = tab one
+  fireDisconnect();
+  targets = [targets[0]];
+  pages.length = 1; // b's tab is gone entirely
+  await runtime.listTabRows();
+  assert.equal(runtime.getActivePage({ clientId: 'b' }), null);
+  assert.equal(runtime.getActivePage({ clientId: 'b' }), null,
+    'the second call must not fall back to the shared tab');
+});
+
+test('a closed page clears only its own client slot', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0], { clientId: 'agent-1' });
+  runtime.setActivePage(pages[1], { clientId: 'agent-2' });
+  pages[0].closeNow();
+  assert.equal(runtime.getActivePage({ clientId: 'agent-1' }), null);
+  assert.equal(runtime.getActivePage({ clientId: 'agent-2' }), pages[1]);
+});
+
+test('state.page is client-scoped for reads and writes', async () => {
+  const pages = [makeTabPage({ url: 'https://one.test/' }), makeTabPage({ url: 'https://two.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[0], { clientId: 'a', targetId: rows[0].targetId });
+  runtime.setActivePage(pages[1], { clientId: 'b', targetId: rows[1].targetId });
+  const stateA = runtime.stateViewFor('a');
+  const stateB = runtime.stateViewFor('b');
+  assert.equal(stateA.page.url(), 'https://one.test/');
+  assert.equal(stateB.page.url(), 'https://two.test/');
+
+  // B assigns a page A does NOT hold. Assigning A's own page would pass even
+  // against a shared implementation, leaving the stomp untested.
+  const third = makeTabPage({ url: 'https://three.test/' });
+  pages.push(third);
+  await runtime.listTabRows();
+  stateB.page = third;
+  assert.equal(stateB.page.url(), 'https://three.test/');
+  assert.equal(stateA.page.url(), 'https://one.test/', 'b assigning state.page must not move a');
+
+  // Every other key stays shared — the session is one session.
+  stateA.scratch = 42;
+  assert.equal(stateB.scratch, 42);
+});
+
+test('a slot stored before its page was identified adopts the id on the next listing', async () => {
+  // A `state.page = ...` inside eval names a page listIdentifiedPages has not
+  // seen, so the slot stores null and could never rebind after a reconnect.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  runtime.setActivePage(pages[0], { clientId: 'late' }); // never listed: no targetId
+  await runtime.listTabRows();                           // adoption happens here
+  fireDisconnect();
+  await runtime.listTabRows();
+  assert.equal(runtime.getActivePage({ clientId: 'late' })?.url(), 'https://a.test/',
+    'the adopted id is what lets the slot survive the reconnect');
+});
+
+test('reset clears every client slot', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0], { clientId: 'a' });
+  await runtime.reset();
+  assert.equal(runtime.getActivePage({ clientId: 'a' }), null);
 });

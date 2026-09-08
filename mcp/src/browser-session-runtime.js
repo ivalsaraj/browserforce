@@ -136,6 +136,19 @@ export function createBrowserSessionRuntime(deps = {}) {
   let connectionGeneration = 0;
   let identityCache = { generation: -1, rows: [] };
 
+  // One shared active page was correct while one agent used the session. With
+  // orchestrators delegating to parallel subagents it silently stomps: agent-2
+  // runs `use`, and agent-1's next unpinned command acts on agent-2's tab.
+  // Identified clients get their own slot; unidentified ones share, so every
+  // existing sequential caller is unaffected.
+  //
+  // clientId → { targetId, page, gen }. Storing the PAGE alone would repeat the
+  // bug this whole arc fixes: reconnect replaces every Page object, the slot
+  // would look dead, and the client would silently fall back to the SHARED page
+  // — i.e. onto another agent's tab. targetId is what survives, so the slot
+  // rebinds instead.
+  const activePageByClient = new Map();
+
   // Cost guard for exact resolution of the tabs the URL matcher could not
   // identify: if something has gone wrong and half the listing is unmatched,
   // degrading to per-connection handles beats opening dozens of alias sessions
@@ -401,7 +414,15 @@ export function createBrowserSessionRuntime(deps = {}) {
   // re-seeded from the first context page so it never sticks. Pinning keeps
   // `buildExecContext`'s `activePage()` (userState.page first) and the raw
   // top-level `page` in agreement.
-  function resolveActivePage(ctx) {
+  function resolveActivePage(ctx, { clientId = null } = {}) {
+    if (clientId) {
+      const own = getActivePage({ clientId });
+      if (own) return own;
+      // A slot that exists but resolved to null is BLOCKED (its tab is gone or
+      // unrebindable). Seeding it from pages()[0] would put the client on an
+      // arbitrary tab — very possibly another agent's.
+      if (activePageByClient.has(clientId)) return null;
+    }
     const current = userState.page;
     if (isUsablePage(current)) return current;
     if (current) userState.page = null;
@@ -412,21 +433,94 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   // ─── Tab identity APIs ───────────────────────────────────────────────────────
 
-  /** Pin `page` as the persistent active tab (state.page). */
-  function setActivePage(page) {
+  /** Pin `page` as the active tab — the client's own slot, or the shared one. */
+  function setActivePage(page, { clientId = null, targetId = null } = {}) {
     if (!isUsablePage(page)) {
       throw tabStateError('TAB_NOT_USABLE', 'Cannot activate a closed page.');
+    }
+    if (clientId) {
+      activePageByClient.set(clientId, { targetId, page, gen: connectionGeneration });
+      return page;
     }
     userState.page = page;
     return page;
   }
 
+  /**
+   * Every client-slot write funnels through here, so no path can store a null
+   * id by omission — and a slot with no id cannot rebind after a reconnect,
+   * which is the entire point. A page with no relay identity (managed backend)
+   * still legitimately stores null.
+   */
+  function setActivePageForClient(page, clientId) {
+    return setActivePage(page, { clientId, targetId: targetIdByPage.get(page) ?? null });
+  }
+
   /** Current active tab, or null. Closed handles are dropped, never returned. */
-  function getActivePage() {
+  function getActivePage({ clientId = null } = {}) {
+    if (clientId) {
+      const slot = activePageByClient.get(clientId);
+      if (slot) {
+        // Generation check FIRST. isUsablePage only asks isClosed(), and a Page
+        // from the previous connection reports false — it is orphaned, not
+        // closed. Trusting it would hand back a handle onto a dead CDP session.
+        if (slot.gen === connectionGeneration && isUsablePage(slot.page)) return slot.page;
+        const rebound = slot.targetId ? pageForTargetId(slot.targetId) : null;
+        if (rebound) { slot.page = rebound; slot.gen = connectionGeneration; return rebound; }
+        // Fail closed AND keep the slot. Deleting it means the next command
+        // finds no slot, falls through to the shared page, and the cross-agent
+        // stomp is back one call later. A blocked slot clears only on explicit
+        // reselection (use/open) or reset.
+        slot.page = null;
+        return null;
+      }
+      // No slot yet: inherit the shared page. That is what makes a delegated
+      // subagent useful before it picks its own tab.
+    }
     const current = userState.page;
     if (isUsablePage(current)) return current;
     if (current) userState.page = null;
     return null;
+  }
+
+  /**
+   * `state` as one client sees it: `page` is that client's own active tab,
+   * every other key is the shared session state. A scoped activePage() alone
+   * does NOT scope `state.page` — an eval reading it would see another client's
+   * tab, and one assigning it would move them.
+   */
+  function stateViewFor(clientId) {
+    if (!clientId) return userState;
+    return new Proxy(userState, {
+      get(target, prop, receiver) {
+        if (prop === 'page') return getActivePage({ clientId });
+        return Reflect.get(target, prop, receiver);
+      },
+      set(target, prop, value, receiver) {
+        if (prop === 'page') {
+          if (value == null) { activePageByClient.delete(clientId); return true; }
+          setActivePageForClient(value, clientId);
+          return true;
+        }
+        return Reflect.set(target, prop, value, receiver);
+      },
+      has(target, prop) {
+        if (prop === 'page') return getActivePage({ clientId }) != null;
+        return Reflect.has(target, prop);
+      },
+    });
+  }
+
+  /**
+   * Backfill: a slot stored before its page was ever listed (a `state.page`
+   * assignment inside an eval) holds no target id and could never rebind.
+   */
+  function adoptTargetIdsForClientSlots(rows) {
+    for (const slot of activePageByClient.values()) {
+      if (slot.targetId || !slot.page) continue;
+      const match = rows.find((r) => r.page === slot.page);
+      if (match?.targetId) slot.targetId = match.targetId;
+    }
   }
 
   /**
@@ -597,6 +691,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     if (startedAt !== connectionGeneration) return listIdentifiedPages(); // retry on the new connection
     identityCache = { generation: connectionGeneration, rows };
     rebindNamedPages(rows, { authoritative, targets });
+    adoptTargetIdsForClientSlots(rows);
     return rows;
   }
 
@@ -774,15 +869,18 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
   }
 
-  async function listTabRows() {
+  async function listTabRows({ clientId = null } = {}) {
     await ensureBrowser();
     assertPagesAvailable();
     beginOperation();
     try {
+      // Identity FIRST: resolveActivePage consults client slots, and after a
+      // reconnect those rebind only once listIdentifiedPages has run. Resolving
+      // first marked the shared tab — or nothing — as active.
       const identified = await listIdentifiedPages();
       // Use resolveActivePage (not getActivePage) so the row marked active is
       // the tab a subsequent unnamed command would actually target.
-      const active = resolveActivePage(getContext());
+      const active = resolveActivePage(getContext(), { clientId });
       return identified.map(({ page, handle, title, url, targetId }, index) => ({
         handle,
         index,
@@ -873,9 +971,9 @@ export function createBrowserSessionRuntime(deps = {}) {
    * No `tab` → the persistent active page. With `tab` → the full soft-matching
    * tiers of resolveTabTarget(). Throws TAB_NOT_FOUND / TAB_AMBIGUOUS.
    */
-  async function resolveCommandPage({ tab } = {}) {
+  async function resolveCommandPage({ tab, clientId = null } = {}) {
     if (tab == null || String(tab).trim() === '') {
-      return resolveActivePage(getContext());
+      return resolveActivePage(getContext(), { clientId });
     }
     const target = await resolveTabTarget(tab);
     return target.page;
@@ -887,7 +985,7 @@ export function createBrowserSessionRuntime(deps = {}) {
    * this runtime stays import-free and mechanical. On navigation failure the
    * page is closed (never leaks a blank orphan tab) and the error propagates.
    */
-  async function openNewPage({ url = '', timeout = 30000 } = {}) {
+  async function openNewPage({ url = '', timeout = 30000, clientId = null } = {}) {
     await ensureBrowser();
     beginOperation();
     try {
@@ -902,7 +1000,10 @@ export function createBrowserSessionRuntime(deps = {}) {
           throw err;
         }
       }
-      setActivePage(page);
+      // The caller's OWN active tab, never the shared one: `open` in one
+      // subagent must not move another agent's page.
+      if (clientId) setActivePageForClient(page, clientId);
+      else setActivePage(page);
       return page;
     } finally {
       endOperation();
@@ -923,7 +1024,7 @@ export function createBrowserSessionRuntime(deps = {}) {
    *
    * Returns runCode()'s raw result.
    */
-  async function runCommand({ code, timeout = 30000, page: pinnedPage = null, requiresPage = true } = {}) {
+  async function runCommand({ code, timeout = 30000, page: pinnedPage = null, requiresPage = true, clientId = null } = {}) {
     if (typeof buildExecContext !== 'function' || typeof runCode !== 'function') {
       throw new Error('browser session runtime: buildExecContext and runCode deps are required for runCommand');
     }
@@ -943,12 +1044,21 @@ export function createBrowserSessionRuntime(deps = {}) {
         }
         page = pinnedPage;
       } else {
-        page = resolveActivePage(ctx);
+        // After a reconnect a client slot rebinds only once identity has been
+        // refreshed; without this the first post-reconnect command fails closed
+        // and the agent sees a spurious "no active tab".
+        if (clientId && identityCache.generation !== connectionGeneration) {
+          await listIdentifiedPages();
+        }
+        page = resolveActivePage(ctx, { clientId });
       }
       const execCtx = buildExecContext(
         page,
         ctx,
-        userState,
+        // The client-scoped view: `state.page` reads and writes the caller's own
+        // slot, every other key stays shared. This also scopes the exec
+        // context's activePage(), which reads userState.page.
+        stateViewFor(clientId),
         { consoleLogs, setupConsoleCapture, pinnedPage: pinnedPage || null },
         resolveDep(pluginHelpers),
         await getAgentPreferencesForSession(),
@@ -974,6 +1084,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     contextListenerAttached = false;
     consoleLogs.clear();
     namedPages.clear();
+    activePageByClient.clear();
     // Every identity cache, not just the handle map: leaving any of them means
     // a post-reset fetch failure applies stale identity or titles to a brand-new
     // page graph.
@@ -1015,6 +1126,8 @@ export function createBrowserSessionRuntime(deps = {}) {
     getActivePage,
     assertValidTabName,
     assertPagesAvailable,
+    setActivePageForClient,
+    stateViewFor,
     setNamedPage,
     getNamedPage,
     renamePageName,

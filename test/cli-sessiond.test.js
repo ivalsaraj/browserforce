@@ -881,6 +881,34 @@ describe('CLI session daemon', () => {
       assert.equal(named[0].url, 'https://newer.test/');
     });
 
+    it('two identified clients keep separate active tabs against one daemon', async () => {
+      // The whole chain: env -> header -> sessiond -> registry -> runtime ->
+      // buildExecContext. A break anywhere puts both clients on one tab.
+      const a = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-a' };
+      const b = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-b' };
+      await exec('node', ['bin.js', 'use', 'job-1'], { cwd: ROOT, env: a });
+      await exec('node', ['bin.js', 'use', 'job-2'], { cwd: ROOT, env: b });
+
+      for (const [who, want] of [[a, 'https://job-1.test/'], [b, 'https://job-2.test/']]) {
+        for (const argv of [['get', 'url'], ['eval', 'return page.url()'], ['eval', 'return state.page.url()']]) {
+          const { stdout } = await exec('node', ['bin.js', ...argv, '--json'], { cwd: ROOT, env: who });
+          const resp = JSON.parse(stdout);
+          assert.equal(resp.success, true, `${argv.join(' ')} failed: ${stdout}`);
+          const got = resp.data?.url ?? resp.data?.result ?? resp.data;
+          assert.equal(String(got), want,
+            `${argv.join(' ')} must resolve the caller's own tab, not the shared one`);
+        }
+      }
+    });
+
+    it('an unidentified client still sees the shared active tab', async () => {
+      // No BROWSERFORCE_CLIENT_ID: byte-identical to the sequential behaviour
+      // every existing caller relies on.
+      await exec('node', ['bin.js', 'use', 'job-4'], { cwd: ROOT, env });
+      const { stdout } = await exec('node', ['bin.js', 'get', 'url', '--json'], { cwd: ROOT, env });
+      assert.equal(JSON.parse(stdout).data.url, 'https://job-4.test/');
+    });
+
     it('invalid tab names are rejected over the wire with the teaching suggestion', async () => {
       const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
 

@@ -364,8 +364,8 @@ function normalizeOpenUrl(raw) {
   return `https://${s}`;
 }
 
-async function activeTabRow(runtime) {
-  const rows = await runtime.listTabRows();
+async function activeTabRow(runtime, clientId = null) {
+  const rows = await runtime.listTabRows({ clientId });
   return rows.find((row) => row.active) ?? null;
 }
 
@@ -374,10 +374,11 @@ async function activeTabRow(runtime) {
  * Returns null when no tab was requested (the run uses the active page).
  * Unknown targets fail with the documented teaching error — no reset hint.
  */
-async function resolveVerbPage({ body, runtime }) {
+async function resolveVerbPage({ body, runtime, clientId = null }) {
   const tab = String(body?.tab ?? '').trim();
   if (!tab) return null;
   try {
+    // --tab pins THIS run only and never writes the client's slot.
     const { page } = await runtime.resolveTabTarget(tab);
     return page;
   } catch (err) {
@@ -452,12 +453,12 @@ async function runCommandGuarded(runtime, params) {
 }
 
 const VERB_EXECUTORS = {
-  async tabs({ body, runtime }) {
+  async tabs({ body, runtime, clientId }) {
     const limit = parseTabLimit(body?.limit);
     const match = String(body?.match ?? '').trim().toLowerCase();
     const all = body?.all === true || limit === 0;
 
-    let rows = await runtime.listTabRows();
+    let rows = await runtime.listTabRows({ clientId });
     // Filter BEFORE capping, so the cap applies to matches.
     if (match) rows = rows.filter((row) => `${row.title} ${row.url}`.toLowerCase().includes(match));
     const total = rows.length;
@@ -466,20 +467,23 @@ const VERB_EXECUTORS = {
     return { tabs, total, omitted: total - tabs.length };
   },
 
-  async use({ body, runtime }) {
+  async use({ body, runtime, clientId }) {
     const target = String(body?.target ?? '').trim();
     if (!target) throw usageError('use requires a tab target (e.g. use t2, use docs, or use part-of-a-title)');
     try {
       const { page, matchedBy, warning } = await runtime.resolveTabTarget(target);
-      runtime.setActivePage(page);
-      const active = await activeTabRow(runtime);
+      // The caller's OWN slot. setActivePageForClient derives the target id in
+      // one place, so no call path can store a slot that cannot rebind.
+      if (clientId) runtime.setActivePageForClient(page, clientId);
+      else runtime.setActivePage(page);
+      const active = await activeTabRow(runtime, clientId);
       return { active, matchedBy, ...(warning ? { warning } : {}) };
     } catch (err) {
       throw wrapTabStateError(err);
     }
   },
 
-  async open({ body, runtime, timeout }) {
+  async open({ body, runtime, timeout, clientId }) {
     const url = normalizeOpenUrl(body?.url);
     if (!url) throw usageError('open requires a url (e.g. open https://example.com)');
     const name = String(body?.as ?? '').trim();
@@ -517,21 +521,21 @@ const VERB_EXECUTORS = {
     }
 
     try {
-      const page = await runtime.openNewPage({ url, timeout });
+      const page = await runtime.openNewPage({ url, timeout, clientId });
       // openNewPage returns a Page and nothing else, so the new tab has no
       // target id yet. List to learn it — a page-keyed name is exactly the
       // defect this arc removes — then list again so the returned row carries
       // the name (building it before setNamedPage returns name: null).
       const created = (await runtime.listIdentifiedPages()).find((i) => i.page === page);
       if (name) runtime.setNamedPage(name, page, { replace, targetId: created?.targetId ?? null });
-      const active = await activeTabRow(runtime);
+      const active = await activeTabRow(runtime, clientId);
       return { opened: url, tab: active };
     } catch (err) {
       throw wrapTabStateError(err);
     }
   },
 
-  async rename({ body, runtime }) {
+  async rename({ body, runtime, clientId }) {
     const from = String(body?.from ?? '').trim();
     const to = String(body?.to ?? '').trim();
     if (!from || !to) throw usageError('rename requires the current and new name (e.g. rename docs api-docs)');
@@ -558,71 +562,71 @@ const VERB_EXECUTORS = {
     return { forgot: name };
   },
 
-  async snapshot({ body, runtime, timeout }) {
-    const page = await resolveVerbPage({ body, runtime });
+  async snapshot({ body, runtime, timeout, clientId }) {
+    const page = await resolveVerbPage({ body, runtime, clientId });
     const args = {
       selector: body?.selector,
       search: body?.search,
       interactiveOnly: body?.interactiveOnly === true,
     };
     const code = `return await snapshotData(${JSON.stringify(args)});`;
-    return runCommandGuarded(runtime, { code, timeout, page });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page });
   },
 
-  async click({ body, runtime, timeout }) {
+  async click({ body, runtime, timeout, clientId }) {
     const ref = normalizeRef(body?.ref);
     if (!ref) throw usageError('click requires a ref (e.g. click @e2)');
-    const page = await resolveVerbPage({ body, runtime });
+    const page = await resolveVerbPage({ body, runtime, clientId });
     const code = refLocatorSnippet(ref, 'await locator.click();', `{ clicked: ${JSON.stringify(ref)} }`);
-    return runCommandGuarded(runtime, { code, timeout, page });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page });
   },
 
-  async hover({ body, runtime, timeout }) {
+  async hover({ body, runtime, timeout, clientId }) {
     const ref = normalizeRef(body?.ref);
     if (!ref) throw usageError('hover requires a ref (e.g. hover @e2)');
-    const page = await resolveVerbPage({ body, runtime });
+    const page = await resolveVerbPage({ body, runtime, clientId });
     const code = refLocatorSnippet(ref, 'await locator.hover();', `{ hovered: ${JSON.stringify(ref)} }`);
-    return runCommandGuarded(runtime, { code, timeout, page });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page });
   },
 
-  async fill({ body, runtime, timeout }) {
+  async fill({ body, runtime, timeout, clientId }) {
     const ref = normalizeRef(body?.ref);
     if (!ref || body?.text === undefined) throw usageError('fill requires a ref and text (e.g. fill @e3 "hello")');
-    const page = await resolveVerbPage({ body, runtime });
+    const page = await resolveVerbPage({ body, runtime, clientId });
     const text = String(body.text ?? '');
     const code = refLocatorSnippet(ref, `await locator.fill(${JSON.stringify(text)});`, `{ filled: ${JSON.stringify(ref)} }`);
-    return runCommandGuarded(runtime, { code, timeout, page });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page });
   },
 
-  async type({ body, runtime, timeout }) {
+  async type({ body, runtime, timeout, clientId }) {
     const ref = normalizeRef(body?.ref);
     if (!ref || body?.text === undefined) throw usageError('type requires a ref and text (e.g. type @e4 "abc")');
-    const page = await resolveVerbPage({ body, runtime });
+    const page = await resolveVerbPage({ body, runtime, clientId });
     const text = String(body.text ?? '');
     const code = refLocatorSnippet(ref, `await locator.pressSequentially(${JSON.stringify(text)});`, `{ typed: ${JSON.stringify(ref)} }`);
-    return runCommandGuarded(runtime, { code, timeout, page });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page });
   },
 
-  async press({ body, runtime, timeout }) {
+  async press({ body, runtime, timeout, clientId }) {
     const key = String(body?.key ?? '');
     if (!key) throw usageError('press requires a key');
-    const page = await resolveVerbPage({ body, runtime });
+    const page = await resolveVerbPage({ body, runtime, clientId });
     const code = `await page.keyboard.press(${JSON.stringify(key)});\nreturn { pressed: ${JSON.stringify(key)} };`;
-    return runCommandGuarded(runtime, { code, timeout, page });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page });
   },
 
-  async wait({ body, runtime, timeout }) {
+  async wait({ body, runtime, timeout, clientId }) {
     const kind = String(body?.kind ?? '');
     const code = waitSnippet(kind, body?.value, timeout);
     if (!code) throw usageError(`unknown wait kind: ${kind}`);
-    const page = await resolveVerbPage({ body, runtime });
-    return runCommandGuarded(runtime, { code, timeout: timeout + WAIT_RUN_HEADROOM_MS, page });
+    const page = await resolveVerbPage({ body, runtime, clientId });
+    return runCommandGuarded(runtime, { clientId, code, timeout: timeout + WAIT_RUN_HEADROOM_MS, page });
   },
 
-  async get({ body, runtime, timeout }) {
+  async get({ body, runtime, timeout, clientId }) {
     const what = String(body?.what ?? '');
     if (what === 'url' || what === 'title') {
-      const page = await resolveVerbPage({ body, runtime });
+      const page = await resolveVerbPage({ body, runtime, clientId });
       // page.title() hangs forever on a lazily-attached real-Chrome tab (no JS
       // execution context is ever announced for it), so bound it and degrade
       // with a teaching note instead of burning the whole run timeout.
@@ -636,28 +640,28 @@ if (title === null) {
   return { title: '', url: page.url(), note: 'Title unavailable: this tab has no JS execution context yet (BrowserForce lazy attach). Use snapshot to read the page instead.' };
 }
 return { title };`;
-      return runCommandGuarded(runtime, { code, timeout, page });
+      return runCommandGuarded(runtime, { clientId, code, timeout, page });
     }
     if (what === 'text' || what === 'html') {
       const ref = normalizeRef(body?.ref);
       if (!ref) throw usageError(`get ${what} requires a ref (e.g. get ${what} @e2)`);
-      const page = await resolveVerbPage({ body, runtime });
+      const page = await resolveVerbPage({ body, runtime, clientId });
       const expr = what === 'text' ? '{ text: await locator.textContent() }' : '{ html: await locator.innerHTML() }';
       const code = refLocatorSnippet(ref, '', expr);
-      return runCommandGuarded(runtime, { code, timeout, page });
+      return runCommandGuarded(runtime, { clientId, code, timeout, page });
     }
     throw usageError(`unknown get target: ${what}`);
   },
 
-  async eval({ body, runtime, timeout }) {
+  async eval({ body, runtime, timeout, clientId }) {
     const code = String(body?.code ?? '');
     if (!code.trim()) throw usageError('eval requires code');
-    const page = await resolveVerbPage({ body, runtime });
+    const page = await resolveVerbPage({ body, runtime, clientId });
     // The user's code IS the snippet — same guarded runCode() boundary as MCP
     // exec / CLI -e. Never eval()/new Function() at the caller.
     // requiresPage: false — eval is the escape hatch, and `context.newPage()`
     // inside it is a legitimate way to create the first tab in an empty browser.
-    return runCommandGuarded(runtime, { code, timeout, page, requiresPage: false });
+    return runCommandGuarded(runtime, { clientId, code, timeout, page, requiresPage: false });
   },
 };
 
@@ -668,7 +672,7 @@ return { title };`;
  * (mapped to HTTP 501 by sessiond) and other structured errors for validation
  * failures (mapped to `success:false` envelopes).
  */
-export async function executeBrowserforceVerb({ verb, body = {}, runtime, timeout } = {}) {
+export async function executeBrowserforceVerb({ verb, body = {}, runtime, timeout, clientId = null } = {}) {
   const executor = VERB_EXECUTORS[verb];
   if (!executor) {
     throw new BrowserforceCommandError(`command not implemented: ${verb}`, {
@@ -678,7 +682,7 @@ export async function executeBrowserforceVerb({ verb, body = {}, runtime, timeou
   }
   const effectiveTimeout = resolveTimeout(timeout ?? body?.timeout);
   try {
-    return await executor({ body, runtime, timeout: effectiveTimeout });
+    return await executor({ body, runtime, timeout: effectiveTimeout, clientId });
   } catch (err) {
     // Every runtime tab-state error reaches an agent with its code and its
     // suggestion. Executors that map their own errors return a
@@ -870,7 +874,7 @@ export function renderBrowserforceCommandText(verb, data) {
  * surfaces, `text` rendered from that same data for human/MCP surfaces.
  * Throws BrowserforceCommandError for parse/validation/lookup failures.
  */
-export async function executeBrowserforceCommand({ command, runtime, timeout } = {}) {
+export async function executeBrowserforceCommand({ command, runtime, timeout, clientId = null } = {}) {
   const parsed = parseBrowserforceCommand(command);
   const { verb } = parsed;
 
@@ -884,6 +888,7 @@ export async function executeBrowserforceCommand({ command, runtime, timeout } =
     body,
     runtime,
     timeout: resolveTimeout(timeout),
+    clientId,
   });
   const warning = verb === 'eval' ? fireAndForgetIifeHint(body.code, data) : null;
   return { data, warning, text: renderBrowserforceCommandText(verb, data) };
