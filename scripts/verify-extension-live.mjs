@@ -6,8 +6,9 @@
 // Install with: npx -y @puppeteer/browsers install chrome@stable
 import { chromium } from 'playwright-core';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { mkdtempSync, readFileSync, readdirSync, globSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,14 +20,24 @@ const ROOT = new URL('..', import.meta.url).pathname;
 // that produced it.
 function resolveChrome() {
   if (process.env.BF_VERIFY_CHROME) return process.env.BF_VERIFY_CHROME;
+  // Plain traversal, not fs.globSync: that landed in Node 22 and package.json
+  // declares engines >= 18.3.0.
+  const leaves = [
+    ['Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
+    ['chrome'], // linux
+  ];
   for (const root of [join(process.cwd(), 'chrome'), '/private/tmp/chrome', join(tmpdir(), 'chrome')]) {
     let builds;
     try { builds = readdirSync(root).sort().reverse(); } catch { continue; }
     for (const build of builds) {
-      const hit = globSync(join(root, build, '*', 'Google Chrome for Testing.app',
-        'Contents', 'MacOS', 'Google Chrome for Testing'))[0]
-        ?? globSync(join(root, build, '*', 'chrome-linux64', 'chrome'))[0];
-      if (hit) return hit;
+      let platforms;
+      try { platforms = readdirSync(join(root, build)); } catch { continue; }
+      for (const platform of platforms) {
+        for (const leaf of leaves) {
+          const candidate = join(root, build, platform, ...leaf);
+          if (existsSync(candidate)) return candidate;
+        }
+      }
     }
   }
   throw new Error('Chrome for Testing not found. Install it with '
@@ -47,9 +58,14 @@ try {
   // extension this harness launches gets a 409 and every assertion below would
   // silently describe the OTHER browser — verifying the wrong thing, which is
   // worse than not verifying at all.
-  if ((await status().catch(() => ({}))).connected) {
-    throw new Error('another extension already holds the relay extension slot — '
-      + 'disconnect it (or point this harness at an isolated relay) so the launched one can connect');
+  // Fail CLOSED: only an explicit `connected: false` from a well-formed status
+  // means the slot is free. A failed fetch or a malformed body means ownership
+  // is unknown, and starting then risks describing another browser entirely.
+  const slot = await status().catch(() => null);
+  if (!slot || typeof slot !== 'object' || slot.connected !== false) {
+    throw new Error('cannot confirm the relay extension slot is free '
+      + `(status: ${JSON.stringify(slot)}) — the relay has a single slot, so starting now risks `
+      + 'verifying a different browser. Disconnect the other extension, or point at an isolated relay.');
   }
   ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'bf-verify-')), {
     executablePath: CHROME,
@@ -58,8 +74,12 @@ try {
   });
 
   // MV3 service workers start lazily: give the extension an event to wake on.
+  // Per-run sentinel. The slot check above is TOCTOU and "an extension is
+  // connected" cannot tell WHICH one, so identity is proved from the data: this
+  // exact title must appear in /json/list, or we are inspecting another browser.
+  const sentinel = `bf-verify-${randomUUID()}`;
   const warmup = await ctx.newPage();
-  await warmup.goto('data:text/html,<title>warmup</title>');
+  await warmup.goto(`data:text/html,<title>${sentinel}</title>`);
   let connected = false;
   for (let i = 0; i < 60; i += 1) {
     if ((await status().catch(() => ({}))).connected) { connected = true; break; }
@@ -88,8 +108,17 @@ try {
   const agent = await chromium.connectOverCDP(cdpUrl);
   await sleep(2500);
 
-  // 1. Titles come from the relay for EVERY tab — the (untitled) fix.
+  // Identity proof, BEFORE any other assertion: without it every check below
+  // could be describing a browser this harness did not launch.
   let targets = await list();
+  check(targets.some((t) => t.title === sentinel),
+    'the relay is serving the browser this harness launched (per-run sentinel)');
+  if (!targets.some((t) => t.title === sentinel)) {
+    throw new Error('sentinel tab absent from /json/list — another extension owns the relay slot');
+  }
+
+  // 1. Titles come from the relay for EVERY tab — the (untitled) fix.
+  targets = await list();
   console.log(`  /json/list -> ${targets.length} targets, ${targets.filter((t) => t.title).length} titled`);
   check(targets.length >= 4, `every tab is listed (${targets.length})`);
   check(targets.filter((t) => t.title).length === targets.length, 'every listed tab has a real title');
