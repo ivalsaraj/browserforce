@@ -706,6 +706,8 @@ A tab list exists so something can choose a tab. Without titles it cannot, and `
 
 **Files:**
 - Modify: `extension/background.js:815-817` (`onTabUpdated` gate)
+- Modify: `relay/src/index.js:1184-1185` (same truthiness bug: `if (url)` / `if (title)` → `!== undefined`)
+- Test: `relay/test/relay-server.test.js` — the emptied-title regression below
 - Modify: `mcp/src/browser-session-runtime.js` — import, `fetchRelayTargets()` + `listIdentifiedPages()` near `listStablePages()` (`:404`), `listTabRows()` (`:531-548`), `resolveTabTarget()` (`:575+`)
 - Test: `mcp/test/browser-session-runtime.test.js`, `test/agent/extension-tab-updates.test.js` *(new — register in `package.json` `test` and `test:agent`)*
 - **Must update in this task** — both assert the whole row with `deepEqual`, so adding `targetId` fails them:
@@ -1034,8 +1036,9 @@ Then navigate one unattached tab in Chrome and re-run — its row must show the 
 
 ```bash
 git add extension/tab-update-policy.js extension/background.js relay/src/index.js \
-       mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js \
-       mcp/test/browserforce-command-registry.test.js test/agent/extension-tab-updates.test.js package.json
+       relay/test/relay-server.test.js mcp/src/browser-session-runtime.js \
+       mcp/test/browser-session-runtime.test.js mcp/test/browserforce-command-registry.test.js \
+       test/agent/extension-tab-updates.test.js package.json
 git commit -m "fix(mcp,extension): source tab titles from the relay and keep its cache fresh"
 ```
 
@@ -1260,6 +1263,12 @@ if (JSON.stringify(handles(before)) !== JSON.stringify(handles(after))) {
 }
 if (titled(before) === 0) {
   console.error('FAIL: every tab is untitled — the relay title source is not wired'); failed = true;
+}
+if (titled(after) < titled(before)) {
+  console.error(`FAIL: titles lost across the reconnect (${titled(before)} -> ${titled(after)})`); failed = true;
+}
+if (after.length !== before.length) {
+  console.error(`FAIL: row count changed (${before.length} -> ${after.length}); comparison is not like-for-like`); failed = true;
 }
 process.exit(failed ? 1 : 0);
 ```
@@ -1558,7 +1567,10 @@ test('open --as records a durable target id for the page it just created', async
 });
 ```
 
-`tabRuntimeEnv({ pages })` and `fakePage({ url, title })` are the existing fixtures at `mcp/test/browserforce-command-registry.test.js:36` and `:53`. Add a `__fireDisconnect()` helper to `tabRuntimeEnv` that fires the fake browser's `disconnected` handler and swaps in fresh page objects with the same URLs — the reconnect is what every durability test in this arc needs, and it belongs in the shared fixture rather than being rebuilt per test.
+`tabRuntimeEnv({ pages })` and `fakePage({ url, title })` are the existing fixtures at `mcp/test/browserforce-command-registry.test.js:36` and `:53`. Two additions to `tabRuntimeEnv`, both shared by every durability test in this arc:
+
+1. **Serve `/json/list`.** Its injected `fetch` answers `/restrictions` only and returns `{}` for everything else, so `row.targetId` is always `null` and no test can exercise `pageForTargetId` or slot rebinding — they would pass vacuously. Derive the target list from the fixture's own pages so the two stay synchronized: `pages.map((pg, i) => ({ id: `T${i + 1}`, url: pg.url(), title: pg.__title ?? '' }))`, recomputed per request.
+2. **`__fireDisconnect()`** fires the fake browser's `disconnected` handler and swaps in fresh page objects carrying the same URLs, leaving the old ones **open but orphaned** — which is what Playwright actually does, and what the generation check above exists to catch.
 
 - [ ] **Step 5: Run to verify they pass**
 
@@ -2093,8 +2105,10 @@ Use the extension-backed count, and report **unknown** rather than guessing when
   // { discovered, count }. Collapsing "not discovered" and "discovered, zero
   // tabs" into one value makes the promised no-tabs state unreachable — the
   // opposite failure from reporting it wrongly.
-  probeTabState = async () => {
-    const status = await probeExtensionStatus();
+  // Derived from the status ALREADY fetched at the top of runDoctor — calling
+  // probeExtensionStatus() a second time throws in the relay-down state, which
+  // is precisely when doctor must still produce a report.
+  deriveTabState = (status) => {
     if (!Array.isArray(status?.attachedTabs)) return { discovered: false, count: 0 };
     // activeTargets is the relay's discovery signal: > 0 only once a CDP client
     // has sent Target.setAutoAttach.
@@ -2103,7 +2117,29 @@ Use the extension-backed count, and report **unknown** rather than guessing when
   },
 ```
 
-Feed it into the same classifier so `doctor` and the agent-facing error agree, and keep every doctor test on the injected probe — the existing fixtures must never reach the real network.
+Run it only when `relayUp && relayStatus?.connected === true` — strict equality, matching the classifier, so a malformed truthy `connected` cannot reach the tab check. Feed the classifier `discovered ? count : undefined`; passing `count: 0` while undiscovered is what would misclassify a healthy browser as `NO_TABS`. Every doctor test stays on injected values — the fixtures must never reach the real network.
+
+```js
+test('doctor still reports when the relay is down', async () => {
+  const { checks, ok } = await runDoctor({
+    probeExtensionStatus: async () => { throw new Error('ECONNREFUSED'); },
+    readRawLock: () => null, paths: basePaths,
+  });
+  assert.equal(ok, false);
+  assert.equal(checks.find((c) => c.id === 'relay').status, 'fail');
+  assert.notEqual(checks.find((c) => c.id === 'tabs')?.status, 'fail',
+    'the tab check must not fire, and must not throw, when there is no relay');
+});
+
+test('a malformed connected value never reaches the tab check', async () => {
+  const { checks } = await runDoctor({
+    probeExtensionStatus: async () => ({ connected: 'false', activeTargets: 3, attachedTabs: [] }),
+    readRawLock: () => null, paths: basePaths,
+  });
+  assert.equal(checks.find((c) => c.id === 'extension').status, 'fail');
+  assert.notEqual(checks.find((c) => c.id === 'tabs')?.status, 'fail');
+});
+```
 
 ```js
 test('doctor does not claim zero tabs before discovery has run', async () => {
@@ -2327,11 +2363,15 @@ This is the difference that matters competitively. `agent-browser` has isolation
 
 The minimal fix is not a lock or a queue: it is to stop pretending there is one active tab when there are several agents. Give each identified client its own active page inside the one shared session. Unidentified clients keep today's shared page exactly, so nothing existing changes behaviour.
 
-**Files:**
-- Modify: `mcp/src/browser-session-runtime.js:351-369` (`setActivePage`/`resolveActivePage`/`getActivePage`)
-- Modify: `cli/sessiond.js` (read a client id per request, pass it through)
+**Files** — the id must reach execution, so every layer in the table below is edited AND staged; a chain that stops halfway leaves the stomp in place:
+- Modify: `mcp/src/browser-session-runtime.js:351-369` (`setActivePage`/`resolveActivePage`/`getActivePage`, plus `openNewPage`/`listTabRows`/`activeTabRow` scoping and `stateViewFor`)
+- Modify: `mcp/src/exec-engine.js:541-545` (client-scoped `activePage()` resolver and `state` view)
+- Modify: `mcp/src/browserforce-command-registry.js:440-442` (`use`, and `clientId` through `executeBrowserforceVerb`/`executeBrowserforceCommand`)
+- Modify: `cli/session-client.js` (send `X-BrowserForce-Client`)
+- Modify: `cli/sessiond.js` (read + sanitize the header, pass it through)
+- Modify: `bin.js` (read `BROWSERFORCE_CLIENT_ID`)
 - Modify: `skills/browserforce/SKILL.md`, `mcp/src/help-docs.js` (`subagents` section)
-- Test: `mcp/test/browser-session-runtime.test.js`, `test/cli-sessiond.test.js`
+- Test: `mcp/test/browser-session-runtime.test.js`, `mcp/test/browserforce-command-registry.test.js`, `test/cli-sessiond.test.js`
 
 **Interfaces:**
 - Produces: `setActivePage(page, { clientId } = {})`, `resolveActivePage(ctx, { clientId } = {})`. `clientId` omitted ⇒ the shared slot, byte-identical to today.
@@ -2416,7 +2456,7 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
   const activePageByClient = new Map();
 
   function setActivePage(page, { clientId = null, targetId = null } = {}) {
-    if (clientId) { activePageByClient.set(clientId, { targetId, page }); return; }
+    if (clientId) { activePageByClient.set(clientId, { targetId, page, gen: connectionGeneration }); return; }
     userState.page = page;
   }
 
@@ -2424,12 +2464,15 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
     if (clientId) {
       const slot = activePageByClient.get(clientId);
       if (slot) {
-        if (isUsablePage(slot.page)) return slot.page;
-        // Stale page: rebind by target id before giving up.
+        // Generation check FIRST. `isUsablePage` only asks isClosed(), and a
+        // Page from the previous connection reports false — it is orphaned, not
+        // closed. Trusting it would hand back a handle onto a dead CDP session.
+        // The disconnect handler clears `browser`, never the old Page objects.
+        if (slot.gen === connectionGeneration && isUsablePage(slot.page)) return slot.page;
         const rebound = slot.targetId ? pageForTargetId(slot.targetId) : null;
-        if (rebound) { slot.page = rebound; return rebound; }
-        // Fail closed. Falling through to the shared page here would hand this
-        // client another agent's tab, which is exactly what it opted out of.
+        if (rebound) { slot.page = rebound; slot.gen = connectionGeneration; return rebound; }
+        // Fail closed. Falling through to the shared page would hand this client
+        // another agent's tab — exactly what it opted out of.
         activePageByClient.delete(clientId);
         return null;
       }
@@ -2444,7 +2487,26 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
 
 Add `activePageByClient.clear();` to `reset()` **in this task** — Task 6 must not clear a map that does not exist until now.
 
-`pageForTargetId(targetId)` looks up the last `listIdentifiedPages()` result, cached beside `lastRelayTargets`. That cache is stale immediately after a reconnect — which is exactly when a slot needs rebinding — so `runCommand()` must `await listIdentifiedPages()` before resolving a client slot whenever the connection was re-established since the cache was filled. Track it with an `identityCacheConnectionId` bumped in the `disconnected` handler; refresh on mismatch. Without this the first post-reconnect command fails closed and the agent sees a spurious "no active tab".
+`connectionGeneration` is a counter incremented in the `disconnected` handler (`:281-286`), which is also what invalidates the identity cache: `pageForTargetId(targetId)` reads the last `listIdentifiedPages()` result cached beside `lastRelayTargets`, and that cache is stale exactly when a slot needs rebinding. `runCommand()` therefore `await`s `listIdentifiedPages()` before resolving a client slot whenever `identityCacheGeneration !== connectionGeneration`. Without it the first post-reconnect command fails closed and the agent sees a spurious "no active tab".
+
+```js
+test('an orphaned Page from the previous connection is never returned', async () => {
+  // The subtle one: Playwright Pages from a dead connection are NOT closed, so
+  // isClosed() is false and a usability-first check hands back a dead handle.
+  const { runtime, pages, __fireDisconnect } = tabRuntimeEnv({
+    pages: [fakePage({ url: 'https://one.test/' }), fakePage({ url: 'https://two.test/' })],
+  });
+  const rows = await runtime.listTabRows();
+  const stale = pages[1];
+  runtime.setActivePage(stale, { clientId: 'agent-2', targetId: rows[1].targetId });
+  __fireDisconnect();                     // old Pages remain open(), just orphaned
+  assert.equal(stale.isClosed(), false, 'fixture must model the real hazard');
+  await runtime.listTabRows();
+  const got = runtime.getActivePage({ clientId: 'agent-2' });
+  assert.notEqual(got, stale, 'must not return the orphaned Page');
+  assert.equal(got.url(), 'https://two.test/', 'must rebind to the live page for that target');
+});
+```
 
 `resolveActivePage(ctx, { clientId } = {})` threads the same option through. Every existing caller passes nothing and is unchanged.
 
@@ -2458,7 +2520,9 @@ Threading the id is most of the work, and none of it is optional — an id that 
 | `mcp/src/browserforce-command-registry.js` | carry `clientId` into every `runtime.*` active-page call — **including `use` (`:440-442`)**, which calls `setActivePage(page)` today and would keep writing the shared slot |
 | `mcp/src/browser-session-runtime.js` | `resolveTabTarget()` must return `targetId` beside `page` so `use` can pass `{ clientId, targetId }`; `open` gets it from the post-create listing above. Without the id a slot stores `null` and cannot rebind after reconnect |
 | `mcp/src/browser-session-runtime.js` | `runCommand({ clientId })` resolves the page via `getActivePage({ clientId })` |
-| `mcp/src/exec-engine.js:541-545` | **`buildExecContext.activePage()` reads shared `userState.page` before its `defaultPage`.** Picking the right page before construction is not enough — helpers and `state.page` inside a snippet still reach the shared tab. Pass a client-scoped resolver in |
+| `mcp/src/exec-engine.js:541-545` | **`buildExecContext.activePage()` reads shared `userState.page` before its `defaultPage`.** Picking the right page before construction is not enough — helpers still reach the shared tab. Pass a client-scoped resolver in |
+| `mcp/src/exec-engine.js` | **`state` is the shared `userState` object.** A scoped `activePage()` does not scope `state.page`: an `eval` that reads it sees another client's tab, and one that assigns it stomps them. Expose a per-client `state` view whose `page` getter/setter routes through `getActivePage`/`setActivePage` for that `clientId`, leaving every other key shared |
+| `mcp/src/browser-session-runtime.js` | `openNewPage({ clientId })` must write the client's slot, not `userState.page`; `listTabRows({ clientId })` and `activeTabRow({ clientId })` must mark the caller's own active row. Otherwise `open`, `use` and `tabs` all report and mutate the shared tab even when everything else is scoped |
 
 `--tab` still wins for a single run. Add the end-to-end test at the CLI layer, since that is where a broken link shows up:
 
@@ -2473,12 +2537,35 @@ test('unpinned commands are client-scoped end to end', async () => {
   await exec('node', ['bin.js', 'use', 't1'], { cwd: ROOT, env: a });
   await exec('node', ['bin.js', 'use', 't2'], { cwd: ROOT, env: b });
   for (const [who, want] of [[a, 'one.test'], [b, 'two.test']]) {
-    for (const verb of [['get', 'url'], ['eval', 'return page.url()']]) {
+    for (const verb of [['get', 'url'], ['eval', 'return page.url()'], ['eval', 'return state.page.url()']]) {
       const { stdout } = await exec('node', ['bin.js', ...verb], { cwd: ROOT, env: who });
       assert.ok(stdout.includes(want),
         `${verb[0]} must resolve the caller's own tab, not the shared one`);
     }
   }
+});
+
+test('state.page is client-scoped for reads and writes', async () => {
+  const { runtime, pages } = tabRuntimeEnv({
+    pages: [fakePage({ url: 'https://one.test/' }), fakePage({ url: 'https://two.test/' })],
+  });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[0], { clientId: 'a', targetId: rows[0].targetId });
+  runtime.setActivePage(pages[1], { clientId: 'b', targetId: rows[1].targetId });
+  const stateA = runtime.stateViewFor('a');
+  const stateB = runtime.stateViewFor('b');
+  assert.equal(stateA.page.url(), 'https://one.test/');
+  stateB.page = pages[0];
+  assert.equal(stateA.page.url(), 'https://one.test/', 'b assigning state.page must not move a');
+  assert.equal(runtime.getActivePage({ clientId: 'b' }).url(), 'https://one.test/');
+});
+
+test('open and tabs report the caller own active tab', async () => {
+  const { runtime, run } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://one.test/' })] });
+  await run('open https://two.test/', { clientId: 'a' });
+  const rowsB = await runtime.listTabRows({ clientId: 'b' });
+  assert.ok(!rowsB.find((r) => r.active && r.url === 'https://two.test/'),
+    'b must not inherit the tab a just opened as its active row');
 });
 
 test('two CLI clients keep separate active tabs against one daemon', async () => {
@@ -2513,8 +2600,11 @@ Keep the `--tab` guidance as the fallback for clients that cannot set the id.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add mcp/src/browser-session-runtime.js cli/sessiond.js skills/browserforce/SKILL.md \
-        mcp/src/help-docs.js mcp/test/browser-session-runtime.test.js test/cli-sessiond.test.js
+git add mcp/src/browser-session-runtime.js mcp/src/exec-engine.js \
+        mcp/src/browserforce-command-registry.js cli/session-client.js cli/sessiond.js bin.js \
+        skills/browserforce/SKILL.md mcp/src/help-docs.js \
+        mcp/test/browser-session-runtime.test.js mcp/test/browserforce-command-registry.test.js \
+        test/cli-sessiond.test.js
 git commit -m "feat(mcp,cli): give each identified client its own active tab so parallel subagents stop stomping"
 ```
 
