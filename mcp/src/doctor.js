@@ -207,22 +207,27 @@ export async function runDoctor({
   const driftedSkills = shippedSkill
     ? deployedSkills.filter((d) => d.text.trimEnd() !== shippedSkill.trimEnd())
     : [];
-  if (unreadableSkills.length > 0) {
-    checks.push(check('skill', 'BrowserForce skill', WARN,
-      `cannot read ${unreadableSkills.map((d) => d.path).join(', ')} — drift there cannot be detected; fix the permissions`));
+  // Visible drift outranks an unreadable path: an unreadable copy must never
+  // short-circuit the failure this check exists to produce. It is appended to
+  // whatever verdict the readable copies earn.
+  const unreadableNote = unreadableSkills.length > 0
+    ? ` Cannot read ${unreadableSkills.map((d) => d.path).join(', ')} — drift there cannot be detected; fix the permissions.`
+    : '';
+  if (driftedSkills.length > 0 && shippedSkill) {
+    checks.push(check('skill', 'BrowserForce skill', FAIL,
+      `stale — ${driftedSkills.map((d) => d.path).join(', ')} differ from the shipped guide. `
+      + `Agents read the stale copy. Reinstall: \`${SKILL_INSTALL_HINT}\`${unreadableNote}`));
+  } else if (unreadableSkills.length > 0) {
+    checks.push(check('skill', 'BrowserForce skill', WARN, unreadableNote.trim()));
   } else if (!shippedSkill) {
     checks.push(check('skill', 'BrowserForce skill', WARN,
       `cannot read the shipped guide at ${paths.shippedSkillFile}`));
   } else if (deployedSkills.length === 0) {
     checks.push(check('skill', 'BrowserForce skill', OK,
       `not installed for any agent — install with \`${SKILL_INSTALL_HINT}\``));
-  } else if (driftedSkills.length === 0) {
+  } else {
     checks.push(check('skill', 'BrowserForce skill', OK,
       `${deployedSkills.length} deployed copy/copies match the shipped guide`));
-  } else {
-    checks.push(check('skill', 'BrowserForce skill', FAIL,
-      `stale — ${driftedSkills.map((d) => d.path).join(', ')} differ from the shipped guide. `
-      + `Agents read the stale copy. Reinstall: \`${SKILL_INSTALL_HINT}\``));
   }
 
   // 2c. Tab count. doctor REPORTS it; it never adjudicates emptiness — it

@@ -1318,3 +1318,48 @@ test('a known but unresolved name never soft-matches a different tab', async () 
     return true;
   });
 });
+
+test('an exactly-resolved id IS evicted once its page is gone', async () => {
+  // The R1 exemption must not become "never evict": a stale name blocks its own
+  // reuse, so setNamedPage on a fresh page fails with TAB_NAME_IN_USE.
+  let targets = [
+    { id: 'D1', url: 'about:blank', title: '' },
+    { id: 'D2', url: 'about:blank', title: '' },
+    { id: 'K', url: 'https://keep.test/', title: 'Keep' },
+  ];
+  const pages = [
+    makeTabPage({ url: 'about:blank' }),
+    makeTabPage({ url: 'about:blank' }),
+    makeTabPage({ url: 'https://keep.test/' }),
+  ];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets });
+  const rows = await runtime.listTabRows();
+  runtime.setNamedPage('dup', pages[0], { targetId: rows[0].targetId });
+
+  // Both duplicate tabs close for real.
+  targets = [targets[2]];
+  pages.splice(0, 2);
+  await runtime.listTabRows();
+
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), [],
+    'a name whose tab is gone must be released');
+  assert.doesNotThrow(() => runtime.setNamedPage('dup', pages[0]),
+    'and the name must be reusable');
+});
+
+test('a skipped resolution round is not evidence that an exact id is gone', async () => {
+  // Past AMBIGUOUS_RESOLUTION_LIMIT the resolver does not run, so absence from
+  // this listing says nothing. Evicting there would renumber open tabs.
+  const pages = Array.from({ length: 3 }, () => makeTabPage({ url: 'about:blank' }));
+  const targets = () => pages.map((_, i) => ({ id: `D${i}`, url: 'about:blank', title: '' }));
+  const runtime = makeRelayRuntime({ pages, targets });
+  const before = (await runtime.listTabRows()).map((r) => r.handle);
+
+  // Blow past the cap: now the resolver is skipped entirely.
+  for (let i = 0; i < 20; i += 1) pages.push(makeTabPage({ url: 'about:blank' }));
+  await runtime.listTabRows();
+  // Back under the cap — the original three must still hold their handles.
+  pages.splice(3, 20);
+  const after = (await runtime.listTabRows()).slice(0, 3).map((r) => r.handle);
+  assert.deepEqual(after, before, 'a skipped round must not evict live exact ids');
+});

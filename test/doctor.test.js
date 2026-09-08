@@ -311,3 +311,23 @@ describe('doctor: unreadable deployed skill', () => {
     assert.doesNotMatch(skill.detail, /not installed/i);
   });
 });
+
+describe('doctor: drift outranks unreadability', () => {
+  it('fails on a readable stale copy even when another copy is unreadable', async () => {
+    // An unreadable path must not short-circuit the check the whole thing
+    // exists for: drift that IS visible still fails doctor.
+    const report = await runDoctor(healthyDeps({
+      readSkillText: (p) => {
+        if (p.includes('shipped')) return 'shipped copy';
+        if (p.includes('locked')) return UNREADABLE_SKILL;
+        return 'stale copy';
+      },
+      paths: { ...PATHS, deployedSkillFiles: ['/home/locked/SKILL.md', '/home/stale/SKILL.md'] },
+    }));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, FAIL);
+    assert.match(skill.detail, /\/home\/stale\/SKILL\.md/);
+    assert.match(skill.detail, /locked/, 'the unreadable path is still reported');
+    assert.equal(report.ok, false);
+  });
+});

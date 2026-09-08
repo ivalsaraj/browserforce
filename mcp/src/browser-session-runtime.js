@@ -160,8 +160,12 @@ export function createBrowserSessionRuntime(deps = {}) {
   // attached tab — and "absent from /json/list" is the test both handle
   // eviction and name deletion use for "this tab is gone". Without this set
   // every duplicate-URL tab lost its handle and its name on the next listing.
-  // A real CDP target id is globally unique and never reused, so exempting it
-  // costs nothing: the tab closing is caught by the page disappearing instead.
+  //
+  // It is an exemption from the RELAY listing only, never a blanket "never
+  // evict": an exact id whose page is gone must still be released, or its name
+  // stays registered and cannot be reused. This listing's own rows supply that
+  // evidence — but only when the resolver actually ran (past
+  // AMBIGUOUS_RESOLUTION_LIMIT it is skipped, and absence then says nothing).
   const exactlyResolvedTargetIds = new Set();
 
   /** Relay identity applies only to the real-Chrome backend. Null = MCP = real. */
@@ -613,15 +617,17 @@ export function createBrowserSessionRuntime(deps = {}) {
    * listing cannot be done this way (the relay mints an alias session per
    * Target.attachToTarget). Sessions are detached immediately.
    */
+  /** @returns {boolean} whether resolution actually ran over the unresolved set. */
   async function resolveAmbiguousTargetIds(ctx, rows) {
     // Only where relay identity is the identity source. A managed backend has
     // no target ids to be durable across, and a runtime with no relay URL is
     // per-connection by design — opening a CDP session per unmatched page there
     // is cost with nothing to buy.
     const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
-    if (!relayBackendActive() || !relayHttpUrl || typeof ctx?.newCDPSession !== 'function') return;
+    if (!relayBackendActive() || !relayHttpUrl || typeof ctx?.newCDPSession !== 'function') return false;
     const unresolved = rows.filter((r) => !r.targetId);
-    if (unresolved.length === 0 || unresolved.length > AMBIGUOUS_RESOLUTION_LIMIT) return;
+    if (unresolved.length > AMBIGUOUS_RESOLUTION_LIMIT) return false;
+    if (unresolved.length === 0) return true; // nothing to resolve is still full evidence
     await Promise.all(unresolved.map(async (row) => {
       let session;
       try {
@@ -637,6 +643,7 @@ export function createBrowserSessionRuntime(deps = {}) {
         try { await session?.detach(); } catch { /* already gone */ }
       }
     }));
+    return true;
   }
 
   /**
@@ -688,21 +695,41 @@ export function createBrowserSessionRuntime(deps = {}) {
         handle: getStablePageHandle(page, targetId),
       };
     }));
-    await resolveAmbiguousTargetIds(ctx, rows);
+    const resolutionRan = await resolveAmbiguousTargetIds(ctx, rows);
+    const rowTargetIds = new Set(rows.map((r) => r.targetId).filter(Boolean));
+    const relayTargetIds = new Set(
+      (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
+    );
+    // One liveness decision, computed ONCE and applied to handles and names
+    // alike. Deciding per-consumer let the handle sweep delete an id from
+    // `exactlyResolvedTargetIds` and the name sweep then read it as live.
+    const isTargetLive = (id) => {
+      if (!id) return false;
+      if (relayTargetIds.has(id)) return true;
+      // An exact CDP id is never in the relay listing. This listing's own rows
+      // are its evidence — but only when the resolver actually ran; past
+      // AMBIGUOUS_RESOLUTION_LIMIT it is skipped and absence says nothing.
+      if (!exactlyResolvedTargetIds.has(id)) return false;
+      return rowTargetIds.has(id) || !resolutionRan;
+    };
     if (authoritative) {
       // The relay synthesizes bf-target-<tabId> when the extension has no real
       // CDP target id, and CHROME REUSES TAB IDS — so a closed-then-reopened
       // tab can present the same synthesized id and inherit the previous tab's
-      // handle. Evict ids the relay no longer lists. Only on an authoritative
+      // handle. Evict ids that are no longer live. Only on an authoritative
       // listing: a failed fetch is not evidence that a tab closed.
-      const live = new Set(targets.map((t) => t?.id).filter(Boolean));
-      for (const id of handlesByTargetId.keys()) {
-        if (!live.has(id) && !exactlyResolvedTargetIds.has(id)) handlesByTargetId.delete(id);
-      }
+      const dead = [...handlesByTargetId.keys()].filter((id) => !isTargetLive(id));
+      for (const id of dead) handlesByTargetId.delete(id);
     }
     if (startedAt !== connectionGeneration) return listIdentifiedPages(); // retry on the new connection
     identityCache = { generation: connectionGeneration, rows };
-    rebindNamedPages(rows, { authoritative, targets });
+    rebindNamedPages(rows, { authoritative, isTargetLive });
+    // Prune the exact-id set LAST, once both consumers have read it.
+    if (authoritative) {
+      for (const id of [...exactlyResolvedTargetIds]) {
+        if (!isTargetLive(id)) exactlyResolvedTargetIds.delete(id);
+      }
+    }
     adoptTargetIdsForClientSlots(rows);
     return rows;
   }
@@ -722,23 +749,19 @@ export function createBrowserSessionRuntime(deps = {}) {
    * and does not contain its target — an unreachable relay is not evidence that
    * a tab closed, and deleting on a failed fetch silently loses user names.
    */
-  function rebindNamedPages(identified, { authoritative, targets }) {
+  function rebindNamedPages(identified, { authoritative, isTargetLive = () => true }) {
     const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
-    // Existence comes from the RAW target list, never from `identified`: a tab
-    // can be present in /json/list yet unmatched here (its URL changed, or it
-    // shares a URL with another tab). Treating "unmatched" as "gone" deletes a
-    // name for a tab that is plainly still open. The LOCAL snapshot, never
-    // lastRelayTargets — a concurrent listing can overwrite the shared one
-    // between this call's fetch and this line.
-    const liveTargetIds = new Set(
-      (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
-    );
+    // Existence comes from `isTargetLive`, never from `identified`: a tab can be
+    // present in /json/list yet unmatched here (its URL changed, or it shares a
+    // URL with another tab). Treating "unmatched" as "gone" deletes a name for
+    // a tab that is plainly still open. It reads the caller's LOCAL snapshot,
+    // never lastRelayTargets — a concurrent listing can overwrite the shared
+    // one between this call's fetch and this line.
     for (const [name, entry] of namedPages) {
       if (!entry.targetId) continue;
       const page = byTargetId.get(entry.targetId);
       if (page) { entry.page = page; entry.gen = connectionGeneration; continue; }
-      if (authoritative && !liveTargetIds.has(entry.targetId)
-        && !exactlyResolvedTargetIds.has(entry.targetId)) namedPages.delete(name);
+      if (authoritative && !isTargetLive(entry.targetId)) namedPages.delete(name);
     }
     pruneNamedPages();
   }
