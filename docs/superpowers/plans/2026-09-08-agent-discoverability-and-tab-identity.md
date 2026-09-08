@@ -377,6 +377,25 @@ test('empty and non-array inputs return an empty array', () => {
   assert.deepEqual(matchPagesToTargets([], [{ id: 'T1', url: 'u', title: 't' }]), []);
   assert.deepEqual(matchPagesToTargets(undefined, undefined), []);
 });
+
+// The safety invariant. Positional pairing inside a duplicate-URL group can, in
+// principle, pair the wrong two tabs. This asserts the blast radius: a page can
+// only ever be paired with a target that has its EXACT URL, so a mis-pair is
+// confined to tabs already showing the same page and can never hand out a
+// handle pointing at a different site.
+test('a page is never paired with a target of a different URL', () => {
+  const pageUrls = ['about:blank', 'https://console.test/prod', 'about:blank', 'https://a.test/'];
+  const targets = [
+    { id: 'T1', url: 'about:blank', title: 'x' },
+    { id: 'T2', url: 'https://console.test/prod', title: 'console' },
+    { id: 'T3', url: 'about:blank', title: 'y' },
+    { id: 'T4', url: 'https://a.test/', title: 'a' },
+  ];
+  const byId = new Map(targets.map((t) => [t.id, t.url]));
+  matchPagesToTargets(pageUrls, targets).forEach(({ targetId }, i) => {
+    if (targetId) assert.equal(byId.get(targetId), pageUrls[i]);
+  });
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -760,10 +779,30 @@ Expected: PASS
 
 In `skills/browserforce/SKILL.md`, keep the "Stable handles and names persist for the lifetime of the session." sentence — it is now true — and append: `A handle survives the idle reconnect; it is invalidated only by \`reset\`.`
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Prove it against real Chrome**
+
+Unit tests drive fake browser objects and cannot reproduce relay-discovered targets or lazy CDP attach — which is why `test/sessiond-real-smoke.mjs` exists and self-skips (exit 0) when no extension is connected. Add a handle-durability leg to it, after the existing `session status` step:
+
+```js
+// Handle durability across the idle reconnect. The unit suite proves the
+// keying; only a real Chrome proves the relay actually reports stable target
+// ids for tabs it discovered rather than opened.
+const first = await cli('tabs', '--limit', '5');
+const idleMs = Number(process.env.BF_SESSIOND_IDLE_MS || 15000);
+await new Promise((r) => setTimeout(r, idleMs + 2000));   // let the browser idle-disconnect
+const second = await cli('tabs', '--limit', '5');
+const handles = (out) => out.split('\n').filter((l) => /^[ *] t\d+/.test(l)).map((l) => l.trim().split(/\s+/)[1]);
+assert.deepEqual(handles(second), handles(first), 'handles renumbered across the idle reconnect');
+assert.ok(handles(first).length > 0, 'no tabs listed — cannot prove handle durability');
+```
+
+Run: `node test/sessiond-real-smoke.mjs` with the relay up and Chrome connected.
+Expected: PASS. With no extension connected it self-skips — that is not a pass; say so if that is what happened.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js mcp/src/help-docs.js skills/browserforce/SKILL.md
+git add mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js mcp/src/help-docs.js skills/browserforce/SKILL.md test/sessiond-real-smoke.mjs
 git commit -m "fix(mcp): key tab handles by relay target id so they survive the idle reconnect"
 ```
 
@@ -1196,7 +1235,116 @@ git commit -m "fix(mcp): give each unready BrowserForce state its own message an
 
 ---
 
-### Task 11: Record the arc
+### Task 11: A subagent handoff an orchestrator can paste
+
+Orchestrating agents delegate browser work to subagents and must say, in one line, how to do it. BrowserForce has the machinery and no snippet, so it does not get delegated.
+
+A scan of `agent-browser` 0.37.0 (the installed copy is 0.27.0 — ten minor versions stale) found **no subagent handoff surface at all**: zero matches for `sub-?agent|delegat|orchestrat|hand-?off|spawn` across its whole package. What it has instead is deterministic derivation — `session id --scope worktree --prefix <p>` gives orchestrator and subagent the same session name from the worktree they already share — and an explicit doctrine that agents must **avoid** each other's browsers: *"The default (unnamed) session is a single shared browser: it is shared with every other agent on the machine … working in it can hijack another agent's page mid-task"* (`core/SKILL.md:32`).
+
+So the competitive position is the inverse of what it looks like. It has isolation primitives and no sharing protocol. BrowserForce's global daemon makes sharing the **default** — a subagent inherits the parent's logged-in tabs with zero setup, which is the thing orchestrators actually want. That is the advantage to lean into, and it is only an advantage if sharing is safe. Measured on agent-browser: four concurrent clients on one session name produced no lock, no queue, no warning, and last-write-wins on a single active tab. BrowserForce has the same hazard for the same reason, so documenting `--tab` is the minimum, not the finish line.
+
+What already exists, none of it documented where an agent reads:
+
+- `DEFAULT_SESSIOND_LOCK_PATH = ~/.browserforce/sessiond-lock.json` (`cli/session-client.js:18`) is a **single global daemon**. Every invocation on the machine — orchestrator or subagent — already shares one browser session, its active tab, its named tabs and its snapshot refs. A subagent inherits the parent's logged-in tabs with zero setup, which is what `--session` has to be configured to achieve.
+- `--tab <target>` pins a page for **that run only** and never mutates the shared active tab (`AGENTS.md`, MCP Tool Surface).
+- `BF_SESSIOND_LOCK_PATH` gives a subagent its own daemon; `BROWSERFORCE_CDP_CLIENT_LABEL` gives it its own Chrome window (`mcp/src/client-label.js`).
+
+The hazard the snippet must prevent: two subagents sharing the global daemon **stomp each other's active tab**, because `state.page` is shared state. Shared-by-default is the right default and a silent trap for parallel subagents. The instruction has to make `--tab` non-optional for that case.
+
+**Files:**
+- Modify: `skills/browserforce/SKILL.md` (new section)
+- Modify: `mcp/src/help-docs.js` (new `subagents` section, registered in `HELP_SECTION_NAMES`)
+- Modify: `test/browserforce-skill-contract.js`
+- Test: `mcp/test/help-docs.test.js`
+
+**Interfaces:**
+- Consumes: `HELP_SECTION_NAMES` (drives the `help` tool's `z.enum`, so adding a section widens the MCP schema — verify `mcp/test/mcp-tools.test.js` still passes).
+- Produces: help section id `subagents`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```js
+// test/browserforce-skill-contract.js — inside assertBrowserforceCoreSkill
+assert.match(text, /subagent/i, `${sourceLabel} must tell an orchestrator how to delegate`);
+assert.match(text, /--tab/, `${sourceLabel} subagent guidance must require --tab for parallel work`);
+assert.match(text, /BF_SESSIOND_LOCK_PATH/, `${sourceLabel} must document the isolation knob`);
+```
+
+```js
+// mcp/test/help-docs.test.js
+test('help exposes a subagents section that names both modes and the shared-tab hazard', () => {
+  assert.ok(HELP_SECTION_NAMES.includes('subagents'));
+  const { text } = HELP_SECTIONS.subagents;
+  assert.match(text, /--tab/);
+  assert.match(text, /BF_SESSIOND_LOCK_PATH/);
+  assert.match(text, /same active tab|shared active tab|stomp/i);
+});
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `node --test test/browserforce-skill.test.js mcp/test/help-docs.test.js`
+Expected: FAIL — no `subagents` section; skill has no subagent guidance.
+
+- [ ] **Step 3: Add the SKILL.md section**
+
+Place it directly after the tabs/handles material so the `--tab` requirement lands with the handle concept:
+
+```markdown
+## Handing browser work to a subagent
+
+Subagents share your browser session automatically — one daemon per machine, so
+they see your tabs, your logins and your snapshot refs with no setup. Paste one
+of these into the subagent's prompt.
+
+**Sequential subagents (default).** They share your active tab:
+
+> Browser: use the `browserforce` CLI. It is already connected to the user's real
+> Chrome and shares this session's tabs. Run `browserforce tabs` to see them,
+> `browserforce use <handle>` to pick one, then `snapshot` / `click @eN` /
+> `fill @eN <text>`.
+
+**Parallel subagents.** They share one active tab, so each must pin its own or
+they will overwrite each other mid-run:
+
+> Browser: use the `browserforce` CLI, and pass `--tab <handle>` on EVERY command
+> — other agents are working in the same session and the unpinned active tab is
+> shared. Your tab is `<handle>`.
+
+**A subagent that must not touch your tabs at all.** Give it its own daemon and
+its own Chrome window:
+
+> Browser: use the `browserforce` CLI with `BF_SESSIOND_LOCK_PATH=/tmp/bf-<name>.json`
+> and `BROWSERFORCE_CDP_CLIENT_LABEL=<name>` exported. This gives you a separate
+> session and a separate Chrome window from the other agents.
+
+Handles (`t<N>`) are stable for the session, so a handle you pass to a subagent
+still names the same tab when it runs.
+```
+
+- [ ] **Step 4: Add the help section**
+
+In `mcp/src/help-docs.js`, add a `subagents` entry carrying the same three snippets in the file's existing bullet style, and register `'subagents'` in `HELP_SECTION_NAMES`. Cross-reference rather than restate: the tabs section already owns handle semantics, so link to it (`see help(tabs)`), per the repo's rule against stating a rationale twice.
+
+- [ ] **Step 5: Run to verify they pass**
+
+Run: `node --test test/browserforce-skill.test.js mcp/test/help-docs.test.js mcp/test/mcp-tools.test.js && pnpm test:skill-install`
+Expected: PASS
+
+- [ ] **Step 6: Prove the hazard is real before documenting it as one**
+
+With the relay up, open two tabs. From two shells against the same daemon, run `browserforce use t1` in one and `browserforce use t2` in the other, then `browserforce get url` in the first. If it reports t2's URL, the shared-active-tab stomp is confirmed and the `--tab` requirement is load-bearing. If it does not, correct the section — do not ship a warning about a hazard that does not exist.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add skills/browserforce/SKILL.md mcp/src/help-docs.js test/browserforce-skill-contract.js mcp/test/help-docs.test.js
+git commit -m "feat(skill): document subagent handoff so orchestrators can delegate browser work"
+```
+
+---
+
+### Task 12: Record the arc
 
 **Files:**
 - Modify: `docs/knowledge/timeline2.md`, `AGENTS.md`, `README.md`
@@ -1227,6 +1375,9 @@ git commit -m "fix(mcp): give each unready BrowserForce state its own message an
 - `tabs` now refuses positional arguments. `tabs close <handle>` had parsed as a
   bare listing with the arguments discarded: it reported success and closed
   nothing.
+- Documented the subagent handoff. Orchestrators delegate browser work by
+  pasting an instruction line, and BrowserForce had none — despite subagents
+  already sharing one daemon, and one shared active tab, by default.
 ```
 
 - [ ] **Step 2: Add the conventions to `AGENTS.md`**
@@ -1267,6 +1418,33 @@ git commit -m "docs: record agent discoverability and durable tab identity"
 ```
 
 ---
+
+## Considered and rejected
+
+**Serving the skill from the binary instead of shipping a file.** `agent-browser` ships a
+deliberate stub SKILL.md and serves version-matched docs from the CLI (`skills get core`),
+which makes doc/version drift structurally impossible and would dissolve Task 1 rather than
+police it. It is rejected here because this repo already decided against it, in writing:
+`AGENTS.md` states the installed guide "is the complete canonical guide … There is no second
+documentation command or runtime skill loader." Reversing that is a separate decision with its
+own plan, not a step inside this one. Note also that the pattern is not a complete answer —
+agent-browser's *served* docs still document the ref format as `@e1 [header]` when the binary
+actually emits `- link "…" [ref=e1]`. Version-locking stops staleness, not wrongness.
+
+**Deriving the isolated subagent's daemon path** (agent-browser's `session id --scope worktree`)
+rather than having the orchestrator name it. Better ergonomics, but it adds a verb and this plan
+already touches the command surface in three tasks. Worth doing after this lands.
+
+## Follow-on work this scan surfaced (not in scope)
+
+- **Untrusted-content fencing.** `agent-browser --content-boundaries` wraps page text in a
+  per-invocation random nonce plus origin, so page content cannot forge the end marker and escape
+  quarantine. BrowserForce returns page text unfenced. This is the largest single gap found and
+  belongs in its own security-scoped plan.
+- **Output bounded by default.** Its `--max-output` truncation line names both the withheld amount
+  and the flag that changes it — the same contract Task 8 adopts for `tabs`. Applying it to
+  `snapshot` is the obvious next step; a real page measured ~11k tokens for an interactive-only
+  snapshot.
 
 ## Non-goals
 
