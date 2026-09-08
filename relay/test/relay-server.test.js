@@ -4082,3 +4082,65 @@ describe('wildcard CORS is an allowlist', () => {
     }
   });
 });
+
+describe('tab metadata cache freshness', () => {
+  // Seed one target the way a real session does: extension connected, then a
+  // CDP client sends Target.setAutoAttach so the relay discovers tabs.
+  async function seedOneTarget(port, relay, tab) {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({ id: msg.id, result: { tabs: [tab] } }));
+      }
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.on('message', () => {});
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(250);
+    assert.ok(relay.tabToSession.get(tab.tabId), 'target must be seeded');
+    return { ext, cdp };
+  }
+
+  it('applies an emptied title instead of ignoring it', async () => {
+    const port = getRandomPort();
+    const relay = new RelayServer(port);
+    await relay.start({ writeCdpUrl: false });
+    let conns;
+    try {
+      conns = await seedOneTarget(port, relay, { tabId: 7, url: 'https://a.test/', title: 'Before', active: true });
+      conns.ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 7, title: '' } }));
+      await sleep(150);
+      const { body } = await httpGet(`http://127.0.0.1:${port}/json/list`);
+      const entry = body.find((t) => t.url === 'https://a.test/');
+      assert.ok(entry, 'seeded target must be listed');
+      assert.equal(entry.title, '', 'a cleared title must not leave the old one cached');
+    } finally {
+      conns?.cdp.close();
+      conns?.ext.close();
+      relay.stop();
+    }
+  });
+
+  it('applies an emptied url instead of ignoring it', async () => {
+    const port = getRandomPort();
+    const relay = new RelayServer(port);
+    await relay.start({ writeCdpUrl: false });
+    let conns;
+    try {
+      conns = await seedOneTarget(port, relay, { tabId: 8, url: 'https://b.test/', title: 'B', active: true });
+      conns.ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 8, url: '' } }));
+      await sleep(150);
+      const { body } = await httpGet(`http://127.0.0.1:${port}/json/list`);
+      const entry = body.find((t) => t.title === 'B');
+      assert.equal(entry.url, '', 'a cleared url must not leave the old one cached');
+    } finally {
+      conns?.cdp.close();
+      conns?.ext.close();
+      relay.stop();
+    }
+  });
+});

@@ -267,8 +267,8 @@ describe('tab commands: tabs / use / open / rename / forget', () => {
 
     const { data } = await run('tabs');
     assert.deepEqual(data.tabs, [
-      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', active: false, name: 'docs' },
-      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', active: true, name: null },
+      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', targetId: null, active: false, name: 'docs' },
+      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', targetId: null, active: true, name: null },
     ]);
   });
 

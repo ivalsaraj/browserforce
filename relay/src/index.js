@@ -1186,8 +1186,11 @@ class RelayServer {
     const target = this.targets.get(sessionId);
     if (!target) return;
 
-    if (url) target.targetInfo.url = url;
-    if (title) target.targetInfo.title = title;
+    // Presence, not truthiness: a page that clears its title reports '' and a
+    // truthiness check leaves the previous title cached forever — /json/list
+    // then serves stale metadata, which breaks page-to-target matching.
+    if (url !== undefined) target.targetInfo.url = url;
+    if (title !== undefined) target.targetInfo.title = title;
 
     this._broadcastCdp({
       method: 'Target.targetInfoChanged',

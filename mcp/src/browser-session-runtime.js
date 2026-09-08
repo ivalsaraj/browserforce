@@ -1,3 +1,5 @@
+import { matchPagesToTargets } from './tab-identity.js';
+
 // browser-session-runtime.js — shared browser/session runtime for the MCP server
 // and the CLI session daemon. Owns the persistent browser connection, userState,
 // idle-disconnect lifecycle, console capture, and cached agent
@@ -114,6 +116,37 @@ export function createBrowserSessionRuntime(deps = {}) {
   const namedPages = new Map(); // name → page
   let stableHandles = new WeakMap(); // page → 't<N>'
   let nextStableHandleNumber = 1;
+
+  // ─── Relay-target identity ─────────────────────────────────────────────────
+  // Last good relay snapshot + per-page identity, so one failed fetch cannot
+  // renumber every handle. Returning [] on failure would unmatch every page,
+  // fall everything back to per-connection identity, and mint fresh handles on
+  // the next call — reintroducing the exact defect this identity arc removes.
+  let lastRelayTargets = null;
+  let targetIdByPage = new WeakMap();
+
+  // A Page from a previous connection is ORPHANED, not closed — isClosed()
+  // returns false — so isUsablePage() alone can never decide whether a stored
+  // page is still live. The generation counter can.
+  let connectionGeneration = 0;
+  let identityCache = { generation: -1, rows: [] };
+
+  // Cost guard for exact resolution of the tabs the URL matcher could not
+  // identify: if something has gone wrong and half the listing is unmatched,
+  // degrading to per-connection handles beats opening dozens of alias sessions
+  // on the relay (it mints one per Target.attachToTarget).
+  const AMBIGUOUS_RESOLUTION_LIMIT = 8;
+
+  /** Relay identity applies only to the real-Chrome backend. Null = MCP = real. */
+  function relayBackendActive() {
+    return !backendInfo.backend || backendInfo.backend === 'real';
+  }
+
+  /** Live Page for a relay target id, from the last identity refresh. */
+  function pageForTargetId(targetId) {
+    if (!targetId || identityCache.generation !== connectionGeneration) return null;
+    return identityCache.rows.find((r) => r.targetId === targetId)?.page ?? null;
+  }
 
   // Structured tab-state failure. The runtime stays import-free (see header),
   // so it throws plain Errors with a stable `code`; the command registry maps
@@ -232,7 +265,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     // their own — an injected poll timer would deadlock ensureBrowser.
     let expectedCount = 0;
     try {
-      const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
+      const relayHttpUrl = relayBackendActive() && typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
       if (relayHttpUrl) {
         const response = await doFetch(`${relayHttpUrl}/extension/status`, {
           signal: AbortSignal.timeout(1500),
@@ -283,6 +316,10 @@ export function createBrowserSessionRuntime(deps = {}) {
         browser = null;
         contextListenerAttached = false;
         consoleLogs.clear();
+        // Every Page object is about to be replaced by the reconnect. Bumping
+        // the generation is what lets identity tell an orphaned Page from a
+        // live one — isClosed() cannot.
+        connectionGeneration += 1;
       });
       onConnected();
 
@@ -404,6 +441,129 @@ export function createBrowserSessionRuntime(deps = {}) {
     return getPages()
       .filter((page) => isUsablePage(page))
       .map((page) => ({ handle: getStablePageHandle(page), page }));
+  }
+
+  /**
+   * Relay target list: id, url and title for EVERY tab, with no debugger attach.
+   *
+   * Returns `{ targets, authoritative }` per call and NEVER sets a shared
+   * authority flag: a module-level flag read after an await races with parallel
+   * clients — a concurrent listing could treat a stale cached snapshot as
+   * authoritative and assign a closed target to a fresh page.
+   *
+   * Skipped entirely unless the negotiated backend is real Chrome. sessiond
+   * constructs this runtime BEFORE negotiateBackend() and passes
+   * getRelayHttpUrl unconditionally, so a managed or headless session on a
+   * machine with a relay running would otherwise match its own pages against
+   * the real browser's targets. MCP never calls setBackendInfo and is always
+   * real, so a null backend means "use the relay".
+   */
+  async function fetchRelayTargets({ timeoutMs = 1500 } = {}) {
+    if (!relayBackendActive()) return { targets: [], authoritative: false };
+    const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
+    if (!relayHttpUrl) return { targets: [], authoritative: false };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await doFetch(`${relayHttpUrl}/json/list`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (response.ok) {
+          const body = await response.json();
+          if (Array.isArray(body)) {
+            lastRelayTargets = body;
+            return { targets: body, authoritative: true };
+          }
+        }
+      } catch { /* retry once, then fall through to the last good snapshot */ }
+    }
+    return { targets: lastRelayTargets ?? [], authoritative: false };
+  }
+
+  /**
+   * Exact identity for the tabs the URL matcher could not pair (duplicate URLs).
+   *
+   * Bounded by the ambiguous set, not the tab count: a 72-tab listing with two
+   * about:blank tabs opens two alias sessions, not 72 — which is why a full
+   * listing cannot be done this way (the relay mints an alias session per
+   * Target.attachToTarget). Sessions are detached immediately.
+   */
+  async function resolveAmbiguousTargetIds(ctx, rows) {
+    // Only where relay identity is the identity source. A managed backend has
+    // no target ids to be durable across, and a runtime with no relay URL is
+    // per-connection by design — opening a CDP session per unmatched page there
+    // is cost with nothing to buy.
+    const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
+    if (!relayBackendActive() || !relayHttpUrl || typeof ctx?.newCDPSession !== 'function') return;
+    const unresolved = rows.filter((r) => !r.targetId);
+    if (unresolved.length === 0 || unresolved.length > AMBIGUOUS_RESOLUTION_LIMIT) return;
+    await Promise.all(unresolved.map(async (row) => {
+      let session;
+      try {
+        session = await ctx.newCDPSession(row.page);
+        const { targetInfo } = await session.send('Target.getTargetInfo');
+        if (targetInfo?.targetId) {
+          row.targetId = targetInfo.targetId;
+          targetIdByPage.set(row.page, targetInfo.targetId);
+          row.handle = getStablePageHandle(row.page, targetInfo.targetId);
+        }
+      } catch { /* leave it on a per-connection handle */ } finally {
+        try { await session?.detach(); } catch { /* already gone */ }
+      }
+    }));
+  }
+
+  /**
+   * Open pages with their relay target id, title and stable handle.
+   *
+   * Titles come from the relay because page.title() cannot be trusted here: on
+   * a lazily-attached tab the relay acks Runtime.enable synthetically, no
+   * execution context arrives, and the bounded read times out to '' — which is
+   * why every tab in a real many-tab session listed as "(untitled)". The
+   * bounded read stays as the fallback for backends with no relay.
+   */
+  async function listIdentifiedPages() {
+    await ensureBrowser(); // callers may run before any connection exists
+    // Captured BEFORE any await and re-checked after: a listing that spans a
+    // disconnect resolves old Page objects, and publishing them under the NEW
+    // generation would let pageForTargetId hand out an orphan with the
+    // generation check itself vouching for it.
+    const startedAt = connectionGeneration;
+    const ctx = getContext();
+    const pages = ctx.pages().filter((page) => isUsablePage(page));
+    const urls = pages.map((page) => { try { return page.url() || ''; } catch { return ''; } });
+    const { targets, authoritative } = await fetchRelayTargets();
+    const identities = matchPagesToTargets(urls, targets);
+    const rows = await Promise.all(pages.map(async (page, i) => {
+      // A page already identified in this connection keeps its target id even
+      // if this round's match failed (stale URL, duplicate URL, failed fetch).
+      // Identity may only be learned, never silently forgotten.
+      const matched = identities[i] ?? { targetId: null, title: '' };
+      // A STALE snapshot may only CONFIRM identity for a Page we already knew.
+      // Rematching a fresh Page against cached targets lets a replacement tab
+      // at the same URL inherit the closed tab's target id — and its handle.
+      const knownId = targetIdByPage.get(page) ?? null;
+      const targetId = (authoritative ? matched.targetId : null) ?? knownId;
+      if (authoritative && matched.targetId) targetIdByPage.set(page, matched.targetId);
+      // The relay title is used only when this listing actually paired the page
+      // with a target, or when a stale snapshot paired it with the SAME target
+      // we already knew. A stale snapshot may not supply a title to a page it
+      // never identified: a replacement tab at the same URL would show the dead
+      // tab's title, and could then be selected by it. null = no relay title,
+      // distinct from a target whose title is genuinely empty.
+      const relayTitle = matched.targetId && (authoritative || matched.targetId === knownId)
+        ? (matched.title || '')
+        : null;
+      return {
+        page,
+        url: urls[i],
+        targetId,
+        title: relayTitle ?? await pageTitleBounded(page),
+        handle: getStablePageHandle(page, targetId),
+      };
+    }));
+    await resolveAmbiguousTargetIds(ctx, rows);
+    if (startedAt !== connectionGeneration) return listIdentifiedPages(); // retry on the new connection
+    identityCache = { generation: connectionGeneration, rows };
+    return rows;
   }
 
   function pruneNamedPages() {
@@ -531,24 +691,18 @@ export function createBrowserSessionRuntime(deps = {}) {
     await ensureBrowser();
     beginOperation();
     try {
+      const identified = await listIdentifiedPages();
       // Use resolveActivePage (not getActivePage) so the row marked active is
       // the tab a subsequent unnamed command would actually target.
       const active = resolveActivePage(getContext());
-      const stable = listStablePages();
-      // Parallel + bounded: sequential unbounded title reads hang on real
-      // many-tab sessions (see pageTitleBounded).
-      return Promise.all(stable.map(async ({ handle, page }, index) => {
-        const title = await pageTitleBounded(page);
-        let url = '';
-        try { url = page.url(); } catch { /* page closed mid-listing */ }
-        return {
-          handle,
-          index,
-          title,
-          url,
-          active: page === active,
-          name: nameForPage(page),
-        };
+      return identified.map(({ page, handle, title, url, targetId }, index) => ({
+        handle,
+        index,
+        title,
+        url,
+        targetId,
+        active: page === active,
+        name: nameForPage(page),
       }));
     } finally {
       endOperation();
@@ -576,7 +730,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     await ensureBrowser();
     beginOperation();
     try {
-      const stable = listStablePages();
+      const stable = await listIdentifiedPages();
 
       if (/^t\d+$/i.test(q)) {
         const wanted = q.toLowerCase();
@@ -600,14 +754,9 @@ export function createBrowserSessionRuntime(deps = {}) {
         };
       }
 
-      // Parallel + bounded title reads: see pageTitleBounded — an unbounded
-      // title() on a never-attached tab hangs forever on the relay bridge.
-      const metas = await Promise.all(stable.map(async (row) => {
-        let url = '';
-        try { url = row.page.url() || ''; } catch { /* closed mid-match */ }
-        const title = await pageTitleBounded(row.page);
-        return { ...row, url, title };
-      }));
+      // listIdentifiedPages already carries url and title, relay-sourced where
+      // available — no second bounded title read.
+      const metas = stable;
       const lower = q.toLowerCase();
       const tiers = [
         ['url', metas.filter((m) => m.url === q)],
@@ -771,6 +920,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     listPageNames,
     getStablePageHandle,
     listStablePages,
+    listIdentifiedPages,
     listTabRows,
     resolveTabTarget,
     resolveCommandPage,

@@ -3,6 +3,7 @@ import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
 import { hydrateAgentTabs, hydrateActivity, canCloseTab } from './auto-manage-state.js';
 import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
+import { shouldReportTabUpdate, shouldReportTabRemoval } from './tab-update-policy.js';
 
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
@@ -802,31 +803,41 @@ function onTabRemoved(tabId) {
   const hadActivity = tabLastActivity.delete(tabId);
   if (hadAgentEntry || hadActivity) persistAutoManageState();
 
-  if (!attachedTabs.has(tabId)) return;
+  const isAttached = attachedTabs.has(tabId);
+  if (!shouldReportTabRemoval({ isAttached })) return;
 
+  // Reported for EVERY tab, attached or not. Attachment is lazy, so gating on
+  // it meant closing a lazily-attached tab never reached the relay and its
+  // /json/list target — plus every handle and name derived from it — kept
+  // pointing at a tab that no longer exists. The relay ignores unknown tab ids.
   send({
     method: 'tabDetached',
     params: { tabId, reason: 'tab_closed' },
   });
+  if (!isAttached) return;
   cleanupTab(tabId);
   updateBadge();
   queueSyncTabGroup();
 }
 
 function onTabUpdated(tabId, changeInfo) {
-  if (!attachedTabs.has(tabId)) return;
-  if (!changeInfo.url && !changeInfo.title && changeInfo.groupId === undefined) return;
+  const isAttached = attachedTabs.has(tabId);
+  if (!shouldReportTabUpdate({ isAttached, changeInfo })) return;
 
   // Reconcile group membership/title if user or Chrome moved this attached tab.
-  if (changeInfo.groupId !== undefined && !isSyncingTabGroup) {
+  if (isAttached && changeInfo.groupId !== undefined && !isSyncingTabGroup) {
     queueSyncTabGroup();
   }
 
-  const entry = attachedTabs.get(tabId);
-  if (changeInfo.url) entry.targetInfo.url = changeInfo.url;
-  if (changeInfo.title) entry.targetInfo.title = changeInfo.title;
+  if (isAttached) {
+    const entry = attachedTabs.get(tabId);
+    if (changeInfo.url !== undefined) entry.targetInfo.url = changeInfo.url;
+    if (changeInfo.title !== undefined) entry.targetInfo.title = changeInfo.title;
+  }
 
-  if (changeInfo.url || changeInfo.title) {
+  // Sent for unattached tabs too: the relay serves url/title from /json/list
+  // with no debugger attach, and that cache is only as fresh as this message.
+  if ('url' in changeInfo || 'title' in changeInfo) {
     send({
       method: 'tabUpdated',
       params: {
