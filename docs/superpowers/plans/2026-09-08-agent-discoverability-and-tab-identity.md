@@ -237,15 +237,40 @@ Append inside `assertBrowserforceCoreSkill` in `test/browserforce-skill-contract
 Add to `mcp/test/mcp-tools.test.js`:
 
 ```js
-test('MCP tool descriptions lead with when to reach for them', async () => {
+// `index.js` calls main() at import time, so the descriptions cannot be
+// imported — they are read from source. The capture must tolerate backslash
+// escapes: a naive [^']+ stops at the first escaped apostrophe and silently
+// truncates the description under test.
+const QUOTED = (name) => new RegExp(`'${name}',\\s*\n\\s*'((?:[^'\\\\]|\\\\.)*)'`);
+
+test('only the browserforce tool claims browser work, so ToolSearch ranking is deterministic', () => {
   const src = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
-  const browserforceDesc = src.match(/'browserforce',\n\s*'([^']+)'/)?.[1] ?? '';
-  assert.match(browserforceDesc, /browser/i);
-  assert.match(browserforceDesc, /real Chrome/i);
-  assert.match(browserforceDesc, /web page|page/i);
-  const helpDesc = src.match(/'help',\n\s*'([^']+)'/)?.[1] ?? '';
-  assert.match(helpDesc, /browser/i);
-  assert.match(src.match(/const EXECUTE_PROMPT = `([^\n]+)/)?.[1] ?? '', /browser/i);
+
+  const browserforceDesc = src.match(QUOTED('browserforce'))?.[1] ?? '';
+  assert.ok(browserforceDesc, 'browserforce description not found');
+  for (const term of [/\bbrowser\b/i, /real Chrome/i, /\bweb page\b/i, /\bopen\b/i, /\bclick\b/i, /\bscreenshot\b/i]) {
+    assert.match(browserforceDesc, term);
+  }
+
+  // The sibling tools must NOT compete for the same query. `help` is registered
+  // first (index.js:133) and would otherwise outrank the tool that does the work.
+  const helpDesc = src.match(QUOTED('help'))?.[1] ?? '';
+  assert.ok(helpDesc, 'help description not found');
+  assert.doesNotMatch(helpDesc, /^[^.]*\bbrowser\b/i,
+    'help must not open by claiming browser work — it competes with the browserforce tool');
+  assert.match(helpDesc, /docs|documentation|reference/i);
+
+  const execFirstLine = src.match(/const EXECUTE_PROMPT = `([^\n]+)/)?.[1] ?? '';
+  assert.match(execFirstLine, /escape hatch/i,
+    'exec must present as the escape hatch, not as the browser tool');
+});
+
+test('no tool description contains a raw apostrophe that would break single-quoted source', () => {
+  const src = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  for (const name of ['browserforce', 'help']) {
+    const desc = src.match(QUOTED(name))?.[1] ?? '';
+    assert.doesNotMatch(desc, /\\'/, `${name} description escapes an apostrophe; reword to avoid it`);
+  }
 });
 ```
 
@@ -283,22 +308,24 @@ test) before calling a flow verified.
 
 - [ ] **Step 5: Rewrite the three MCP tool descriptions**
 
-`mcp/src/index.js:135` (`help`):
+Write all three apostrophe-free. `user's` inside a single-quoted JS literal needs `\'`, and any source-reading test that captures with `[^']+` truncates there.
+
+`mcp/src/index.js:135` (`help`) — documentation first, so it does not compete for "browser":
 
 ```js
-  'BrowserForce docs by section — browser commands, tabs, snapshots, recovery. Needs no Chrome connection. First read returns docs; repeats return a receipt unless force:true.',
+  'BrowserForce documentation by section: tabs, snapshots, commands, recovery. Reference only — it does not touch Chrome. First read returns docs; repeats return a receipt unless force:true.',
 ```
 
-`mcp/src/index.js:161`, first line of `EXECUTE_PROMPT`:
+`mcp/src/index.js:161`, first line of `EXECUTE_PROMPT` — escape hatch first:
 
 ```js
-const EXECUTE_PROMPT = `Run Playwright JS in the user's real Chrome. Escape hatch for browser work the browserforce command tool cannot express.
+const EXECUTE_PROMPT = `Escape hatch: raw Playwright JS against the real Chrome, for browser work the browserforce command tool cannot express. Prefer that tool.
 ```
 
-`mcp/src/index.js:261` (`browserforce`):
+`mcp/src/index.js:261` (`browserforce`) — the only one that claims the category:
 
 ```js
-    'Control the browser — the user\'s real Chrome, with their tabs, logins and cookies. Use for any web page work: open, click, fill, press, wait, get, snapshot, tabs, use, eval. Start here; reach for exec only when a command cannot express the task.',
+    'Control the browser: the real Chrome the user already has open, with their tabs, logins, cookies and extensions. Use for any web page work — open a page, click, fill, press, wait, get, snapshot, screenshot, scrape, sign in, check what a page renders. Commands: tabs, use, open, snapshot, click, fill, press, wait, get, eval. Start here; reach for exec only when a command cannot express the task.',
 ```
 
 - [ ] **Step 6: Run to verify they pass**
@@ -313,9 +340,13 @@ git add skills/browserforce/SKILL.md mcp/src/index.js test/browserforce-skill-co
 git commit -m "fix(skill,mcp): claim browser work outright so agents pick BrowserForce unprompted"
 ```
 
-- [ ] **Step 8: Prove it the way the defect was found**
+- [ ] **Step 8: Prove both acceptance criteria, separately**
 
-No test can prove skill selection. In a **fresh** session with no tool named, give an agent a plain browser task ("open example.com and tell me what the heading says") and record which tool it reaches for. Run it before and after this commit. If you cannot tell the difference, the edit did not work — revisit the description rather than moving on.
+They are different claims and one does not imply the other.
+
+*Skill selection.* No test can prove it. In a **fresh** session with no tool named, give an agent a plain browser task ("open example.com and tell me what the heading says") and record which tool it reaches for. Run it before and after this commit. If you cannot tell the difference, the edit did not work — revisit the description rather than moving on.
+
+*Tool ranking.* In a fresh session run `ToolSearch("browser")` and record the returned order. `mcp__browserforce__browserforce` must come first. `help` is registered earlier (`mcp/src/index.js:133`) and outranked it while its description opened with "browser commands" — which is why Step 5 rewrites `help` to lead with documentation. If `help` or `exec` still ranks first, the sibling descriptions are still competing; fix them, do not weaken the browserforce one.
 
 ---
 
@@ -360,12 +391,26 @@ test('a page with no matching target yields a null targetId rather than a guess'
   assert.deepEqual(out, [{ targetId: null, title: '' }]);
 });
 
-test('an exhausted duplicate group yields null for the surplus page', () => {
+test('an INCOMPLETE duplicate group matches nothing — never a partial guess', () => {
+  // 2 pages, 1 target at the same URL: the two lists disagree, so positional
+  // pairing could bind a page to the wrong tab. Refuse the whole group.
   const out = matchPagesToTargets(
     ['about:blank', 'about:blank'],
     [{ id: 'T1', url: 'about:blank', title: 'only' }],
   );
-  assert.deepEqual(out, [{ targetId: 'T1', title: 'only' }, { targetId: null, title: '' }]);
+  assert.deepEqual(out, [{ targetId: null, title: '' }, { targetId: null, title: '' }]);
+});
+
+test('a unique URL still matches even when another group is incomplete', () => {
+  const out = matchPagesToTargets(
+    ['about:blank', 'about:blank', 'https://a.test/'],
+    [{ id: 'T1', url: 'about:blank', title: 'x' }, { id: 'T9', url: 'https://a.test/', title: 'A' }],
+  );
+  assert.deepEqual(out, [
+    { targetId: null, title: '' },
+    { targetId: null, title: '' },
+    { targetId: 'T9', title: 'A' },
+  ]);
 });
 
 test('ignores targets with no id and tolerates missing fields', () => {
@@ -417,26 +462,49 @@ Expected: FAIL — `Cannot find module '../src/tab-identity.js'`
 /**
  * Pair pages with relay targets, index-aligned to `pageUrls`.
  *
- * Both lists derive from the relay's own target map in insertion order, so
- * duplicate URLs (several about:blank, the same doc open twice) are paired
- * positionally within their URL group. A page with no matching target yields
- * `targetId: null` — the caller falls back to per-connection identity rather
- * than guessing, which is what a managed/headless backend with no relay gets.
+ * A page is only ever paired with a target carrying its EXACT URL, and only
+ * when that URL's group is COMPLETE — the same number of pages as targets.
+ * Within a complete group the k-th page is the k-th target, because both lists
+ * are insertion-ordered subsets of the same relay target stream.
+ *
+ * An incomplete group (a tab opened or closed between the two reads, or a URL
+ * that went stale) matches NOTHING rather than pairing what it can. Partial
+ * positional pairing is how two tabs showing the same page would silently swap
+ * handles, and a wrong-tab action is the exact failure this module exists to
+ * prevent. An unmatched page yields `targetId: null`; the caller falls back to
+ * per-connection identity, which is also what a relay-less managed backend gets.
  */
 export function matchPagesToTargets(pageUrls, targets) {
-  const byUrl = new Map();
+  const urls = Array.isArray(pageUrls) ? pageUrls : [];
+
+  const targetsByUrl = new Map();
   for (const target of Array.isArray(targets) ? targets : []) {
     if (!target?.id) continue;
     const url = typeof target.url === 'string' ? target.url : '';
-    if (!byUrl.has(url)) byUrl.set(url, []);
-    byUrl.get(url).push(target);
+    if (!targetsByUrl.has(url)) targetsByUrl.set(url, []);
+    targetsByUrl.get(url).push(target);
   }
 
-  return (Array.isArray(pageUrls) ? pageUrls : []).map((pageUrl) => {
-    const target = byUrl.get(typeof pageUrl === 'string' ? pageUrl : '')?.shift();
-    if (!target) return { targetId: null, title: '' };
-    return { targetId: target.id, title: typeof target.title === 'string' ? target.title : '' };
+  const pageIndicesByUrl = new Map();
+  urls.forEach((pageUrl, i) => {
+    const url = typeof pageUrl === 'string' ? pageUrl : '';
+    if (!pageIndicesByUrl.has(url)) pageIndicesByUrl.set(url, []);
+    pageIndicesByUrl.get(url).push(i);
   });
+
+  const out = urls.map(() => ({ targetId: null, title: '' }));
+  for (const [url, indices] of pageIndicesByUrl) {
+    const group = targetsByUrl.get(url);
+    if (!group || group.length !== indices.length) continue; // incomplete — refuse
+    indices.forEach((pageIndex, k) => {
+      const target = group[k];
+      out[pageIndex] = {
+        targetId: target.id,
+        title: typeof target.title === 'string' ? target.title : '',
+      };
+    });
+  }
+  return out;
 }
 ```
 
@@ -460,7 +528,15 @@ git commit -m "feat(mcp): add pure page-to-relay-target matcher for durable tab 
 
 ### Task 4: Take `/json/list` out of wildcard CORS
 
-`relay/src/index.js:80-83` states that introspection endpoints carrying tab URLs and titles must not be readable cross-origin, then lists only `/extension/status` and `/attached-tabs`. `/json/list` serves every tab's URL and title *and* a `webSocketDebuggerUrl` with the auth token embedded, under `Access-Control-Allow-Origin: *`. Any web page can read it. Task 5 makes this endpoint load-bearing, so it is fixed first.
+`relay/src/index.js:80-83` states that introspection endpoints carrying tab URLs and titles must not be readable cross-origin, then lists only `/extension/status` and `/attached-tabs`. **Three** unauthenticated routes embed `webSocketDebuggerUrl` with the CDP auth token and are served with `Access-Control-Allow-Origin: *`:
+
+| Route | Line | Body |
+|---|---|---|
+| `/json/version` | `:431-437` | token — and this is the route `connectOverCDP` fetches |
+| `/json/list` | `:440-449` | token on **every** target, plus each tab's URL and title |
+| `/json` | `:440` | same handler as `/json/list` |
+
+Any page the user visits can read the token and drive their Chrome. `/` and `/client-slot` return counts and ids only and are unaffected. Task 5 makes `/json/list` load-bearing, so this is fixed first — and it must cover all three, not just the one on the plan's path.
 
 **Files:**
 - Modify: `relay/src/index.js:83`
@@ -472,13 +548,33 @@ git commit -m "feat(mcp): add pure page-to-relay-target matcher for durable tab 
 - [ ] **Step 1: Write the failing test**
 
 ```js
-test('/json/list is not readable cross-origin', async () => {
+// Every route whose body can contain the CDP auth token. Driven off one list so
+// a new token-bearing route cannot be added without a deliberate decision here.
+const TOKEN_BEARING_ROUTES = ['/json', '/json/list', '/json/version'];
+
+test('no token-bearing route is readable cross-origin', async () => {
   const relay = new RelayServer({ port: 0 });
   await relay.start({ writeCdpUrl: false });
   try {
-    const res = await fetch(`http://127.0.0.1:${relay.port}/json/list`);
-    assert.equal(res.headers.get('access-control-allow-origin'), null);
-    assert.equal(res.status, 200);
+    for (const route of TOKEN_BEARING_ROUTES) {
+      const res = await fetch(`http://127.0.0.1:${relay.port}${route}`, {
+        headers: { Origin: 'https://evil.test' },
+      });
+      assert.equal(res.status, 200, `${route} should still serve same-origin callers`);
+      assert.equal(res.headers.get('access-control-allow-origin'), null,
+        `${route} must not send wildcard CORS — its body carries the CDP token`);
+    }
+  } finally {
+    await relay.stop();
+  }
+});
+
+test('the health route stays wildcard-readable', async () => {
+  const relay = new RelayServer({ port: 0 });
+  await relay.start({ writeCdpUrl: false });
+  try {
+    const res = await fetch(`http://127.0.0.1:${relay.port}/`, { headers: { Origin: 'https://evil.test' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
   } finally {
     await relay.stop();
   }
@@ -493,9 +589,13 @@ Expected: FAIL — header is `*`.
 - [ ] **Step 3: Implement**
 
 ```js
-// /json and /json/list carry every tab's URL and title AND embed the CDP auth
-// token in webSocketDebuggerUrl. Wildcard CORS stays for the health route only.
-const NO_WILDCARD_CORS_PATHS = new Set(['/extension/status', '/attached-tabs', '/json', '/json/list']);
+// Every route below either carries local browsing metadata (tab URLs/titles) or
+// embeds the CDP auth token in webSocketDebuggerUrl — /json/version included,
+// which is the route connectOverCDP fetches. A page the user visits must not be
+// able to read any of them. Wildcard CORS is for the health route only.
+const NO_WILDCARD_CORS_PATHS = new Set([
+  '/extension/status', '/attached-tabs', '/json', '/json/list', '/json/version',
+]);
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -505,36 +605,44 @@ Expected: PASS. Then `pnpm test:mcp` — same-origin `fetch` from Node ignores C
 
 - [ ] **Step 5: Document**
 
-Add to `AGENTS.md` under **Security Rules**: `- Introspection routes carrying tab URLs/titles or the auth token (`/extension/status`, `/attached-tabs`, `/json`, `/json/list`) are excluded from wildcard CORS. Only the health route is wildcard.`
+Add to `AGENTS.md` under **Security Rules**: `- Routes whose body carries tab URLs/titles or the CDP auth token — `/extension/status`, `/attached-tabs`, `/json`, `/json/list`, `/json/version` — are excluded from wildcard CORS. Only `/` is wildcard. A new route that returns `webSocketDebuggerUrl` MUST be added to `NO_WILDCARD_CORS_PATHS` and to `TOKEN_BEARING_ROUTES` in the relay test.`
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add relay/src/index.js relay/test/relay-server.test.js AGENTS.md
-git commit -m "fix(relay): stop serving /json/list cross-origin — it leaks tab URLs and the CDP token"
+git commit -m "fix(relay): stop serving token-bearing routes cross-origin\n\n/json, /json/list and /json/version all embed the CDP auth token in\nwebSocketDebuggerUrl and were wildcard-CORS readable by any page."
 ```
 
 ---
 
-### Task 5: Titles come from the relay, not from `page.title()`
+### Task 5: Titles and URLs come from the relay, and stay fresh
 
-Across three real listings of ~72 tabs, the only tab with a title was one BrowserForce had just opened. `pageTitleBounded` (`:516`) is not the bug — its 1s bound is correct, because on a lazily-attached tab the relay synthetically acks `Runtime.enable`, no execution context ever arrives, and an unbounded `page.title()` never settles. The source is wrong. The relay already holds every title with no debugger attach.
+Measured against the live 72-tab Chrome: `node bin.js tabs` reported **72 of 72 tabs `(untitled)`**, while `GET /json/list` returned **72/72 with real titles and real URLs and no debugger attached**. `pageTitleBounded` (`:516`) is not the bug — its 1s bound is correct, because on a lazily-attached tab the relay synthetically acks `Runtime.enable`, no execution context ever arrives, and an unbounded `page.title()` never settles. The source is wrong.
 
 A tab list exists so something can choose a tab. Without titles it cannot, and `use <name|text>` has nothing to match against.
 
+**Three defects sit between "the relay has the data" and "the runtime can trust it", all found in review:**
+
+1. **The relay's cache goes stale.** `extension/background.js:816` opens `onTabUpdated` with `if (!attachedTabs.has(tabId)) return;` — URL and title changes are reported only for *attached* tabs, and attachment is lazy. After a user navigates an unattached tab the relay serves the URL from discovery time. A stale URL does not just show a wrong title: it breaks the match, so that tab silently drops back to a renumbering handle. Fixed at the source; `_handleTabUpdated` (`relay/src/index.js:1177-1181`) already drops updates for tabs it does not know, so widening emission is safe.
+2. **Relay identity is not backend-scoped.** `cli/sessiond.js:195` passes `getRelayHttpUrl` unconditionally and *before* `negotiateBackend()` runs. A managed or headless session with a relay running on the same machine would match its own pages against the real Chrome's targets. Gate on the negotiated backend.
+3. **A transient fetch failure renumbers every handle.** Returning `[]` on failure means no page matches, every page falls back to per-connection identity, and the next call mints fresh handles — reintroducing the exact defect this arc removes. Remember identity per page and reuse the last good snapshot.
+
 **Files:**
-- Modify: `mcp/src/browser-session-runtime.js` — import (`:1` area), `fetchRelayTargets()` + `listIdentifiedPages()` near `listStablePages()` (`:404`), `listTabRows()` (`:531-556`), `resolveTabTarget()` (`:575+`)
-- Test: `mcp/test/browser-session-runtime.test.js`
+- Modify: `extension/background.js:815-817` (`onTabUpdated` gate)
+- Modify: `mcp/src/browser-session-runtime.js` — import, `fetchRelayTargets()` + `listIdentifiedPages()` near `listStablePages()` (`:404`), `listTabRows()` (`:531-548`), `resolveTabTarget()` (`:575+`)
+- Test: `mcp/test/browser-session-runtime.test.js`, `test/agent/extension-tab-updates.test.js` *(new — register in `package.json` `test` and `test:agent`)*
 
 **Interfaces:**
-- Consumes: `matchPagesToTargets` (Task 3); existing `getRelayHttpUrl()` and `doFetch` deps.
-- Produces: `listIdentifiedPages(): Promise<Array<{page, url, targetId, title, handle}>>`, consumed by Tasks 6, 7 and 8.
+- Consumes: `matchPagesToTargets` (Task 3); existing `getRelayHttpUrl()`, `doFetch` and `backendInfo` (set by sessiond via `setBackendInfo`; left null by MCP, which is always real).
+- Produces: `listIdentifiedPages(): Promise<Array<{page, url, targetId, title, handle}>>`, consumed by Tasks 6, 7 and 8. `listTabRows()` rows gain `targetId` — the shipped row literal (`:530-548`) has six fields and no `targetId`, and Task 7 needs it.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```js
-function makeRelayFetch(targets) {
+function makeRelayFetch(targets, { fail = false } = {}) {
   return async (url) => {
+    if (fail) throw new Error('relay unreachable');
     if (!String(url).endsWith('/json/list')) return { ok: false, json: async () => ({}) };
     return { ok: true, json: async () => targets };
   };
@@ -565,6 +673,78 @@ test('falls back to the bounded page title when no relay target matches', async 
   const [row] = await runtime.listTabRows();
   assert.equal(row.title, 'From Page');
 });
+
+test('rows carry targetId so names and handles can key on it', async () => {
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch([{ id: 'T1', url: 'https://a.test/', title: 'A' }]),
+  });
+  assert.equal((await runtime.listTabRows())[0].targetId, 'T1');
+});
+
+test('a managed backend never consults the relay, even with one running', async () => {
+  let fetched = 0;
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/', title: async () => 'Managed' }];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: async (...a) => { fetched += 1; return makeRelayFetch([{ id: 'T1', url: 'https://a.test/', title: 'Real Chrome' }])(...a); },
+  });
+  runtime.setBackendInfo({ backend: 'managed', requestedBackend: 'auto' });
+  const [row] = await runtime.listTabRows();
+  assert.equal(fetched, 0, 'managed backend must not read the relay target list');
+  assert.equal(row.targetId, null);
+  assert.equal(row.title, 'Managed');
+});
+
+test('a transient relay failure keeps identity instead of renumbering', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  let fail = false;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: async (...a) => (fail ? Promise.reject(new Error('boom')) : makeRelayFetch(targets)(...a)),
+  });
+  const before = await runtime.listTabRows();
+  fail = true;
+  const during = await runtime.listTabRows();
+  assert.deepEqual(during.map((r) => r.handle), before.map((r) => r.handle));
+  assert.equal(during[0].targetId, 'T1', 'a known page keeps its target id when the fetch fails');
+});
+```
+
+```js
+// test/agent/extension-tab-updates.test.js — the extension gate, tested the way
+// extension logic is tested here: on the pure predicate, not via Chrome APIs.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { shouldReportTabUpdate } from '../../extension/tab-update-policy.js';
+
+test('reports url and title changes for tabs that are not attached', () => {
+  assert.equal(shouldReportTabUpdate({ isAttached: false, changeInfo: { url: 'https://a.test/' } }), true);
+  assert.equal(shouldReportTabUpdate({ isAttached: false, changeInfo: { title: 'A' } }), true);
+});
+
+test('still reports for attached tabs', () => {
+  assert.equal(shouldReportTabUpdate({ isAttached: true, changeInfo: { url: 'https://a.test/' } }), true);
+});
+
+test('ignores changes that carry neither url nor title', () => {
+  assert.equal(shouldReportTabUpdate({ isAttached: true, changeInfo: { status: 'loading' } }), false);
+  assert.equal(shouldReportTabUpdate({ isAttached: false, changeInfo: {} }), false);
+});
+
+test('group-only changes are reported for attached tabs only', () => {
+  // Group reconciliation is meaningful only where the relay tracks the tab.
+  assert.equal(shouldReportTabUpdate({ isAttached: true, changeInfo: { groupId: 3 } }), true);
+  assert.equal(shouldReportTabUpdate({ isAttached: false, changeInfo: { groupId: 3 } }), false);
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -580,25 +760,74 @@ Add the import at the top of `mcp/src/browser-session-runtime.js` (this is the o
 import { matchPagesToTargets } from './tab-identity.js';
 ```
 
-Add beside `listStablePages()`:
+First, the extension. Extract the gate as a pure predicate (the house pattern — `extension/window-affinity.js`, `extension/auto-manage-state.js` — since extension code cannot be unit-tested directly):
 
 ```js
+// extension/tab-update-policy.js
+//
+// The relay caches each tab's url/title and serves them from /json/list with no
+// debugger attach. That cache is only as fresh as what the extension reports,
+// and reporting used to be gated on `attachedTabs.has(tabId)` — but attachment
+// is LAZY, so almost no tab qualified. A user navigating an unattached tab left
+// the relay serving the discovery-time URL, which breaks page-to-target
+// matching and drops that tab back to a renumbering handle.
+
+/** Report url/title changes for every tab; group changes only where the relay tracks the tab. */
+export function shouldReportTabUpdate({ isAttached, changeInfo }) {
+  if (!changeInfo) return false;
+  if (changeInfo.url || changeInfo.title) return true;
+  return isAttached === true && changeInfo.groupId !== undefined;
+}
+```
+
+In `extension/background.js`, import it and replace the opening of `onTabUpdated` (`:815-817`):
+
+```js
+function onTabUpdated(tabId, changeInfo) {
+  const isAttached = attachedTabs.has(tabId);
+  if (!shouldReportTabUpdate({ isAttached, changeInfo })) return;
+```
+
+The rest of the function already reads `attachedTabs.get(tabId)` to mutate `entry.targetInfo`; guard that block with `if (isAttached)` and send the `tabUpdated` message unconditionally. The relay drops updates for tabs it does not know (`relay/src/index.js:1178-1181` returns early on both an unknown `tabId` and an unknown `sessionId`), so a message for an undiscovered tab is harmless.
+
+Then the runtime. Add beside `listStablePages()`:
+
+```js
+  // Last good relay snapshot + per-page identity, so one failed fetch cannot
+  // renumber every handle. Returning [] on failure would unmatch every page,
+  // fall everything back to per-connection identity, and mint fresh handles on
+  // the next call — reintroducing the exact defect this arc removes.
+  let lastRelayTargets = null;
+  const targetIdByPage = new WeakMap();
+
   /**
-   * Relay target list: id, url and title for EVERY tab, with no debugger
-   * attach. Returns [] on any failure — a managed/headless backend has no
-   * relay, and identity then falls back to per-connection page identity.
+   * Relay target list: id, url and title for EVERY tab, with no debugger attach.
+   *
+   * Skipped entirely unless the negotiated backend is real Chrome. sessiond
+   * constructs this runtime BEFORE negotiateBackend() and passes getRelayHttpUrl
+   * unconditionally (cli/sessiond.js:195), so a managed or headless session on a
+   * machine with a relay running would otherwise match its own pages against the
+   * real browser's targets. MCP never calls setBackendInfo and is always real,
+   * so a null backend means "use the relay".
    */
   async function fetchRelayTargets({ timeoutMs = 1500 } = {}) {
-    try {
-      const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
-      if (!relayHttpUrl) return [];
-      const response = await doFetch(`${relayHttpUrl}/json/list`, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) return [];
-      const body = await response.json();
-      return Array.isArray(body) ? body : [];
-    } catch {
-      return [];
+    if (backendInfo.backend && backendInfo.backend !== 'real') return [];
+    const relayHttpUrl = typeof getRelayHttpUrl === 'function' ? getRelayHttpUrl() : null;
+    if (!relayHttpUrl) return [];
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await doFetch(`${relayHttpUrl}/json/list`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (response.ok) {
+          const body = await response.json();
+          if (Array.isArray(body)) {
+            lastRelayTargets = body;
+            return body;
+          }
+        }
+      } catch { /* retry once, then fall through to the last good snapshot */ }
     }
+    return lastRelayTargets ?? [];
   }
 
   /**
@@ -615,12 +844,17 @@ Add beside `listStablePages()`:
     const urls = pages.map((page) => { try { return page.url() || ''; } catch { return ''; } });
     const identities = matchPagesToTargets(urls, await fetchRelayTargets());
     return Promise.all(pages.map(async (page, i) => {
-      const { targetId, title } = identities[i] ?? { targetId: null, title: '' };
+      // A page already identified in this connection keeps its target id even if
+      // this round's match failed (stale URL, incomplete duplicate group, failed
+      // fetch). Identity may only be learned, never silently forgotten.
+      const matched = identities[i] ?? { targetId: null, title: '' };
+      const targetId = matched.targetId ?? targetIdByPage.get(page) ?? null;
+      if (matched.targetId) targetIdByPage.set(page, matched.targetId);
       return {
         page,
         url: urls[i],
         targetId,
-        title: targetId ? title : await pageTitleBounded(page),
+        title: matched.title || (targetId ? '' : await pageTitleBounded(page)),
         handle: getStablePageHandle(page, targetId),
       };
     }));
@@ -632,13 +866,14 @@ Rewrite the body of `listTabRows()` to consume it:
 ```js
       const active = resolveActivePage(getContext());
       const identified = await listIdentifiedPages();
-      return identified.map(({ page, handle, title, url }, index) => ({
+      return identified.map(({ page, handle, title, url, targetId }, index) => ({
         handle,
         index,
         title,
         url,
+        targetId,                 // Task 7 keys names on this; the shipped row had six fields
         active: page === active,
-        name: nameForPage(page),
+        name: nameForPage(page),  // gains a second argument in Task 7
       }));
 ```
 
@@ -651,11 +886,22 @@ Leave `listStablePages()` in place only if something still calls it; if nothing 
 Run: `node --test mcp/test/browser-session-runtime.test.js && node --test mcp/test/browserforce-command-registry.test.js`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Prove it against the live browser**
+
+With the relay up and Chrome connected, compare before and after:
 
 ```bash
-git add mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js
-git commit -m "fix(mcp): read tab titles from the relay so listings stop being all (untitled)"
+node bin.js tabs | grep -c '(untitled)'    # baseline measured: 72 of 72
+```
+
+Then navigate one unattached tab in Chrome and re-run — its row must show the NEW title, which is what proves the extension gate fix rather than just the read-source change.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add extension/tab-update-policy.js extension/background.js mcp/src/browser-session-runtime.js \
+       mcp/test/browser-session-runtime.test.js test/agent/extension-tab-updates.test.js package.json
+git commit -m "fix(mcp,extension): source tab titles from the relay and keep its cache fresh"
 ```
 
 ---
@@ -781,28 +1027,75 @@ In `skills/browserforce/SKILL.md`, keep the "Stable handles and names persist fo
 
 - [ ] **Step 6: Prove it against real Chrome**
 
-Unit tests drive fake browser objects and cannot reproduce relay-discovered targets or lazy CDP attach — which is why `test/sessiond-real-smoke.mjs` exists and self-skips (exit 0) when no extension is connected. Add a handle-durability leg to it, after the existing `session status` step:
+Not through `test/sessiond-real-smoke.mjs`. Its `cli` helper takes an **array** and resolves to `{ code, json, stdout, stderr }`, and more importantly sessiond never passes `idleDisconnectMs` (`cli/sessiond.js:195-201`), so the runtime default of `0` means its browser connection never idles out — a sessiond leg cannot force the reconnect this task is about. Its `idleMs` is a daemon-shutdown timer, a different mechanism.
+
+Use the harness that reproduced the defect. Save as `scripts/repro-tab-handles.mjs` (it must live inside the repo to resolve `playwright-core`):
 
 ```js
-// Handle durability across the idle reconnect. The unit suite proves the
-// keying; only a real Chrome proves the relay actually reports stable target
-// ids for tabs it discovered rather than opened.
-const first = await cli('tabs', '--limit', '5');
-const idleMs = Number(process.env.BF_SESSIOND_IDLE_MS || 15000);
-await new Promise((r) => setTimeout(r, idleMs + 2000));   // let the browser idle-disconnect
-const second = await cli('tabs', '--limit', '5');
-const handles = (out) => out.split('\n').filter((l) => /^[ *] t\d+/.test(l)).map((l) => l.trim().split(/\s+/)[1]);
-assert.deepEqual(handles(second), handles(first), 'handles renumbered across the idle reconnect');
-assert.ok(handles(first).length > 0, 'no tabs listed — cannot prove handle durability');
+// Reproduces, then guards, handle durability across the browser idle
+// disconnect. Same runtime wiring as mcp/src/index.js with the idle window
+// shortened so one run spans a reconnect. Requires the relay up and the
+// extension connected; exits 0 with SKIP otherwise.
+import { chromium } from 'playwright-core';
+import { createBrowserSessionRuntime } from '../mcp/src/browser-session-runtime.js';
+import { ensureRelay, getCdpUrl, getRelayHttpUrl, getRelayHttpUrlFromCdpUrl,
+         connectOverCdpWithBusyRetry, getExtensionStatus } from '../mcp/src/exec-engine.js';
+import { withClientLabel } from '../mcp/src/client-label.js';
+
+const status = await getExtensionStatus().catch(() => null);
+if (!status?.connected) { console.log('SKIP: extension not connected'); process.exit(0); }
+
+const runtime = createBrowserSessionRuntime({
+  connectBrowser: async () => {
+    await ensureRelay();
+    const cdpUrl = withClientLabel(await getCdpUrl());
+    return connectOverCdpWithBusyRetry({
+      connect: (u) => chromium.connectOverCDP(u),
+      cdpUrl, baseUrl: getRelayHttpUrlFromCdpUrl(cdpUrl), timeoutMs: 30000,
+    });
+  },
+  getRelayHttpUrl,
+  idleDisconnectMs: 2000,
+});
+
+const before = await runtime.listTabRows();
+await new Promise((r) => setTimeout(r, 7000));
+if (runtime.isConnected()) { console.error('FAIL: no idle disconnect happened; the run proves nothing'); process.exit(1); }
+const after = await runtime.listTabRows();
+
+const handles = (rows) => rows.map((r) => r.handle);
+const titled = (rows) => rows.filter((r) => r.title).length;
+console.log(`before ${handles(before)[0]}..${handles(before).at(-1)} titled=${titled(before)}/${before.length}`);
+console.log(`after  ${handles(after)[0]}..${handles(after).at(-1)} titled=${titled(after)}/${after.length}`);
+
+let failed = false;
+if (JSON.stringify(handles(before)) !== JSON.stringify(handles(after))) {
+  console.error('FAIL: handles renumbered across the reconnect'); failed = true;
+}
+if (before.length && titled(before) === 0) {
+  console.error('FAIL: every tab is untitled — the relay title source is not wired'); failed = true;
+}
+process.exit(failed ? 1 : 0);
 ```
 
-Run: `node test/sessiond-real-smoke.mjs` with the relay up and Chrome connected.
-Expected: PASS. With no extension connected it self-skips — that is not a pass; say so if that is what happened.
+Run: `node scripts/repro-tab-handles.mjs`
+
+Expected **before** this task: `handles renumbered`. Measured on the live 72-tab Chrome while writing this plan:
+
+```
+call 1: {"n":72,"first":"t1","last":"t72","untitled":72}
+still connected? false
+call 2: {"n":72,"first":"t73","last":"t144","untitled":72}
+RESULT: handles RENUMBERED: t1..t72 -> t73..t144
+```
+
+Expected **after**: identical handle lists and a non-zero titled count. A `SKIP` is not a pass — say so if that is what happened.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js mcp/src/help-docs.js skills/browserforce/SKILL.md test/sessiond-real-smoke.mjs
+git add mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js \
+        mcp/src/help-docs.js skills/browserforce/SKILL.md scripts/repro-tab-handles.mjs
 git commit -m "fix(mcp): key tab handles by relay target id so they survive the idle reconnect"
 ```
 
@@ -812,15 +1105,29 @@ git commit -m "fix(mcp): key tab handles by relay target id so they survive the 
 
 Same root cause, second victim, found during verification rather than in the brief. `namedPages` (`:114`) maps name → `Page`. After a reconnect every stored `Page` is stale, `isUsablePage` rejects it and `pruneNamedPages` (`:409-412`) deletes every name. A user who named a tab loses the name with no message.
 
+**The shipped API, read rather than assumed** (an earlier draft invented `listNamedPages` and a third positional argument; neither exists):
+
+| Function | Line | Real signature |
+|---|---|---|
+| `setNamedPage` | `:446` | `(name, page, { replace = false } = {})` → `{ name, replaced }` |
+| `getNamedPage` | `:459` | `(name)` → page or `null` |
+| `renamePageName` | `:471` | `(oldName, newName, { replace = false } = {})` → `{ name, replaced }` |
+| `forgetPageName` | `:485` | `(name)` → boolean |
+| `listPageNames` | `:492` | `()` → `[{ name, page }]` |
+| `nameForPage` | `:496` | `(page)` — internal, **not** exported |
+
+Target identity rides in the existing options object as `{ replace, targetId }` — adding a positional argument would silently collide with `{ replace }` at every call site. `listPageNames`'s public shape `{ name, page }` is preserved, so no consumer changes.
+
 **Files:**
-- Modify: `mcp/src/browser-session-runtime.js:114`, `:409-412` (`pruneNamedPages`), `:450-498` (set/get/rename/forget/list/`nameForPage`), `listIdentifiedPages()` from Task 5
-- Test: `mcp/test/browser-session-runtime.test.js`
+- Modify: `mcp/src/browser-session-runtime.js:114`, `:409-412`, `:446-498`
+- Modify: `mcp/src/browserforce-command-registry.js:467-496` (`open --as`, `rename`)
+- Test: `mcp/test/browser-session-runtime.test.js`, `mcp/test/browserforce-command-registry.test.js`
 
 **Interfaces:**
-- Consumes: `listIdentifiedPages()` (Task 5).
-- Produces: `namedPages` becomes `Map<string, { targetId: string|null, page }>`; `nameForPage(page, targetId = null)` gains a second parameter.
+- Consumes: `listIdentifiedPages()` and row `targetId` (Task 5).
+- Produces: `namedPages` becomes `Map<string, { targetId: string|null, page }>`; `setNamedPage(name, page, { replace, targetId })`; `nameForPage(page, targetId = null)`. Every other exported signature and return shape is unchanged.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 ```js
 test('a tab name still resolves after an idle reconnect', async () => {
@@ -835,80 +1142,119 @@ test('a tab name still resolves after an idle reconnect', async () => {
     fetch: makeRelayFetch(targets),
   });
 
-  await runtime.listTabRows();
-  runtime.setNamedPage('docs', pages[0]);
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', row.page ?? pages[0], { targetId: row.targetId });
   browser.fireDisconnected();
-  pages = makePages();
+  pages = makePages();                        // reconnect: new Page objects, same tab
 
   const rows = await runtime.listTabRows();
   assert.equal(rows[0].name, 'docs');
-  assert.equal((await runtime.resolveTabTarget('docs')).page, pages[0]);
+  assert.equal(runtime.getNamedPage('docs'), pages[0], 'the name must re-bind to the live page');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs']);
 });
 
-test('a name is dropped when its tab is gone from the relay listing', async () => {
+test('a name is dropped only when an authoritative listing no longer has its target', async () => {
   let targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
   let pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
   const runtime = createBrowserSessionRuntime({
     connectBrowser: async () => makeFakeBrowser({ pages }),
     getContext: () => ({ pages: () => pages, on() {} }),
     getRelayHttpUrl: () => 'http://127.0.0.1:19222',
-    fetch: async (url) => ({ ok: true, json: async () => targets }),
+    fetch: async () => ({ ok: true, json: async () => targets }),
   });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+
+  targets = []; pages = [];                   // the tab really closed
   await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), []);
+});
+
+test('a failed relay fetch never deletes a name', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  let fail = false;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: async (...a) => (fail ? Promise.reject(new Error('boom')) : makeRelayFetch(targets)(...a)),
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  fail = true;
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'an unreachable relay is not evidence that a tab closed');
+});
+
+test('setNamedPage still honours { replace } and rejects a conflict without it', async () => {
+  const pages = [
+    { ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' },
+    { ...makeFakePage(), isClosed: () => false, url: () => 'https://b.test/' },
+  ];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => '',
+    fetch: async () => { throw new Error('no relay'); },
+  });
   runtime.setNamedPage('docs', pages[0]);
-  targets = []; pages = [];
-  await runtime.listTabRows();
-  assert.deepEqual(runtime.listNamedPages().map((n) => n.name), []);
+  assert.throws(() => runtime.setNamedPage('docs', pages[1]), /docs/);
+  assert.deepEqual(runtime.setNamedPage('docs', pages[1], { replace: true }), { name: 'docs', replaced: true });
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify they fail**
 
 Run: `node --test mcp/test/browser-session-runtime.test.js`
-Expected: FAIL — `rows[0].name` is `undefined`; the name was pruned on reconnect.
+Expected: FAIL — `rows[0].name` is `undefined` after the reconnect; the name was pruned.
 
 - [ ] **Step 3: Implement**
 
-Change the map's shape and comment:
+State (`:114`):
 
 ```js
-  // name → { targetId, page }. Names are keyed by relay target id for the same
-  // reason handles are: reconnect replaces every Page object, and a Page-keyed
-  // name map deleted every user-assigned name on each idle disconnect. `page`
-  // is a cache re-bound on each listing; `targetId` is the identity.
+  // name → { targetId, page }. Names key on relay target id for the same reason
+  // handles do: reconnect replaces every Page object, and a Page-keyed name map
+  // deleted every user-assigned name on each idle disconnect. `page` is a cache
+  // re-bound on each listing; `targetId` is the identity.
   const namedPages = new Map();
 ```
 
-`setNamedPage(name, page, targetId = null)` stores `{ targetId, page }`; `renamePageName` moves the whole entry; `forget` is unchanged; `listNamedPages()` returns `{ name, page }` from `entry.page`.
-
-Replace `pruneNamedPages`:
+Make the relay listing's authority explicit — `byTargetId.size > 0` cannot tell a successful empty listing from a failed fetch, and both delete-every-name and delete-nothing are wrong answers to the other case. Add beside `lastRelayTargets`:
 
 ```js
-  // Drop a name only when its tab is really gone. A stale `page` after a
-  // reconnect is NOT gone — it is re-bound by rebindNamedPages().
-  function pruneNamedPages() {
-    for (const [name, entry] of namedPages) {
-      if (!entry.targetId && !isUsablePage(entry.page)) namedPages.delete(name);
-    }
-  }
-
-  /** Re-point named entries at the current Page objects; drop names whose target is gone. */
-  function rebindNamedPages(identified) {
-    const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
-    const relayKnown = byTargetId.size > 0;
-    for (const [name, entry] of namedPages) {
-      if (!entry.targetId) continue;
-      const page = byTargetId.get(entry.targetId);
-      if (page) entry.page = page;
-      else if (relayKnown) namedPages.delete(name);
-    }
-    pruneNamedPages();
-  }
+  let relayListingAuthoritative = false;
 ```
 
-Replace `nameForPage`:
+Set it `true` immediately before `lastRelayTargets = body` in `fetchRelayTargets`, and `false` on the fall-through to the cached snapshot and on the early returns (non-real backend, no relay URL).
+
+Accessors — the options object carries identity:
 
 ```js
+  function setNamedPage(name, page, { replace = false, targetId = null } = {}) {
+    const key = assertValidTabName(name);
+    const existing = namedPages.get(key);
+    if (existing && !replace) {
+      throw tabStateError('TAB_NAME_TAKEN', `Tab name "${key}" is already in use. Pass --replace to move it.`);
+    }
+    namedPages.set(key, { targetId, page });
+    return { name: key, replaced: Boolean(existing) };
+  }
+
+  function getNamedPage(name) {
+    const key = String(name ?? '').trim();
+    const entry = namedPages.get(key);
+    if (!entry) return null;
+    if (!entry.targetId && !isUsablePage(entry.page)) { namedPages.delete(key); return null; }
+    return isUsablePage(entry.page) ? entry.page : null;
+  }
+
+  function listPageNames() {
+    return [...namedPages.entries()].map(([name, entry]) => ({ name, page: entry.page }));
+  }
+
   function nameForPage(page, targetId = null) {
     for (const [name, entry] of namedPages) {
       if (targetId && entry.targetId === targetId) return name;
@@ -918,19 +1264,64 @@ Replace `nameForPage`:
   }
 ```
 
-In `listIdentifiedPages()`, call `rebindNamedPages(identified)` on the resolved array before returning it. In `listTabRows()`, pass the target id through: `name: nameForPage(page, targetId)`.
+`renamePageName` moves the whole entry (`namedPages.set(to, namedPages.get(from)); namedPages.delete(from);`) and keeps its `{ name, replaced }` return. `forgetPageName` is unchanged.
 
-At every `setNamedPage` call site (`open --as`, `rename`), pass the target id from the current `listIdentifiedPages()` row so new names are durable from the moment they are created.
+Pruning and re-binding:
 
-- [ ] **Step 4: Run to verify it passes**
+```js
+  // Drop a name only when its tab is really gone. A stale `page` after a
+  // reconnect is NOT gone — rebindNamedPages() re-points it.
+  function pruneNamedPages() {
+    for (const [name, entry] of namedPages) {
+      if (!entry.targetId && !isUsablePage(entry.page)) namedPages.delete(name);
+    }
+  }
 
-Run: `node --test mcp/test/browser-session-runtime.test.js && node --test mcp/test/browserforce-command-registry.test.js && node --test test/cli-sessiond.test.js`
+  /**
+   * Re-point named entries at the current Page objects.
+   *
+   * A target-keyed name is deleted ONLY when the relay listing is authoritative
+   * and does not contain its target — an unreachable relay is not evidence that
+   * a tab closed, and deleting on a failed fetch silently loses user names.
+   */
+  function rebindNamedPages(identified) {
+    const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
+    for (const [name, entry] of namedPages) {
+      if (!entry.targetId) continue;
+      const page = byTargetId.get(entry.targetId);
+      if (page) entry.page = page;
+      else if (relayListingAuthoritative) namedPages.delete(name);
+    }
+    pruneNamedPages();
+  }
+```
+
+Call `rebindNamedPages(identified)` inside `listIdentifiedPages()` on the resolved array before returning it, and pass the id through in `listTabRows()`: `name: nameForPage(page, targetId)`.
+
+- [ ] **Step 4: Refresh identity before any name lookup or mutation**
+
+`open --as` and `rename` consult names *before* anything refreshes identity (`mcp/src/browserforce-command-registry.js:467-496`), so straight after a reconnect a duplicate-name check runs against stale entries — losing a name or bypassing a conflict. In both executors, `await runtime.listIdentifiedPages()` first, then take the acting page's `targetId` from that result and pass it as `setNamedPage(name, page, { replace, targetId })`. Export `listIdentifiedPages` from the runtime for this.
+
+Add the regression test:
+
+```js
+test('open --as after a reconnect sees existing names and stores a durable id', async () => {
+  // Names a tab, forces a reconnect, then re-uses the same name without --replace.
+  // Before the refresh this passed the conflict check against stale entries.
+  // Assert it still conflicts, and that a fresh name records a targetId.
+});
+```
+
+- [ ] **Step 5: Run to verify they pass**
+
+Run: `node --test mcp/test/browser-session-runtime.test.js && node --test mcp/test/browserforce-command-registry.test.js && node --test test/cli-sessiond.test.js && node --test test/cli.test.js`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add mcp/src/browser-session-runtime.js mcp/test/browser-session-runtime.test.js
+git add mcp/src/browser-session-runtime.js mcp/src/browserforce-command-registry.js \
+        mcp/test/browser-session-runtime.test.js mcp/test/browserforce-command-registry.test.js
 git commit -m "fix(mcp): key tab names by relay target id so a reconnect stops deleting them"
 ```
 
@@ -941,9 +1332,11 @@ git commit -m "fix(mcp): key tab names by relay target id so a reconnect stops d
 The first `tabs` call against a real Chrome returned 72 rows for ~1,400 tokens. An expensive entry point teaches an agent to avoid the tool, which is the failure this whole plan exists to fix. `COMMAND_SPECS.tabs` (`:40`) declares no flags and `renderTabRowsText` (`:731`) renders every row.
 
 **Files:**
-- Modify: `mcp/src/browserforce-command-registry.js:40` (spec), `:673` (arg builder), `:731-739` (renderer)
+- Modify: `mcp/src/browserforce-command-registry.js:40` (spec), `:673` (`commandToBody`), `:731-739` (renderer), `tabs` executor
+- Modify: `bin.js:1054-1060` (`tabs --json` compat path)
 - Modify: `mcp/src/help-docs.js` (tabs section)
-- Test: `mcp/test/browserforce-command-registry.test.js`
+- Modify: `mcp/test/browserforce-command-registry.test.js:457-468` — the existing 87-tab stress test asserts `data.tabs.length === 87` and goes red under a default cap of 20. Switch it to `run('tabs --all')` and keep every other assertion (unique handles, <2s). Add a second case asserting the *default* caps to 20 and reports `omitted: 67`, so both behaviours stay pinned.
+- Test: `mcp/test/browserforce-command-registry.test.js`, `test/cli.test.js`
 
 **Interfaces:**
 - Consumes: `listTabRows()` (Tasks 5-7).
@@ -979,6 +1372,46 @@ test('tabs --limit overrides the default cap', async () => {
   assert.equal(data.tabs.length, 3);
   assert.equal(data.omitted, 69);
 });
+
+test('tabs rejects a non-integer or negative --limit instead of coercing it', async () => {
+  // Value flags are stored as RAW STRINGS with no numeric validation
+  // (registry :229-249). Passing them to Array.slice() silently coerces:
+  // '-1' slices from the end, 'abc' becomes 0 and returns nothing.
+  for (const bad of ['abc', '-1', '2.5', '']) {
+    await assert.rejects(
+      () => executeBrowserforceCommand(`tabs --limit ${bad}`, { runtime: fakeRuntimeWithTabs(5) }),
+      (err) => { assert.match(err.message, /--limit/); return true; },
+    );
+  }
+});
+
+test('tabs --limit 0 means no cap, matching --all', async () => {
+  const { data } = await executeBrowserforceCommand('tabs --limit 0', { runtime: fakeRuntimeWithTabs(72) });
+  assert.equal(data.tabs.length, 72);
+  assert.equal(data.omitted, 0);
+});
+
+test('--all wins over --limit rather than silently disagreeing', async () => {
+  const { data } = await executeBrowserforceCommand('tabs --all --limit 3', { runtime: fakeRuntimeWithTabs(72) });
+  assert.equal(data.tabs.length, 72);
+});
+
+test('the existing 87-tab stress case still returns every row under --all', async () => {
+  const { data } = await executeBrowserforceCommand('tabs --all', { runtime: fakeRuntimeWithTabs(87) });
+  assert.equal(data.tabs.length, 87);
+  assert.equal(new Set(data.tabs.map((t) => t.handle)).size, 87);
+});
+```
+
+```js
+// test/cli.test.js — machine clients must learn that rows were withheld.
+test('tabs --json reports total and omitted alongside the rows', async () => {
+  const out = await runCli(['tabs', '--json'], { runtime: fakeRuntimeWithTabs(72) });
+  const parsed = JSON.parse(out);
+  assert.ok(Array.isArray(parsed.tabs), 'rows stay under .tabs');
+  assert.equal(parsed.total, 72);
+  assert.equal(parsed.omitted, 52);
+});
 ```
 
 `fakeRuntimeWithTabs(n)` returns a runtime stub whose `listTabRows()` resolves to `n` rows, every third one titled `github`.
@@ -996,12 +1429,29 @@ Spec (`:40`):
   tabs: { flags: { all: 'boolean', match: 'value', limit: 'value' } },
 ```
 
-Arg builder (`:673`):
+`commandToBody` (`:671`, **not** the parser — see Task 9). Value flags arrive as raw strings with no numeric validation anywhere in the parser (`:229-249`), so validate here rather than letting `Array.slice()` coerce:
 
 ```js
-    case 'tabs':
-      return { all: flags.all === true, match: flags.match, limit: flags.limit };
+    case 'tabs': {
+      const limit = parseTabLimit(flags.limit);
+      return { all: flags.all === true, match: flags.match, limit };
+    }
 ```
+
+```js
+// Value flags are raw strings; `slice(0, '-1')` and `slice(0, 'abc')` both
+// silently return the wrong rows rather than failing. 0 means "no cap", which
+// is how --limit expresses --all.
+function parseTabLimit(raw) {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(String(raw))) {
+    throw usageError(`--limit takes a non-negative whole number (got "${raw}"). Use --limit 0 or --all for every tab.`);
+  }
+  return Number(raw);
+}
+```
+
+In the `tabs` executor, `--all` (or `limit === 0`) means no cap; otherwise the cap is `limit ?? DEFAULT_TAB_LIST_LIMIT`. Filter by `--match` **before** capping so the cap applies to matches, and return `{ tabs, total, omitted }` where `total` is the post-filter count.
 
 Add near the other constants:
 
@@ -1029,7 +1479,32 @@ function renderTabRowsText(rows, { total = rows?.length ?? 0, omitted = 0 } = {}
 }
 ```
 
-Update the `case 'tabs':` render call to pass `data`.
+Update the `case 'tabs':` render call (`:768`) to pass `data`.
+
+Finally `bin.js:1054-1060`. The compat path unwraps to a bare array, so `total`/`omitted` never reach a machine client:
+
+```js
+    if (parsed.verb === 'tabs' && resp && resp.success !== false) {
+      output(resp.data?.tabs ?? [], true);
+      return;
+    }
+```
+
+A capped list that cannot say it was capped is the same trap as a handle that cannot say it went stale. Emit the envelope, and keep the rows under `.tabs`:
+
+```js
+    // Compat: rows keep the pre-registry shape (index/title/url plus
+    // handle/active/name/targetId). They move under `.tabs` so a capped listing
+    // can report `total`/`omitted` — a machine client must be able to tell that
+    // rows were withheld and how to ask for them.
+    if (parsed.verb === 'tabs' && resp && resp.success !== false) {
+      const { tabs = [], total = tabs.length, omitted = 0 } = resp.data ?? {};
+      output({ tabs, total, omitted }, true);
+      return;
+    }
+```
+
+This changes the `tabs --json` top-level shape from array to object. Grep for consumers first (`rg -n "tabs.*--json" -g '!node_modules'`) and update the CLI compat assertions in `test/cli.test.js` in the same commit.
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -1043,8 +1518,9 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add mcp/src/browserforce-command-registry.js mcp/src/help-docs.js mcp/test/browserforce-command-registry.test.js
-git commit -m "feat(mcp): cap and filter the tabs listing so the first call is cheap"
+git add mcp/src/browserforce-command-registry.js bin.js mcp/src/help-docs.js \
+        mcp/test/browserforce-command-registry.test.js test/cli.test.js
+git commit -m "feat(mcp,cli): cap and filter the tabs listing, and report what was omitted"
 ```
 
 ---
@@ -1054,6 +1530,10 @@ git commit -m "feat(mcp): cap and filter the tabs listing so the first call is c
 `tabs close t123` silently did nothing and returned a tab listing that still contained the tab — read at the time as a stale render. There is no `close` verb in `COMMAND_SPECS` at all: the string parses as verb `tabs` with args `['close','t123']`, and `case 'tabs': return {}` (`:673`) discards them unexamined. A command surface that reports success while doing nothing is the same class of failure as a handle that names the wrong tab.
 
 `snapshot` (`:685-689`) already throws a usage error on stray positionals. Copy that.
+
+**Test the right function.** The `case 'tabs':` at `:673` lives in `commandToBody()` (`:671`), which `parseBrowserforceCommand()` (`:169-253`) never calls — parse tokenizes and returns `{ verb, args, flags, command }`, and `executeBrowserforceCommand` (`:796-805`) calls `commandToBody` as a separate step afterwards. A throw added there does **not** surface from `parseBrowserforceCommand`, so a test asserting that would stay red no matter how correct the fix is. Assert against `commandToBody` directly, and once end-to-end through `executeBrowserforceCommand`.
+
+The generic `HELP_SUGGESTION` (`:31`, "Run browserforce \"help\" to see available commands.") is attached to every usage error and does not mention `close`. This error has to teach the actual next step, so it carries its own message.
 
 **Files:**
 - Modify: `mcp/src/browserforce-command-registry.js:673`
@@ -1066,23 +1546,41 @@ git commit -m "feat(mcp): cap and filter the tabs listing so the first call is c
 
 ```js
 test('tabs refuses a subcommand it does not have', () => {
-  assert.throws(() => parseBrowserforceCommand('tabs close t5'), (err) => {
-    assert.equal(err.code, 'COMMAND_USAGE');
+  // commandToBody, not parseBrowserforceCommand: parse never calls it.
+  const parsed = parseBrowserforceCommand('tabs close t5');
+  assert.equal(parsed.verb, 'tabs');
+  assert.deepEqual(parsed.args, ['close', 't5'], 'parse still tokenizes; the refusal happens later');
+
+  assert.throws(() => commandToBody(parsed), (err) => {
     assert.match(err.message, /tabs takes no positional arguments/);
-    assert.match(err.suggestion ?? err.message, /close/i);
+    assert.match(err.message, /close/i, 'must name the thing the user actually tried');
     return true;
   });
 });
 
-test('bare tabs still parses', () => {
+test('the refusal reaches an agent through the real execution path', async () => {
+  await assert.rejects(
+    () => executeBrowserforceCommand('tabs close t5', { runtime: fakeRuntimeWithTabs(3) }),
+    (err) => { assert.match(err.message, /tabs takes no positional arguments/); return true; },
+  );
+});
+
+test('bare tabs and its flags still work', () => {
   assert.equal(parseBrowserforceCommand('tabs').verb, 'tabs');
+  assert.deepEqual(commandToBody(parseBrowserforceCommand('tabs')), { all: false, match: undefined, limit: undefined });
+  assert.equal(commandToBody(parseBrowserforceCommand('tabs --all')).all, true);
 });
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `node --test mcp/test/browserforce-command-registry.test.js`
-Expected: FAIL — no throw; `tabs close t5` parses cleanly.
+Expected: FAIL — `commandToBody` returns `{}` and throws nothing. Verified live before writing this task:
+
+```
+"tabs close t5"     -> {"verb":"tabs","args":["close","t5"]}
+"tabs garbage here" -> {"verb":"tabs","args":["garbage","here"]}
+```
 
 - [ ] **Step 3: Implement**
 
@@ -1121,115 +1619,142 @@ git commit -m "fix(mcp): refuse unknown tabs subcommands instead of silently dis
 
 ### Task 10: One probe, four answers, each naming its fix
 
-The goal is that nobody installing BrowserForce has to wonder whether it is working. `ensureRelay()` already restarts a down relay, so the remaining states an agent can actually hit are narrower than the brief assumed — but they still arrive as one undifferentiated failure. `assertExtensionConnected` (`mcp/src/exec-engine.js:110-131`) names a fix for an unreachable relay and names none for a disconnected extension.
+`ensureRelay()` already restarts a down relay, so the states an agent can actually hit are narrower than the brief assumed — but they still arrive as one undifferentiated failure. `assertExtensionConnected` (`mcp/src/exec-engine.js:110-131`) names a fix for an unreachable relay and names none for a disconnected extension.
 
-Four states, four messages:
+**Two constraints found in review, both of which invalidate the obvious implementation.**
 
-| State | Message must say |
-|---|---|
-| Relay unreachable after auto-start | auto-start failed; run `browserforce serve` and check the port |
-| Relay up, extension not connected | open Chrome; enable the BrowserForce extension at `chrome://extensions` |
-| Relay up, extension connected, no tabs | open a tab in Chrome |
-| Ready | nothing — proceed |
+1. **`attachedTabs` is empty on a healthy browser.** Targets do not populate until a CDP client sends `Target.setAutoAttach`. Measured on the live machine with 72 tabs open and the extension connected:
+
+   ```
+   {"connected":true,"activeTargets":0,"activeManualTargets":0,
+    "attachedTabs":[],"manualAttachedTabs":[],"clients":0}
+   ```
+
+   A pre-connect `NO_TABS` check on `attachedTabs.length === 0` therefore rejects a perfectly good session. The no-tabs question can only be asked **after** discovery, against the page count the runtime actually sees.
+
+2. **MCP must not be routed through `assertExtensionConnected`.** It is called only from `cli/sessiond.js:63` and `bin.js:110`; MCP's preflight is `preflightAttachedPageBeforeCdp` (`mcp/src/startup.js:74-93`), which uses `getExtensionStatus` + `runPreflightAssertions`. That split is deliberate and pinned: `mcp/test/mcp-tools.test.js:734,743` asserts the MCP connect path does **not** mention `assertExtensionConnected`. So the shared thing is a pure **classifier** both surfaces call — not one surface calling the other's assertion.
 
 **Files:**
-- Modify: `mcp/src/exec-engine.js:110-131`
-- Modify: `mcp/src/doctor.js` (extension check detail, `:117-122`)
-- Test: `mcp/test/mcp-tools.test.js`, `test/doctor.test.js`
+- Create: `mcp/src/readiness.js` (pure, no I/O)
+- Create: `mcp/test/readiness.test.js` *(register in `package.json` `test` and `test:mcp`)*
+- Modify: `mcp/src/exec-engine.js:110-131` (`assertExtensionConnected` → classifier)
+- Modify: `mcp/src/startup.js:92-93` (same messages on the MCP side)
+- Modify: `mcp/src/doctor.js:117-122` (extension check detail)
+- Modify: `mcp/src/browser-session-runtime.js` — raise `NO_TABS` after discovery, where the page count is known
 
 **Interfaces:**
-- Consumes: existing `getExtensionStatus()` shape `{ connected, attachedTabs }`.
-- Produces: `assertExtensionConnected` throws `BrowserForceMcpError` with `code` in `RELAY_UNREACHABLE` / `EXTENSION_DISCONNECTED` / `NO_TABS`.
+- Produces: `classifyReadiness({ statusError, status, discoveredPageCount }) → { code, message }` with `code` in `READY | RELAY_UNREACHABLE | EXTENSION_DISCONNECTED | NO_TABS`. `discoveredPageCount` is optional; **omit it pre-connect** and `NO_TABS` can never fire.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```js
-test('each unready state names its own fix', async () => {
-  await assert.rejects(
-    () => assertExtensionConnected({ getStatus: async () => { throw new Error('ECONNREFUSED'); } }),
-    (e) => { assert.equal(e.code, 'RELAY_UNREACHABLE'); assert.match(e.message, /browserforce serve/); return true; },
-  );
-  await assert.rejects(
-    () => assertExtensionConnected({ getStatus: async () => ({ connected: false }) }),
-    (e) => { assert.equal(e.code, 'EXTENSION_DISCONNECTED'); assert.match(e.message, /chrome:\/\/extensions/); return true; },
-  );
-  await assert.rejects(
-    () => assertExtensionConnected({ getStatus: async () => ({ connected: true, attachedTabs: [] }) }),
-    (e) => { assert.equal(e.code, 'NO_TABS'); assert.match(e.message, /open a tab/i); return true; },
-  );
-  assert.ok(await assertExtensionConnected({ getStatus: async () => ({ connected: true, attachedTabs: [{}] }) }));
+// mcp/test/readiness.test.js
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { classifyReadiness } from '../src/readiness.js';
+
+test('an unreachable relay names the command that starts it', () => {
+  const { code, message } = classifyReadiness({ statusError: new Error('ECONNREFUSED') });
+  assert.equal(code, 'RELAY_UNREACHABLE');
+  assert.match(message, /browserforce serve/);
+});
+
+test('a disconnected extension names Chrome and the extensions page', () => {
+  const { code, message } = classifyReadiness({ status: { connected: false } });
+  assert.equal(code, 'EXTENSION_DISCONNECTED');
+  assert.match(message, /chrome:\/\/extensions/);
+  assert.match(message, /open Chrome/i);
+});
+
+test('a connected extension with no attached tabs is READY before discovery', () => {
+  // Measured live: 72 real tabs, connected:true, attachedTabs:[] — targets do
+  // not populate until Target.setAutoAttach. A pre-connect no-tabs check here
+  // would reject a healthy browser.
+  assert.equal(classifyReadiness({ status: { connected: true, attachedTabs: [] } }).code, 'READY');
+});
+
+test('NO_TABS fires only on a post-discovery page count of zero', () => {
+  const { code, message } = classifyReadiness({
+    status: { connected: true, attachedTabs: [] }, discoveredPageCount: 0,
+  });
+  assert.equal(code, 'NO_TABS');
+  assert.match(message, /open a tab/i);
+  assert.equal(classifyReadiness({ status: { connected: true }, discoveredPageCount: 3 }).code, 'READY');
 });
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `node --test mcp/test/mcp-tools.test.js`
-Expected: FAIL — no `code` on the thrown errors; the connected-but-empty case resolves.
+Run: `node --test mcp/test/readiness.test.js`
+Expected: FAIL — `Cannot find module '../src/readiness.js'`
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement the classifier**
 
 ```js
-export async function assertExtensionConnected({
-  baseUrl = getRelayHttpUrl(),
-  timeoutMs = 2000,
-  getStatus = null,
-} = {}) {
-  // Four distinct states, four fixes. They used to arrive as one failure, and
-  // an agent that cannot tell "not installed" from "Chrome is closed" reports
-  // no browser available and skips the work.
-  const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
-  const probe = getStatus || (() => getExtensionStatus({ baseUrl: resolvedBaseUrl, timeoutMs }));
+// mcp/src/readiness.js — pure classification of BrowserForce readiness.
+//
+// Four states used to arrive as one failure, and an agent that cannot tell
+// "not installed" from "Chrome is closed" reports no browser available and
+// skips the work. Kept pure and I/O-free so both callers share one wording:
+// the CLI assertion (exec-engine) and the MCP preflight (startup), which are
+// deliberately separate code paths — see mcp/test/mcp-tools.test.js:734.
 
-  let status;
-  try {
-    status = await probe();
-  } catch (err) {
-    throw new BrowserForceMcpError(
-      `BrowserForce relay is not reachable at ${resolvedBaseUrl} and did not auto-start. ` +
-      `Start it with \`browserforce serve\`, then check nothing else holds the port (${err.message}).`,
-      { code: 'RELAY_UNREACHABLE', details: { baseUrl: resolvedBaseUrl } },
-    );
+export const READY = 'READY';
+export const RELAY_UNREACHABLE = 'RELAY_UNREACHABLE';
+export const EXTENSION_DISCONNECTED = 'EXTENSION_DISCONNECTED';
+export const NO_TABS = 'NO_TABS';
+
+/**
+ * @param statusError    error thrown while reading /extension/status, if any
+ * @param status         the /extension/status body, if it was read
+ * @param discoveredPageCount  pages the CDP client can see. OMIT pre-connect:
+ *   `attachedTabs` is empty on a healthy browser until Target.setAutoAttach, so
+ *   asking the no-tabs question before discovery rejects working sessions.
+ */
+export function classifyReadiness({ statusError = null, status = null, discoveredPageCount } = {}) {
+  if (statusError) {
+    return {
+      code: RELAY_UNREACHABLE,
+      message: 'BrowserForce relay is not reachable and did not auto-start. '
+        + `Start it with \`browserforce serve\`, then check nothing else holds the port (${statusError.message}).`,
+    };
   }
-
   if (!status?.connected) {
-    throw new BrowserForceMcpError(
-      'BrowserForce relay is up but the Chrome extension is not connected. ' +
-      'Open Chrome, then enable the BrowserForce extension at chrome://extensions.',
-      { code: 'EXTENSION_DISCONNECTED', details: { baseUrl: resolvedBaseUrl } },
-    );
+    return {
+      code: EXTENSION_DISCONNECTED,
+      message: 'BrowserForce relay is up but the Chrome extension is not connected. '
+        + 'Open Chrome, then enable the BrowserForce extension at chrome://extensions.',
+    };
   }
-
-  if (Array.isArray(status.attachedTabs) && status.attachedTabs.length === 0) {
-    throw new BrowserForceMcpError(
-      'BrowserForce is connected but Chrome has no tabs to work with. Open a tab and retry.',
-      { code: 'NO_TABS', details: { baseUrl: resolvedBaseUrl } },
-    );
+  if (discoveredPageCount === 0) {
+    return { code: NO_TABS, message: 'BrowserForce is connected but Chrome has no tabs. Open a tab and retry.' };
   }
-
-  return status;
+  return { code: READY, message: '' };
 }
 ```
 
-Mirror the extension check's detail in `mcp/src/doctor.js` so `doctor` and the agent-facing error say the same thing:
+- [ ] **Step 4: Use it on both surfaces**
 
-```js
-    checks.push(check('extension', 'Chrome extension', FAIL,
-      'relay is up but the extension is not connected — open Chrome, then enable the BrowserForce extension at chrome://extensions'));
-```
+In `assertExtensionConnected`, replace the two inline messages with `classifyReadiness({ statusError })` / `classifyReadiness({ status })` and throw `BrowserForceMcpError(message, { code })`. Do **not** pass `discoveredPageCount` — this runs pre-connect.
 
-- [ ] **Step 4: Run to verify it passes**
+In `mcp/src/startup.js:92-93`, wrap the `getExtensionStatus` call in try/catch and run the same classifier, throwing `BrowserForceMcpError` with the same code and message before `runPreflightAssertions`. MCP and CLI now say the same thing without MCP importing the CLI's assertion.
 
-Run: `node --test mcp/test/mcp-tools.test.js && node --test test/doctor.test.js`
-Expected: PASS
+Raise `NO_TABS` post-discovery in the runtime, where the count is real: after `waitForInitialPageDiscovery` resolves in `ensureBrowser`, if `getPages()` is empty, throw the classifier's `NO_TABS` message.
 
-- [ ] **Step 5: Check the blast radius**
+- [ ] **Step 5: Run to verify it passes**
 
-`rg -n "assertExtensionConnected" -g '*.js' -g '!node_modules' .` — every caller must still handle a thrown error; the type changed from `Error` to `BrowserForceMcpError`, which extends it. Confirm no caller matches on `err.constructor === Error` or on the old message strings.
+Run: `node --test mcp/test/readiness.test.js && node --test mcp/test/mcp-tools.test.js && node --test test/doctor.test.js && node --test test/cli-sessiond.test.js`
+Expected: PASS — including the existing `assert.doesNotMatch(..., /assertExtensionConnected/)` at `mcp/test/mcp-tools.test.js:734,743`, which this design deliberately preserves.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Prove each state on the live machine**
+
+Four runs of `node bin.js doctor`, each in its own state, recording the message: relay stopped; relay up with Chrome quit; Chrome open with every tab closed; normal. Each must name its own fix, and the healthy case must pass — the pre-fix code would have failed the third and, with a naive `attachedTabs` check, the fourth as well.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add mcp/src/exec-engine.js mcp/src/doctor.js mcp/test/mcp-tools.test.js test/doctor.test.js
+git add mcp/src/readiness.js mcp/test/readiness.test.js mcp/src/exec-engine.js mcp/src/startup.js \
+        mcp/src/doctor.js mcp/src/browser-session-runtime.js package.json
 git commit -m "fix(mcp): give each unready BrowserForce state its own message and fix"
 ```
 
@@ -1246,10 +1771,15 @@ So the competitive position is the inverse of what it looks like. It has isolati
 What already exists, none of it documented where an agent reads:
 
 - `DEFAULT_SESSIOND_LOCK_PATH = ~/.browserforce/sessiond-lock.json` (`cli/session-client.js:18`) is a **single global daemon**. Every invocation on the machine — orchestrator or subagent — already shares one browser session, its active tab, its named tabs and its snapshot refs. A subagent inherits the parent's logged-in tabs with zero setup, which is what `--session` has to be configured to achieve.
-- `--tab <target>` pins a page for **that run only** and never mutates the shared active tab (`AGENTS.md`, MCP Tool Surface).
-- `BF_SESSIOND_LOCK_PATH` gives a subagent its own daemon; `BROWSERFORCE_CDP_CLIENT_LABEL` gives it its own Chrome window (`mcp/src/client-label.js`).
+- `--tab <target>` pins a page for **that run only** and never mutates the shared active tab — but only on the verbs that declare it: `snapshot, click, hover, fill, type, press, wait, get, eval` (`COMMAND_SPECS:42-51`). `tabs` and `use` declare **no flags at all** and `open` declares only `--as`/`--replace` (`:39-41`), so `--tab` on any of the three throws `UNKNOWN_FLAG`. An instruction saying "pass `--tab` on EVERY command" makes a subagent's first `tabs` call fail.
+- `BF_SESSIOND_LOCK_PATH` gives a subagent its own daemon and therefore its own session state.
 
-The hazard the snippet must prevent: two subagents sharing the global daemon **stomp each other's active tab**, because `state.page` is shared state. Shared-by-default is the right default and a silent trap for parallel subagents. The instruction has to make `--tab` non-optional for that case.
+The hazard the snippet must prevent: two subagents sharing the global daemon **stomp each other's active tab**, because `state.page` is shared. Shared-by-default is the right default and a silent trap for parallel subagents. The instruction must pin every verb that *can* be pinned and forbid the ones that mutate shared state (`use`, `open`, and any `eval` that assigns `state.page`).
+
+**Two claims an earlier draft made that are false, both caught in review:**
+
+- **`BROWSERFORCE_CDP_CLIENT_LABEL` does nothing on the CLI.** `withClientLabel` (`mcp/src/client-label.js:15`) is called from exactly one place: `mcp/src/index.js:67`. `cli/sessiond.js:61-64` connects with the bare URL, so the relay falls back to the ephemeral connection id for affinity keying (`relay/src/index.js:1605-1608`) — which also means **sessiond's window pin dies on every disconnect**, the same class of bug as the handles. Step 5 wires it up rather than documenting a knob that is inert.
+- **A separate daemon does not isolate tab access.** `_autoAttachAllTabs` (`relay/src/index.js:1518-1520`) loops over the global `this.targets` unconditionally, and `_broadcastCdp` (`:1892-1902`) sends every target event to every client. There is no per-client filtering anywhere; `ownerKey` governs only which window new tabs land in and refusal of a cross-agent explicit `closeTab`. A second daemon sees, attaches to, and can drive every tab in the browser. The section must claim separate **session state and created-window affinity**, never "cannot touch your tabs".
 
 **Files:**
 - Modify: `skills/browserforce/SKILL.md` (new section)
@@ -1307,16 +1837,22 @@ of these into the subagent's prompt.
 **Parallel subagents.** They share one active tab, so each must pin its own or
 they will overwrite each other mid-run:
 
-> Browser: use the `browserforce` CLI, and pass `--tab <handle>` on EVERY command
-> — other agents are working in the same session and the unpinned active tab is
-> shared. Your tab is `<handle>`.
+> Browser: use the `browserforce` CLI. Your tab is `<handle>`. Pass
+> `--tab <handle>` on every command that accepts it — `snapshot`, `click`,
+> `fill`, `type`, `press`, `hover`, `wait`, `get`, `eval`. Do NOT run `use` or
+> `open`, and do not assign `state.page` in `eval`: those change the active tab
+> that other agents are relying on. `tabs` needs no `--tab` and does not accept
+> one.
 
-**A subagent that must not touch your tabs at all.** Give it its own daemon and
-its own Chrome window:
+**A subagent that should keep its own session.** Give it its own daemon:
 
 > Browser: use the `browserforce` CLI with `BF_SESSIOND_LOCK_PATH=/tmp/bf-<name>.json`
-> and `BROWSERFORCE_CDP_CLIENT_LABEL=<name>` exported. This gives you a separate
-> session and a separate Chrome window from the other agents.
+> and `BROWSERFORCE_CDP_CLIENT_LABEL=<name>` exported. You get your own session
+> state and your own Chrome window for tabs you create.
+
+That last one separates session state and where new tabs open. It is **not** a
+sandbox: every BrowserForce client can see and drive every tab in the browser.
+If a tab must not be touched, do not delegate work that reaches it.
 
 Handles (`t<N>`) are stable for the session, so a handle you pass to a subagent
 still names the same tab when it runs.
@@ -1326,20 +1862,43 @@ still names the same tab when it runs.
 
 In `mcp/src/help-docs.js`, add a `subagents` entry carrying the same three snippets in the file's existing bullet style, and register `'subagents'` in `HELP_SECTION_NAMES`. Cross-reference rather than restate: the tabs section already owns handle semantics, so link to it (`see help(tabs)`), per the repo's rule against stating a rationale twice.
 
-- [ ] **Step 5: Run to verify they pass**
+- [ ] **Step 5: Make the label knob real on the CLI**
 
-Run: `node --test test/browserforce-skill.test.js mcp/test/help-docs.test.js mcp/test/mcp-tools.test.js && pnpm test:skill-install`
-Expected: PASS
+Documenting `BROWSERFORCE_CDP_CLIENT_LABEL` while `cli/sessiond.js` ignores it would ship a lie. Import `withClientLabel` in `cli/sessiond.js` and wrap the URL in `connectRealBrowser` (`:61`):
+
+```js
+  const cdpUrl = withClientLabel(await getCdpUrl());
+```
+
+This also fixes a defect found alongside it: without a label the relay keys window affinity on the ephemeral connection id (`relay/src/index.js:1605-1608`), so sessiond's agent-window pin is discarded on every disconnect and the next created tab can land in the user's own window. Add to `test/cli-sessiond.test.js`:
+
+```js
+test('sessiond labels its CDP connection so window affinity survives a reconnect', async () => {
+  // A bare URL keys affinity on the ephemeral connection id, so the pin dies
+  // with the connection. Assert the label is present, in a subprocess, because
+  // client-label.js reads the env once at module load.
+  const url = await readCdpUrlUsedBySessiond({ BROWSERFORCE_CDP_CLIENT_LABEL: 'shared-team-window' });
+  assert.match(url, /[?&]label=shared-team-window\b/);
+});
+```
 
 - [ ] **Step 6: Prove the hazard is real before documenting it as one**
 
 With the relay up, open two tabs. From two shells against the same daemon, run `browserforce use t1` in one and `browserforce use t2` in the other, then `browserforce get url` in the first. If it reports t2's URL, the shared-active-tab stomp is confirmed and the `--tab` requirement is load-bearing. If it does not, correct the section — do not ship a warning about a hazard that does not exist.
 
-- [ ] **Step 7: Commit**
+Separately, confirm the non-isolation claim: start a second daemon with `BF_SESSIOND_LOCK_PATH=/tmp/bf-probe.json` and run `tabs`. It must list the same tabs as the first daemon. If it does, the wording in Step 3 is correct; if it does not, the relay filters per client after all and the section should say so.
+
+- [ ] **Step 7: Run the suites**
+
+Run: `node --test test/browserforce-skill.test.js mcp/test/help-docs.test.js mcp/test/mcp-tools.test.js test/cli-sessiond.test.js && pnpm test:skill-install`
+Expected: PASS
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add skills/browserforce/SKILL.md mcp/src/help-docs.js test/browserforce-skill-contract.js mcp/test/help-docs.test.js
-git commit -m "feat(skill): document subagent handoff so orchestrators can delegate browser work"
+git add skills/browserforce/SKILL.md mcp/src/help-docs.js cli/sessiond.js \
+        test/browserforce-skill-contract.js mcp/test/help-docs.test.js test/cli-sessiond.test.js
+git commit -m "feat(skill,cli): document subagent handoff and make the client label work on the CLI"
 ```
 
 ---
@@ -1455,4 +2014,20 @@ already touches the command surface in three tasks. Worth doing after this lands
 
 ## Residual risk
 
-`matchPagesToTargets` pairs duplicate-URL tabs positionally. Both lists derive from the relay's target map in insertion order, so they agree in practice, but a reordering on either side would mis-pair two tabs that share a URL — swapping their handles, not inventing one. The failure is bounded to tabs whose URL is identical. If that proves wrong in a real session, the escalation is `Target.getTargetInfo` over a per-page CDP session, rejected here because it mints an alias session per page (`relay/src/index.js:1390-1408`) and a 72-tab listing would mint 72.
+**Duplicate-URL swapping is eliminated, not accepted.** An earlier draft paired
+duplicate-URL tabs positionally and accepted the swap risk; review rejected that
+against the same-tab acceptance criterion. `matchPagesToTargets` now pairs a URL
+group only when it is complete on both sides, so a page is never bound to a
+target unless the pairing is unambiguous. The cost is that tabs sharing a URL
+fall back to per-connection handles whenever the group is incomplete — those
+tabs renumber across a reconnect, which is honest degradation rather than a
+silent wrong-tab action.
+
+The remaining exposure is a **complete** group whose two lists are ordered
+differently. Both derive from the relay's target map in insertion order, so this
+requires a reordering bug on one side; the invariant test in Task 3 pins the
+bound (a page is only ever paired with a target of its exact URL). If a real
+session shows it, the escalation is `Target.getTargetInfo` over a per-page CDP
+session — rejected here because the relay mints an alias session per
+`attachToTarget` (`relay/src/index.js:1390-1408`) and a 72-tab listing would
+mint 72.
