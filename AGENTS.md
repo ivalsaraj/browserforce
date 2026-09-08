@@ -169,6 +169,65 @@ Agent-created tabs are pinned to the Chrome **window** the agent created them in
 
 **Dedicated window (default ON):** When the `dedicatedWindow` setting (popup toggle) is on and a create has no valid pinned window, `resolveCreateWindowPlan()` returns `{ action: 'new-window' }` and the extension opens a fresh **background** (`focused: false`) Chrome window for the agent's created tabs, instead of a tab in the user's current window. Affinity then pins to that window so later created tabs join it. If the dedicated window is closed mid-session, the next create spawns a **new** dedicated window rather than falling back to the user's window. Scope is agent-**created** tabs only — manually attached tabs are never moved. Default is **ON**; an unset setting reads as enabled.
 
+### Tab Identity Survives Reconnect
+
+Handles (`t<N>`) and names are keyed by **relay target id**, not by Playwright
+`Page` identity. Playwright rebuilds every `Page` object when the idle
+disconnect drops the CDP connection, so a `Page`-keyed map renumbers every
+handle and deletes every name on each reconnect — and an agent acting on a
+stale handle hits the WRONG TAB silently. `mcp/src/tab-identity.js`
+(`matchPagesToTargets`) pairs a page to a relay target **only when the URL is
+unique on both sides**. There is no positional tie-breaking: that would assume
+`ctx.pages()` and the relay target list share an insertion order, which is
+unproven, and if it were ever false two tabs showing the same page would swap
+handles silently. Tabs the matcher leaves unpaired are then resolved EXACTLY by
+`Target.getTargetInfo` over a per-page CDP session, bounded by
+`AMBIGUOUS_RESOLUTION_LIMIT = 8` — a full listing cannot be done that way (the
+relay mints an alias session per `Target.attachToTarget`, so 72 tabs would mint
+72), but the ambiguous subset is typically zero. Past the cap it degrades to
+per-connection handles, which renumber: visible degradation, never a silent
+mis-bind. Relay identity is additionally gated on the negotiated backend; a
+managed/headless session has no relay.
+
+A Page from a dead connection is **orphaned, not closed** — `isClosed()` returns
+`false`. Every identity lookup therefore checks `connectionGeneration` BEFORE
+usability; trusting `isUsablePage` alone hands back a handle onto a dead CDP
+session.
+
+Titles come from the relay for the same reason `page.title()` is bounded: on a
+lazily-attached tab the relay acks `Runtime.enable` synthetically, no execution
+context ever arrives, and the read never settles. Never issue an **unbounded**
+`page.title()` against a relay-backed tab. `pageTitleBounded()` stays as the
+fallback for pages with no relay identity — a managed/headless backend has no
+target list, and removing it would leave those sessions untitled. A **stale**
+relay snapshot may only confirm identity for a page already known: rematching a
+fresh Page against cached targets lets a replacement tab at the same URL inherit
+a closed tab's id, handle and title.
+
+The relay's metadata cache is only as fresh as what the extension reports.
+`extension/tab-update-policy.js` decides that: url/title changes are reported
+for EVERY tab (attachment is lazy, so gating on it froze the cache), by property
+PRESENCE not truthiness (a cleared title is `''`), and every close is reported
+because the relay drops ids it does not know.
+
+### Per-Client Active Tab
+
+`clientId` (from `BROWSERFORCE_CLIENT_ID`, wire header `X-BrowserForce-Client`,
+sanitized `/^[A-Za-z0-9._-]{1,64}$/` at both ends) gives each identified client
+its own active tab inside the one shared session. Unidentified clients keep the
+shared slot byte-identically — that is what preserves sequential CLI behaviour.
+Slots store `{ targetId, page, gen }`; a Page-keyed slot would look dead after a
+reconnect and fall back to the SHARED page, i.e. onto another agent's tab. A
+slot that cannot rebind stays **blocked** (`page = null`) rather than being
+deleted — deleting it puts the cross-agent stomp back one call later.
+`state.page` is scoped by `stateViewFor(clientId)`, a proxy over the shared
+`userState` that intercepts only `page`; it also scopes `buildExecContext`'s
+`activePage()`, which reads `userState.page`. Every other key stays shared.
+
+This is **not** an isolation boundary: `_autoAttachAllTabs` loops the global
+target map and every CDP client can still see and drive every tab. Never
+document it as a sandbox.
+
 ### Durable Auto-Close (agent tab bookkeeping)
 
 Auto-close of agent-created tabs is **ON by default** (10 minutes idle,
@@ -434,6 +493,9 @@ When reviewing changes to this project:
 | `mcp/src/index.js` | ~400 | MCP server — browserforce + exec + reset + help tools via Playwright-core `connectOverCDP` |
 | `mcp/src/browserforce-command-registry.js` | ~700 | Shared command registry — parser + executor for CLI/sessiond/MCP command surfaces |
 | `mcp/src/browser-session-runtime.js` | ~800 | Shared browser session runtime — connection lifecycle, active tab, handles/names, runCommand |
+| `mcp/src/tab-identity.js` | ~75 | Pure page↔relay-target pairing — the rule handles and names are keyed by |
+| `mcp/src/readiness.js` | ~45 | Pure four-state readiness classifier shared by the CLI assertion and the MCP preflight |
+| `extension/tab-update-policy.js` | ~30 | Pure predicates for what the extension reports to the relay about tab lifecycle |
 
 ## Agent Roles
 
