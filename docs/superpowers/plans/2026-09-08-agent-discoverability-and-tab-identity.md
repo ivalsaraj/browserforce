@@ -1116,6 +1116,27 @@ Then the runtime. Add beside `listStablePages()`:
   }
 ```
 
+A slot can legitimately be stored before its page has ever been listed — a
+`state.page` assignment inside an `eval` names a page `listIdentifiedPages` has
+not seen, so `targetIdByPage` has nothing, the slot stores `null`, and it cannot
+rebind. Adopt the id when identity later discovers that page:
+
+```js
+  // Backfill: a slot stored before its page was identified would otherwise keep
+  // targetId null forever and lose its tab on the next reconnect.
+  function adoptTargetIdsForClientSlots(rows) {
+    for (const slot of activePageByClient.values()) {
+      if (slot.targetId || !slot.page) continue;
+      const match = rows.find((r) => r.page === slot.page);
+      if (match?.targetId) slot.targetId = match.targetId;
+    }
+  }
+```
+
+Call it beside `rebindNamedPages`. Its test must assign `state.page` to a page
+opened *after* the last listing, so the null-id path is actually exercised;
+listing first hides the defect.
+
 `listIdentifiedPages` finishes by caching what it resolved and rebinding from that same local snapshot, never from shared state:
 
 ```js
@@ -1128,6 +1149,7 @@ Then the runtime. Add beside `listStablePages()`:
     if (startedAt !== connectionGeneration) return listIdentifiedPages();  // retry once on the new connection
     identityCache = { generation: connectionGeneration, rows };
     rebindNamedPages(rows, { authoritative, targets });
+    adoptTargetIdsForClientSlots(rows);
     return rows;
 ```
 
@@ -3013,7 +3035,78 @@ already touches the command surface in three tasks. Worth doing after this lands
 - **A `tabs close` verb.** Task 9 refuses the string; adding the verb is separate work with its own ownership question (`ownerKey` refusal already exists at the extension boundary).
 - **Nested-OOPIF or cross-process target matching.** `matchPagesToTargets` pairs page targets only.
 
+## Resolving ambiguous groups exactly
+
+The unique-URL matcher leaves duplicate-URL tabs on per-connection handles, and
+those renumber across a reconnect. That does not meet the acceptance criterion
+as written — "a handle from call N still names the same tab in call N+1" is
+unqualified. Earlier rounds accepted the gap; it should not ship.
+
+`Target.getTargetInfo` over a per-page CDP session was ruled out **for a full
+listing**: the relay mints an alias session per `attachToTarget`
+(`relay/src/index.js:1390-1408`) and 72 tabs would mint 72. That reasoning does
+not extend to the ambiguous subset, which is typically zero and rarely more than
+three. Use it exactly there:
+
+```js
+  // Exact resolution for tabs the URL matcher could not identify. Bounded by
+  // the ambiguous set, not the tab count: a 72-tab listing containing two
+  // about:blank tabs opens two alias sessions, not 72. Detached immediately so
+  // the relay drops the alias.
+  async function resolveAmbiguousTargetIds(ctx, rows) {
+    const unresolved = rows.filter((r) => !r.targetId);
+    if (unresolved.length === 0 || unresolved.length > AMBIGUOUS_RESOLUTION_LIMIT) return;
+    await Promise.all(unresolved.map(async (row) => {
+      let session;
+      try {
+        session = await ctx.newCDPSession(row.page);
+        const { targetInfo } = await session.send('Target.getTargetInfo');
+        if (targetInfo?.targetId) {
+          row.targetId = targetInfo.targetId;
+          targetIdByPage.set(row.page, targetInfo.targetId);
+          row.handle = getStablePageHandle(row.page, targetInfo.targetId);
+        }
+      } catch { /* leave it on a per-connection handle */ }
+      finally { try { await session?.detach(); } catch {} }
+    }));
+  }
+```
+
+`AMBIGUOUS_RESOLUTION_LIMIT = 8` caps the cost when something has gone wrong and
+half the listing is unmatched — degrading to renumbering beats opening forty
+alias sessions. Call it from `listIdentifiedPages` after matching, before caching.
+
+```js
+test('duplicate-URL tabs keep their handles across a reconnect', async () => {
+  // The acceptance criterion, unqualified: two about:blank tabs must still be
+  // t1 and t2 after the idle disconnect.
+  const { runtime, __fireDisconnect } = tabRuntimeEnv({
+    pages: [fakePage({ url: 'about:blank' }), fakePage({ url: 'about:blank' })],
+  });
+  const before = (await runtime.listTabRows()).map((r) => r.handle);
+  __fireDisconnect();
+  const after = (await runtime.listTabRows()).map((r) => r.handle);
+  assert.deepEqual(after, before);
+});
+
+test('resolution is skipped when the ambiguous set is large', async () => {
+  // Cost guard: a broken match degrades to renumbering rather than opening
+  // dozens of alias sessions on the relay.
+  const pages = Array.from({ length: 20 }, () => fakePage({ url: 'about:blank' }));
+  const { runtime, cdpSessions } = tabRuntimeEnv({ pages });
+  await runtime.listTabRows();
+  assert.equal(cdpSessions.length, 0);
+});
+```
+
+The fixture needs `newCDPSession` on its fake context, recording calls in
+`cdpSessions` and answering `Target.getTargetInfo` with a per-page id.
+
 ## Residual risk
+
+**Duplicate-URL tabs are resolved exactly, not left to renumber.** See
+"Resolving ambiguous groups exactly": the URL matcher fails closed, then
+`Target.getTargetInfo` identifies the small unmatched set precisely.
 
 **Duplicate-URL swapping is eliminated, not accepted.** An earlier draft paired
 duplicate-URL tabs positionally and accepted the swap risk; review rejected that
