@@ -252,7 +252,9 @@ Append inside `assertBrowserforceCoreSkill` in `test/browserforce-skill-contract
   // Discovery contract: the description must claim browser work outright and
   // state why a fresh-profile driver cannot substitute. A niche claim ("logged
   // in") loses skill selection to tools that claim the whole category.
-  const description = text.match(/^description:\s*(.+)$/m)?.[1] ?? '';
+  assert.match(text, /^name:\s*browserforce\s*$/m, `${sourceLabel} must keep its name`);
+  // Strip the surrounding quotes the description now needs (it contains ": ").
+  const description = (text.match(/^description:\s*(.+)$/m)?.[1] ?? '').replace(/^"(.*)"$/, '$1');
   assert.match(description, /\bbrowser\b/i, `${sourceLabel} description must claim browser work`);
   assert.match(description, /\breal Chrome\b/i, `${sourceLabel} description must name real Chrome`);
   assert.match(description, /fresh|own Chromium|separate browser/i,
@@ -289,6 +291,8 @@ test('only the browserforce tool claims browser work, so ToolSearch ranking is d
   assert.doesNotMatch(helpDesc, /^[^.]*\bbrowser\b/i,
     'help must not open by claiming browser work — it competes with the browserforce tool');
   assert.match(helpDesc, /docs|documentation|reference/i);
+  // mcp/test/mcp-tools.test.js:203-204 asserts this exact phrase; keep it.
+  assert.match(helpDesc, /No Chrome connection/);
 
   const execFirstLine = src.match(/const EXECUTE_PROMPT = `([^\n]+)/)?.[1] ?? '';
   assert.match(execFirstLine, /escape hatch/i,
@@ -313,10 +317,11 @@ Expected: FAIL — current description has no `open`/`click`/`fill`/`screenshot`
 
 - [ ] **Step 3: Rewrite the skill frontmatter**
 
-Replace lines 2-9 of `skills/browserforce/SKILL.md`:
+Replace the `description:` and `read_when:` block only. **Keep `name: browserforce` (line 2)** — dropping it breaks installation and `assertBrowserforceCoreSkill`'s `^name:\s*browserforce$` assertion. And **quote the description**: the plain scalar contains `: ` (in "web-page work: open a page"), which is not a valid YAML plain scalar.
 
 ```yaml
-description: Drive the user's real Chrome — their tabs, their logins, their cookies, their extensions. Use for any browser or web-page work: open a page, click, fill, screenshot, scrape, sign in, verify what a page renders, QA a flow. Other browser tools launch a fresh Chromium and cannot see the user's sessions; this is the user's actual browser.
+name: browserforce
+description: "Drive the user's real Chrome — their tabs, their logins, their cookies, their extensions. Use for any browser or web-page work: open a page, click, fill, screenshot, scrape, sign in, verify what a page renders, QA a flow. Other browser tools launch a fresh Chromium and cannot see the user's sessions; this is the user's actual browser."
 read_when:
   - Any browser, web page, or web app task
   - Opening, clicking, filling, or screenshotting a page
@@ -345,7 +350,7 @@ Write all three apostrophe-free. `user's` inside a single-quoted JS literal need
 `mcp/src/index.js:135` (`help`) — documentation first, so it does not compete for "browser":
 
 ```js
-  'BrowserForce documentation by section: tabs, snapshots, commands, recovery. Reference only — it does not touch Chrome. First read returns docs; repeats return a receipt unless force:true.',
+  'BrowserForce documentation by section: tabs, snapshots, commands, recovery. Reference only. No Chrome connection. First read returns docs; repeats return a receipt unless force:true.',
 ```
 
 `mcp/src/index.js:161`, first line of `EXECUTE_PROMPT` — escape hatch first:
@@ -453,6 +458,16 @@ test('ignores targets with no id and tolerates a missing title', () => {
   assert.deepEqual(matchPagesToTargets(['u'], [{ id: 'T1', url: 'u' }]), [{ targetId: 'T1', title: '' }]);
 });
 
+test('duplicate target ids make the whole listing ambiguous', () => {
+  // Two distinct URLs sharing an id would both resolve to one t<N>, so the
+  // handle would select the wrong tab.
+  const out = matchPagesToTargets(['https://a.test/', 'https://b.test/'], [
+    { id: 'T1', url: 'https://a.test/', title: 'A' },
+    { id: 'T1', url: 'https://b.test/', title: 'B' },
+  ]);
+  assert.deepEqual(out, [{ targetId: null, title: '' }, { targetId: null, title: '' }]);
+});
+
 test('a malformed target with no URL makes the whole listing ambiguous', () => {
   const out = matchPagesToTargets(['https://a.test/'], [
     { id: 'T1', url: 'https://a.test/', title: 'good' },
@@ -547,6 +562,7 @@ export function matchPagesToTargets(pageUrls, targets) {
   // handle for a tab that may not be the one it is showing.
   const targetsByUrl = new Map();
   const poisonedUrls = new Set();
+  const seenIds = new Set();
   let globallyAmbiguous = false;
   for (const target of Array.isArray(targets) ? targets : []) {
     const url = typeof target?.url === 'string' && target.url ? target.url : null;
@@ -558,6 +574,8 @@ export function matchPagesToTargets(pageUrls, targets) {
       if (url) poisonedUrls.add(url); else globallyAmbiguous = true;
       continue;
     }
+    if (seenIds.has(id)) { globallyAmbiguous = true; continue; }   // duplicate id
+    seenIds.add(id);
     if (!targetsByUrl.has(url)) targetsByUrl.set(url, []);
     targetsByUrl.get(url).push(target);
   }
@@ -594,7 +612,7 @@ export function matchPagesToTargets(pageUrls, targets) {
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `node --test mcp/test/tab-identity.test.js`
-Expected: PASS (11 tests)
+Expected: PASS (13 tests)
 
 - [ ] **Step 5: Register the test file**
 
@@ -886,9 +904,10 @@ test('an emptied title is applied, not ignored', async () => {
     await seedOneTarget(ext, { tabId: 7, url: 'https://a.test/', title: 'Before' });
     ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 7, title: '' } }));
     await sleep(100);
-    // httpGet returns { status, body } (relay-server.test.js:20-30).
+    // httpGet returns { status, body } with body ALREADY parsed
+    // (relay-server.test.js:20-30) — do not JSON.parse it again.
     const { body } = await httpGet(`http://127.0.0.1:${relay.port}/json/list`);
-    const [entry] = JSON.parse(body);
+    const [entry] = body;
     assert.equal(entry.title, '', 'a cleared title must not leave the old one cached');
     ext.close();
   } finally { relay.stop(); }
@@ -1100,7 +1119,13 @@ Then the runtime. Add beside `listStablePages()`:
 `listIdentifiedPages` finishes by caching what it resolved and rebinding from that same local snapshot, never from shared state:
 
 ```js
+    // Capture the generation BEFORE any await and re-check after. A listing
+    // that spans a disconnect resolves old Page objects; publishing them under
+    // the NEW generation would let pageForTargetId hand a client slot an
+    // orphan, with the generation check itself vouching for it.
+    const startedAt = connectionGeneration;      // read at the top of the function
     const rows = await Promise.all(/* … the map above … */);
+    if (startedAt !== connectionGeneration) return listIdentifiedPages();  // retry once on the new connection
     identityCache = { generation: connectionGeneration, rows };
     rebindNamedPages(rows, { authoritative, targets });
     return rows;
@@ -1558,6 +1583,39 @@ Make the relay listing's authority explicit — `byTargetId.size > 0` cannot tel
 
 `fetchRelayTargets` returns it per call; `listIdentifiedPages` passes it to `rebindNamedPages` with the rows, then caches `{ generation: connectionGeneration, rows }` in `identityCache`. Nothing stores authority at module scope.
 
+**Evict handles for targets that are gone.** The relay synthesizes `bf-target-${tabId}` when the extension has no real CDP target id (`relay/src/index.js:1481`, and `extension/background.js:492` uses `tab-${tabId}`), and **Chrome reuses tab ids** — so a closed-then-reopened tab can present the same synthesized id and inherit the previous tab's handle. Task 5's `onTabRemoved` fix is what makes this fixable: the relay now learns of closes, so a gone target disappears from `/json/list`. On an **authoritative** listing, drop every `handlesByTargetId` entry whose id is absent:
+
+```js
+    if (authoritative) {
+      const live = new Set(targets.map((t) => t?.id).filter(Boolean));
+      for (const id of handlesByTargetId.keys()) if (!live.has(id)) handlesByTargetId.delete(id);
+    }
+```
+
+Only on an authoritative listing — a failed fetch is not evidence a tab closed.
+
+```js
+test('a reopened tab reusing a Chrome tab id does not inherit the old handle', async () => {
+  // The relay synthesizes bf-target-<tabId> and Chrome reuses tab ids, so
+  // without eviction the new tab silently answers to the closed tab's handle.
+  let targets = [{ id: 'bf-target-7', url: 'https://a.test/', title: 'A' }];
+  const pages = [{ ...makeFakePage(), isClosed: () => false, url: () => 'https://a.test/' }];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getContext: () => ({ pages: () => pages, on() {} }),
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: async () => ({ ok: true, json: async () => targets }),
+  });
+  const before = (await runtime.listTabRows())[0].handle;
+  targets = []; pages.length = 0;                       // tab closed, relay says so
+  await runtime.listTabRows();
+  targets = [{ id: 'bf-target-7', url: 'https://b.test/', title: 'B' }];   // id reused
+  pages.push({ ...makeFakePage(), isClosed: () => false, url: () => 'https://b.test/' });
+  assert.notEqual((await runtime.listTabRows())[0].handle, before,
+    'a different tab must not answer to the closed tab handle');
+});
+```
+
 Accessors — the options object carries identity:
 
 ```js
@@ -1657,9 +1715,6 @@ Two distinct problems in `open --as` (`mcp/src/browserforce-command-registry.js:
     const page = await runtime.openNewPage({ url, timeout });
     const created = (await runtime.listIdentifiedPages()).find((i) => i.page === page);
     if (name) runtime.setNamedPage(name, page, { replace, targetId: created?.targetId ?? null });
-    // The client slot needs the id too, or a tab this client opened cannot
-    // rebind after a reconnect — the case Task 12 exists to fix.
-    if (clientId) runtime.setActivePageForClient(page, clientId);
     const active = await activeTabRow(runtime);   // re-listed, so the row carries the new name
     return { opened: url, tab: active };
 ```
@@ -2225,7 +2280,9 @@ test('open still works on an empty browser', async () => {
 });
 ```
 
-Propagation is already solved and needs no new import: `tabStateError` (`:118`) attaches a stable `code`, and the registry maps runtime codes to agent-facing `BrowserforceCommandError` suggestions — the documented contract in `AGENTS.md`. Add `NO_TABS` to that map with `resetHintAllowed: false`; a missing tab is not a connection failure and must never draw a reset hint.
+Propagation needs no new import — `tabStateError` (`:118`) attaches a stable `code` and the registry maps runtime codes to agent-facing `BrowserforceCommandError` suggestions — but adding `NO_TABS` to `TAB_ERROR_SUGGESTIONS` is **not sufficient**. `wrapTabStateError` is applied on specific paths (`mcp/src/browserforce-command-registry.js:402-418`); the `tabs` executor returns a plain error, and other inspect verbs fall through to the generic wrapper at `:432-434` and become `COMMAND_FAILED`, losing both the code and `resetHintAllowed: false`.
+
+So: add `NO_TABS` to the map with `resetHintAllowed: false` — a missing tab is not a connection failure and must never draw a reset hint — **and** route every runtime tab-state error through `wrapTabStateError` before the generic wrapper, including the `tabs` executor. The test below iterates the verbs precisely to catch a path that skips it.
 
 - [ ] **Step 6: Give doctor a page-count probe**
 
@@ -2645,8 +2702,15 @@ Expected: FAIL — `setActivePage` takes no options today, so agent-2's page ove
   const activePageByClient = new Map();
 
   function setActivePage(page, { clientId = null, targetId = null } = {}) {
-    if (clientId) { activePageByClient.set(clientId, { targetId, page, gen: connectionGeneration }); return; }
+    // Keep the existing usability check and return value — an existing test
+    // asserts a closed page is rejected, and callers use the returned page.
+    if (!isUsablePage(page)) return null;
+    if (clientId) {
+      activePageByClient.set(clientId, { targetId, page, gen: connectionGeneration });
+      return page;
+    }
     userState.page = page;
+    return page;
   }
 
   function getActivePage({ clientId = null } = {}) {
@@ -2712,7 +2776,15 @@ test('an orphaned Page from the previous connection is never returned', async ()
   }
 ```
 
-`use`, `open` and the `state.page` setter all call it. Add a reconnect test per path: a slot written by `use` and one written by `open` must both survive `__fireDisconnect()`.
+`use`, `open` and the `state.page` setter all call it. In `open` it goes immediately after the post-create match, using the id that match produced:
+
+```js
+    // Task 12 only. Task 7 leaves `open` client-neutral; `clientId` does not
+    // exist in this executor's signature until this task adds it.
+    if (clientId) runtime.setActivePageForClient(page, clientId);
+```
+
+Add a reconnect test per path: a slot written by `use` and one written by `open` must both survive `__fireDisconnect()`.
 
 Threading the id is most of the work, and none of it is optional — an id that stops halfway leaves the stomp in place:
 
