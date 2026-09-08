@@ -455,6 +455,9 @@ The session daemon negotiates a browser backend at startup:
 `browserforce doctor` reports the active backend and flags a stale relay, a
 disconnected extension, a stale `cdp-url` sidecar, or loose secret-file
 permissions; `doctor --fix` removes only stale sidecars (never the auth token).
+Its `skill` check fails when a deployed `SKILL.md` differs from the shipped
+guide — agents read the deployed copy, so a fork there silently swallows every
+text fix. Reinstall with `npx -y skills add ivalsaraj/browserforce`.
 
 ### BrowserForce Agent Side Panel
 

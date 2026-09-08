@@ -19,6 +19,8 @@ const PATHS = {
   cdpUrlFile: '/tmp/bf-doctor/cdp-url',
   sessiondLockFile: '/tmp/bf-doctor/sessiond-lock.json',
   sessiondUrlFile: '/tmp/bf-doctor/sessiond-lock-url.json',
+  shippedSkillFile: '/repo/shipped/SKILL.md',
+  deployedSkillFiles: [],
 };
 
 // A fully-healthy baseline; individual tests override one probe to fault-inject.
@@ -31,6 +33,7 @@ function healthyDeps(overrides = {}) {
     readRawLock: () => null, // no session daemon
     lockAlive: async () => false,
     probeSessiondStatus: async () => ({ backend: 'real' }),
+    readSkillText: (p) => (p.includes('shipped') ? 'shipped copy' : null),
     removeFile: () => {},
     ...overrides,
   };
@@ -166,5 +169,54 @@ describe('doctor: real CLI path (browserforce doctor)', () => {
   it('doctor is listed in help', async () => {
     const { stdout } = await exec('node', ['bin.js', 'help'], { cwd: ROOT });
     assert.match(stdout, /browserforce doctor/);
+  });
+});
+
+describe('doctor: deployed skill drift', () => {
+  const skillDeps = (readSkillText) => healthyDeps({
+    readSkillText,
+    paths: { ...PATHS, deployedSkillFiles: ['/home/deployed/SKILL.md'] },
+  });
+
+  it('fails when a deployed skill has drifted from the shipped one', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? 'stale copy' : 'shipped copy')));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, FAIL);
+    assert.match(skill.detail, /\/home\/deployed\/SKILL\.md/);
+    assert.match(skill.detail, /npx -y skills add ivalsaraj\/browserforce/);
+    assert.equal(report.ok, false);
+  });
+
+  it('treats leading whitespace drift as a mismatch, not a pass', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? '\n same' : 'same')));
+    assert.equal(find(report, 'skill').status, FAIL);
+  });
+
+  it('passes when the deployed skill matches, ignoring trailing whitespace', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? 'same\n\n' : 'same')));
+    assert.equal(find(report, 'skill').status, OK);
+  });
+
+  it('reports no deployed skill without failing', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? null : 'shipped copy')));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, OK);
+    assert.match(skill.detail, /not installed/i);
+  });
+
+  it('warns rather than fails when the shipped guide cannot be read', async () => {
+    const report = await runDoctor(skillDeps(() => null));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, WARN);
+    assert.equal(report.ok, true);
+  });
+
+  it('looks for deployed copies in project-local skill roots too', async () => {
+    // `npx skills add` installs per-project as well as per-home; a drifted
+    // project copy is the one an agent working in that repo actually reads.
+    const seen = [];
+    await runDoctor(healthyDeps({ readSkillText: (p) => { seen.push(p); return null; }, paths: undefined }));
+    assert.ok(seen.some((p) => p.includes('.claude/skills/browserforce')), seen.join('\n'));
+    assert.ok(seen.some((p) => p.startsWith(process.cwd())), 'project-local roots must be probed');
   });
 });

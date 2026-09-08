@@ -8,7 +8,9 @@
 // requires explicit, separate action by the user.
 
 import { readFileSync, statSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   BF_DIR,
   CDP_URL_FILE,
@@ -72,12 +74,42 @@ async function defaultProbeSessiondStatus(lock) {
   return body;
 }
 
+// The skill an agent reads is the DEPLOYED copy, not the repo's. They forked
+// silently once already (July -> September), so every text fix had to be made
+// twice and reached no agent. CI cannot see another machine's home directory;
+// this check can.
+const SKILL_INSTALL_HINT = 'npx -y skills add ivalsaraj/browserforce';
+const SHIPPED_SKILL_FILE = fileURLToPath(new URL('../../skills/browserforce/SKILL.md', import.meta.url));
+
+// Roots `npx skills add` writes to, per-home and per-project. A project-local
+// copy is what an agent working in that repo reads, so omitting it hides the
+// drift that matters most.
+const SKILL_ROOTS = ['.claude', '.config/opencode', '.agents', '.opencode'];
+
+/** Raw read: only trailing whitespace may differ between shipped and deployed. */
+function defaultReadSkillText(p) {
+  try { return readFileSync(p, 'utf8'); } catch { return null; }
+}
+
+function defaultDeployedSkillFiles() {
+  const bases = [homedir(), process.cwd()];
+  const files = [];
+  for (const base of bases) {
+    for (const root of SKILL_ROOTS) {
+      files.push(join(base, ...root.split('/'), 'skills', 'browserforce', 'SKILL.md'));
+    }
+  }
+  return [...new Set(files)];
+}
+
 function defaultPaths() {
   return {
     tokenFile: TOKEN_FILE,
     cdpUrlFile: CDP_URL_FILE,
     sessiondLockFile: resolveSessiondLockPath(),
     sessiondUrlFile: resolveSessiondUrlPath(),
+    shippedSkillFile: SHIPPED_SKILL_FILE,
+    deployedSkillFiles: defaultDeployedSkillFiles(),
   };
 }
 
@@ -92,6 +124,7 @@ export async function runDoctor({
   relayHttpUrl = getRelayHttpUrl(),
   fileStat = defaultFileStat,
   readText = defaultReadText,
+  readSkillText = defaultReadSkillText,
   readRawLock = defaultReadRawLock,
   lockAlive = (lock) => isLockAlive({ lock }),
   probeSessiondStatus = defaultProbeSessiondStatus,
@@ -120,6 +153,32 @@ export async function runDoctor({
   } else {
     checks.push(check('extension', 'Chrome extension', FAIL,
       'relay is up but the extension is not connected — open Chrome and check the BrowserForce extension'));
+  }
+
+  // 2b. The deployed skill matches the shipped guide.
+  // NOT readText: defaultReadText trims BOTH ends, so a deployed copy whose
+  // leading whitespace or frontmatter drifted would compare equal. Only
+  // trailing whitespace is tolerated.
+  const shippedSkill = readSkillText(paths.shippedSkillFile);
+  const deployedSkills = (paths.deployedSkillFiles || [])
+    .map((p) => ({ path: p, text: readSkillText(p) }))
+    .filter((d) => d.text !== null);
+  const driftedSkills = shippedSkill
+    ? deployedSkills.filter((d) => d.text.trimEnd() !== shippedSkill.trimEnd())
+    : [];
+  if (!shippedSkill) {
+    checks.push(check('skill', 'BrowserForce skill', WARN,
+      `cannot read the shipped guide at ${paths.shippedSkillFile}`));
+  } else if (deployedSkills.length === 0) {
+    checks.push(check('skill', 'BrowserForce skill', OK,
+      `not installed for any agent — install with \`${SKILL_INSTALL_HINT}\``));
+  } else if (driftedSkills.length === 0) {
+    checks.push(check('skill', 'BrowserForce skill', OK,
+      `${deployedSkills.length} deployed copy/copies match the shipped guide`));
+  } else {
+    checks.push(check('skill', 'BrowserForce skill', FAIL,
+      `stale — ${driftedSkills.map((d) => d.path).join(', ')} differ from the shipped guide. `
+      + `Agents read the stale copy. Reinstall: \`${SKILL_INSTALL_HINT}\``));
   }
 
   // 3. Stale cdp-url sidecar: present on disk while the relay is unreachable.
