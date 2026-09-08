@@ -113,7 +113,11 @@ export function createBrowserSessionRuntime(deps = {}) {
   // handles (t1, t2, ...) are keyed by page identity in a WeakMap: they are
   // assigned once per page in first-listed order and NEVER renumber when other
   // tabs close or when the page's URL/title changes.
-  const namedPages = new Map(); // name → page
+  // name → { targetId, page, gen }. Names key on relay target id for the same
+  // reason handles do: reconnect replaces every Page object, and a Page-keyed
+  // name map deleted every user-assigned name on each idle disconnect. `page`
+  // is a cache re-bound on each listing; `targetId` is the identity.
+  const namedPages = new Map();
   const handlesByTargetId = new Map(); // relay targetId → 't<N>' — survives reconnect
   let stableHandles = new WeakMap(); // page → 't<N>' — fallback when no relay target
   let nextStableHandleNumber = 1;
@@ -592,13 +596,43 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
     if (startedAt !== connectionGeneration) return listIdentifiedPages(); // retry on the new connection
     identityCache = { generation: connectionGeneration, rows };
+    rebindNamedPages(rows, { authoritative, targets });
     return rows;
   }
 
+  // Drop a name only when its tab is really gone. A stale `page` after a
+  // reconnect is NOT gone — rebindNamedPages() re-points it.
   function pruneNamedPages() {
-    for (const [name, page] of namedPages) {
-      if (!isUsablePage(page)) namedPages.delete(name);
+    for (const [name, entry] of namedPages) {
+      if (!entry.targetId && !isUsablePage(entry.page)) namedPages.delete(name);
     }
+  }
+
+  /**
+   * Re-point named entries at the current Page objects.
+   *
+   * A target-keyed name is deleted ONLY when the relay listing is authoritative
+   * and does not contain its target — an unreachable relay is not evidence that
+   * a tab closed, and deleting on a failed fetch silently loses user names.
+   */
+  function rebindNamedPages(identified, { authoritative, targets }) {
+    const byTargetId = new Map(identified.filter((i) => i.targetId).map((i) => [i.targetId, i.page]));
+    // Existence comes from the RAW target list, never from `identified`: a tab
+    // can be present in /json/list yet unmatched here (its URL changed, or it
+    // shares a URL with another tab). Treating "unmatched" as "gone" deletes a
+    // name for a tab that is plainly still open. The LOCAL snapshot, never
+    // lastRelayTargets — a concurrent listing can overwrite the shared one
+    // between this call's fetch and this line.
+    const liveTargetIds = new Set(
+      (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
+    );
+    for (const [name, entry] of namedPages) {
+      if (!entry.targetId) continue;
+      const page = byTargetId.get(entry.targetId);
+      if (page) { entry.page = page; entry.gen = connectionGeneration; continue; }
+      if (authoritative && !liveTargetIds.has(entry.targetId)) namedPages.delete(name);
+    }
+    pruneNamedPages();
   }
 
   // Canonical tab-name validator — the ONLY gate for names entering
@@ -632,28 +666,35 @@ export function createBrowserSessionRuntime(deps = {}) {
    * in-use name requires `replace: true` (which moves the name and leaves the
    * previously named page open and unnamed).
    */
-  function setNamedPage(name, page, { replace = false } = {}) {
+  function setNamedPage(name, page, { replace = false, targetId = null } = {}) {
     const key = assertValidTabName(name);
     if (!isUsablePage(page)) throw tabStateError('TAB_NOT_USABLE', 'Cannot name a closed page.');
-    pruneNamedPages();
+    pruneNamedPages(); // a closed no-target page must not block its name
     const existing = namedPages.get(key);
-    if (existing && existing !== page && !replace) {
+    const isSameTab = existing && (existing.page === page
+      || (targetId && existing.targetId === targetId));
+    if (existing && !isSameTab && !replace) {
       throw tabStateError('TAB_NAME_IN_USE', `Tab name "${key}" is already in use.`);
     }
-    namedPages.set(key, page);
-    return { name: key, replaced: !!existing && existing !== page };
+    namedPages.set(key, { targetId, page, gen: connectionGeneration });
+    return { name: key, replaced: !!existing && !isSameTab };
   }
 
   /** Page for a name, or null. Names pointing at closed pages are pruned. */
   function getNamedPage(name) {
     const key = String(name ?? '').trim();
-    const page = namedPages.get(key);
-    if (!page) return null;
-    if (!isUsablePage(page)) {
-      namedPages.delete(key);
-      return null;
-    }
-    return page;
+    const entry = namedPages.get(key);
+    if (!entry) return null;
+    // Generation before usability: a Page from a dead connection is orphaned,
+    // not closed, so isClosed() is false and this would hand back a handle onto
+    // a dead CDP session.
+    if (entry.gen === connectionGeneration && isUsablePage(entry.page)) return entry.page;
+    const rebound = entry.targetId ? pageForTargetId(entry.targetId) : null;
+    if (rebound) { entry.page = rebound; entry.gen = connectionGeneration; return rebound; }
+    if (!entry.targetId) { namedPages.delete(key); return null; }
+    // Target-keyed but unresolved: fail closed and KEEP the name. Falling
+    // through to soft matching would act on a different tab.
+    return null;
   }
 
   /** Move a name to a new label. Colliding with an existing name requires replace. */
@@ -667,8 +708,10 @@ export function createBrowserSessionRuntime(deps = {}) {
     if (existing && !replace) {
       throw tabStateError('TAB_NAME_IN_USE', `Tab name "${to}" is already in use.`);
     }
+    // Move the whole entry so the target id — the durable identity — travels
+    // with the name.
+    namedPages.set(to, namedPages.get(from));
     namedPages.delete(from);
-    namedPages.set(to, page);
     return { name: to, replaced: !!existing };
   }
 
@@ -680,12 +723,13 @@ export function createBrowserSessionRuntime(deps = {}) {
   /** All live name → page mappings (closed pages pruned). */
   function listPageNames() {
     pruneNamedPages();
-    return [...namedPages.entries()].map(([name, page]) => ({ name, page }));
+    return [...namedPages.entries()].map(([name, entry]) => ({ name, page: entry.page }));
   }
 
-  function nameForPage(page) {
-    for (const [name, candidate] of namedPages) {
-      if (candidate === page) return name;
+  function nameForPage(page, targetId = null) {
+    for (const [name, entry] of namedPages) {
+      if (targetId && entry.targetId === targetId) return name;
+      if (entry.page === page) return name;
     }
     return null;
   }
@@ -731,7 +775,7 @@ export function createBrowserSessionRuntime(deps = {}) {
         url,
         targetId,
         active: page === active,
-        name: nameForPage(page),
+        name: nameForPage(page, targetId),
       }));
     } finally {
       endOperation();

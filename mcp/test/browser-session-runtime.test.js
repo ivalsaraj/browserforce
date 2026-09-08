@@ -993,3 +993,126 @@ test('reset drops the cached relay snapshot, so a later failure cannot reuse it'
   assert.notEqual(row.targetId, 'T1', 'a reset session must not resurrect the pre-reset target list');
   assert.equal(row.handle, 't1', 'numbering restarts');
 });
+
+// ─── Names keyed by relay target id ──────────────────────────────────────────
+
+function makeReconnectableRelayRuntime({ targets, pages }) {
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets()),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  return {
+    runtime,
+    fireDisconnect() {
+      browser.fireDisconnected();
+      const replacements = pages.map((old) => makeTabPage({ url: old.url(), title: old.meta.title }));
+      pages.splice(0, pages.length, ...replacements);
+    },
+  };
+}
+
+test('a tab name still resolves after an idle reconnect', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  fireDisconnect();
+
+  const rows = await runtime.listTabRows();
+  assert.equal(rows[0].name, 'docs');
+  assert.equal(runtime.getNamedPage('docs'), pages[0], 'the name must re-bind to the live page');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs']);
+});
+
+test('a name is dropped only when an authoritative listing no longer has its target', async () => {
+  let targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+
+  targets = []; pages.length = 0; // the tab really closed
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), []);
+});
+
+test('a name survives when its tab is present but unmatched', async () => {
+  // Two tabs share a URL, so the matcher fails closed — but both are in
+  // /json/list, so neither name is gone.
+  let targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets, relayUrl: '' });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId ?? 'T1' });
+
+  targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://a.test/', title: 'A2' }];
+  pages.push(makeTabPage({ url: 'https://a.test/' }));
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'unmatched is not the same as gone');
+});
+
+test('a failed relay fetch never deletes a name', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  fail = true;
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'an unreachable relay is not evidence that a tab closed');
+});
+
+test('setNamedPage still honours { replace } and rejects a conflict without it', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getRelayHttpUrl: () => '',
+    fetch: async () => { throw new Error('no relay'); },
+  });
+  runtime.setNamedPage('docs', pages[0]);
+  assert.throws(() => runtime.setNamedPage('docs', pages[1]), /docs/);
+  assert.deepEqual(runtime.setNamedPage('docs', pages[1], { replace: true }), { name: 'docs', replaced: true });
+});
+
+test('a name whose target is unresolved fails closed instead of soft-matching another tab', async () => {
+  // getNamedPage must never fall through to a different page: acting on the
+  // wrong tab is worse than reporting the name as momentarily unresolvable.
+  // Reconnect orphans the stored Page (isClosed() is still false), and the
+  // relay is unreachable so identity cannot rebind.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: makeRelayFetch(() => targets, { fail: () => fail }),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  const orphan = pages[0];
+
+  browser.fireDisconnected();
+  fail = true;
+  pages.splice(0, pages.length, makeTabPage({ url: 'https://elsewhere.test/' }));
+
+  assert.equal(orphan.isClosed(), false, 'fixture must model the real hazard');
+  assert.equal(runtime.getNamedPage('docs'), null, 'must not return the orphaned page');
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'an unreachable relay is not evidence the tab closed — keep the name');
+});

@@ -53,6 +53,16 @@ function fakePage({ url = 'about:blank', title = '' } = {}) {
 
 function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
   const list = [...pages];
+  // Relay target ids, allocated per PAGE (never by list index — every id would
+  // shift when a tab closes) and read off the LIVE list, so pages opened during
+  // a test are visible to /json/list.
+  const idFor = new WeakMap();
+  let nextTargetId = 1;
+  const targetsNow = () => list.map((pg) => {
+    if (!idFor.has(pg)) idFor.set(pg, `T${nextTargetId++}`);
+    return { id: idFor.get(pg), url: pg.url(), title: pg._title ?? '' };
+  });
+  const cdpSessions = [];
   const context = {
     on() {},
     pages: () => list,
@@ -61,11 +71,19 @@ function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
       list.push(page);
       return page;
     },
+    async newCDPSession(page) {
+      cdpSessions.push(page);
+      return {
+        async send() { return { targetInfo: { targetId: idFor.get(page) ?? null } }; },
+        async detach() {},
+      };
+    },
   };
+  let disconnectedCb = null;
   const browser = {
     isConnected: () => true,
     contexts: () => [context],
-    on() {},
+    on(event, cb) { if (event === 'disconnected') disconnectedCb = cb; },
     close: async () => {},
   };
   const runtime = createBrowserSessionRuntime({
@@ -73,14 +91,33 @@ function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
     getRelayHttpUrl: () => 'http://relay.test',
     // Restrictions default to none unless the test injects some.
     fetch: async (url) => {
-      if (restrictions && url.endsWith('/restrictions')) {
+      if (restrictions && String(url).endsWith('/restrictions')) {
         return { ok: true, json: async () => restrictions };
       }
+      if (String(url).endsWith('/json/list')) return { ok: true, json: async () => targetsNow() };
       return { ok: true, json: async () => ({}) };
     },
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
   });
-  const run = (command, timeout) => executeBrowserforceCommand({ command, runtime, timeout });
-  return { runtime, run, pages: list };
+  // `opts` is an object, never a bare timeout: Task 12 passes { clientId } and
+  // a positional timeout slot would swallow it silently.
+  const run = (command, opts = {}) => executeBrowserforceCommand({ command, runtime, ...opts });
+  /**
+   * Fire the browser `disconnected` handler and swap in fresh Page objects at
+   * the same URLs. The old ones stay OPEN but orphaned — which is what
+   * Playwright actually does, and what the generation check exists to catch.
+   */
+  const __fireDisconnect = () => {
+    disconnectedCb?.();
+    const replacements = list.map((old) => {
+      const next = fakePage({ url: old.url(), title: old._title });
+      if (idFor.has(old)) idFor.set(next, idFor.get(old));
+      return next;
+    });
+    list.splice(0, list.length, ...replacements);
+  };
+  return { runtime, run, pages: list, cdpSessions, __fireDisconnect };
 }
 
 // ─── --tab routing (per-run pinned pages) ─────────────────────────────────────
@@ -267,8 +304,8 @@ describe('tab commands: tabs / use / open / rename / forget', () => {
 
     const { data } = await run('tabs');
     assert.deepEqual(data.tabs, [
-      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', targetId: null, active: false, name: 'docs' },
-      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', targetId: null, active: true, name: null },
+      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', targetId: 'T1', active: false, name: 'docs' },
+      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', targetId: 'T2', active: true, name: null },
     ]);
   });
 
@@ -1182,5 +1219,41 @@ describe('BrowserforceCommandError', () => {
     const err = new BrowserforceCommandError('nope', { code: 'TEST' });
     assert.equal(err.resetHintAllowed, false);
     assert.equal(err.suggestion, null);
+  });
+});
+
+describe('tab names survive the idle reconnect', () => {
+  it('open --as after a reconnect still detects a name conflict', async () => {
+    const { runtime, run, __fireDisconnect } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await run('open https://a.test/ --as docs');
+    __fireDisconnect(); // new Page objects, same tabs
+    await assert.rejects(() => run('open https://b.test/ --as docs'), /docs/,
+      'the conflict check must run against rebound names, not stale entries');
+    assert.ok(runtime, 'runtime in scope');
+  });
+
+  it('open --as records a durable target id for the page it just created', async () => {
+    const { runtime, run, __fireDisconnect } = tabRuntimeEnv({ pages: [] });
+    await run('open https://a.test/ --as docs');
+    const [entry] = runtime.listPageNames();
+    assert.equal(entry.name, 'docs');
+    const rows = await runtime.listTabRows();
+    const named = rows.find((r) => r.name === 'docs');
+    assert.ok(named?.targetId, 'a name created by open --as must carry a target id');
+
+    __fireDisconnect();
+    const after = await runtime.listTabRows();
+    assert.equal(after.find((r) => r.name === 'docs')?.targetId, named.targetId,
+      'the name survives the reconnect it was created before');
+  });
+
+  it('rename after a reconnect moves the rebound name', async () => {
+    const { runtime, run, __fireDisconnect } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await run('open https://a.test/ --as docs');
+    __fireDisconnect();
+    await run('rename docs api-docs');
+    assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['api-docs']);
+    const rows = await runtime.listTabRows();
+    assert.ok(rows.some((r) => r.name === 'api-docs'), 'the renamed tab is still identified');
   });
 });

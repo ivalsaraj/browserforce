@@ -470,6 +470,11 @@ const VERB_EXECUTORS = {
       } catch (err) {
         throw wrapTabStateError(err);
       }
+      // Refresh identity BEFORE the conflict check: straight after a reconnect
+      // the stored name entries are not yet rebound, so the check would consult
+      // stale pages. listIdentifiedPages() connects first, so a first named
+      // open on a fresh runtime works rather than failing with "Not connected".
+      await runtime.listIdentifiedPages();
       if (runtime.getNamedPage(name) && !replace) {
         throw new BrowserforceCommandError(`Tab name "${name}" is already in use.`, {
           code: 'TAB_NAME_IN_USE',
@@ -480,7 +485,12 @@ const VERB_EXECUTORS = {
 
     try {
       const page = await runtime.openNewPage({ url, timeout });
-      if (name) runtime.setNamedPage(name, page, { replace });
+      // openNewPage returns a Page and nothing else, so the new tab has no
+      // target id yet. List to learn it — a page-keyed name is exactly the
+      // defect this arc removes — then list again so the returned row carries
+      // the name (building it before setNamedPage returns name: null).
+      const created = (await runtime.listIdentifiedPages()).find((i) => i.page === page);
+      if (name) runtime.setNamedPage(name, page, { replace, targetId: created?.targetId ?? null });
       const active = await activeTabRow(runtime);
       return { opened: url, tab: active };
     } catch (err) {
@@ -493,6 +503,8 @@ const VERB_EXECUTORS = {
     const to = String(body?.to ?? '').trim();
     if (!from || !to) throw usageError('rename requires the current and new name (e.g. rename docs api-docs)');
     try {
+      // Same reason as open --as: resolve names against rebound entries.
+      await runtime.listIdentifiedPages();
       const result = runtime.renamePageName(from, to, { replace: body?.replace === true });
       return { renamed: { from, to: result.name, replaced: result.replaced } };
     } catch (err) {
