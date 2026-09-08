@@ -1264,3 +1264,57 @@ test('reset clears every client slot', async () => {
   await runtime.reset();
   assert.equal(runtime.getActivePage({ clientId: 'a' }), null);
 });
+
+// ─── Codex R1 regressions ────────────────────────────────────────────────────
+
+test('an exactly-resolved id is not treated as gone just because /json/list lacks it', async () => {
+  // Exact resolution stores the real CDP target id; /json/list reports the
+  // relay's synthetic id for a lazily-attached tab. Comparing the two deleted
+  // the handle and the name of every duplicate-URL tab on the next listing.
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const before = await runtime.listTabRows();
+  assert.deepEqual(before.map((r) => r.targetId), ['cdp-0', 'cdp-1'], 'resolved exactly');
+  runtime.setNamedPage('dup', pages[0], { targetId: before[0].targetId });
+
+  const after = await runtime.listTabRows();
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle),
+    'duplicate-URL handles must not renumber on the very next listing');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup'],
+    'nor may the name be deleted');
+
+  fireDisconnect();
+  const afterReconnect = await runtime.listTabRows();
+  assert.deepEqual(afterReconnect.map((r) => r.handle), before.map((r) => r.handle),
+    'and they survive the reconnect, which is the whole point');
+});
+
+test('a known but unresolved name never soft-matches a different tab', async () => {
+  // getNamedPage fails closed, but resolveTabTarget then fell through to the
+  // URL/title tiers — so `use docs` could select any tab whose URL says "docs".
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: makeRelayFetch(() => targets, { fail: () => fail }),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+
+  browser.fireDisconnected();
+  fail = true;
+  // A DIFFERENT tab whose URL contains the name.
+  pages.splice(0, pages.length, makeTabPage({ url: 'https://elsewhere.test/docs', title: 'Other' }));
+
+  await assert.rejects(() => runtime.resolveTabTarget('docs'), (err) => {
+    assert.equal(err.code, 'TAB_NOT_RESOLVED');
+    assert.match(err.message, /docs/);
+    return true;
+  });
+});

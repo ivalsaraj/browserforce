@@ -289,6 +289,12 @@ class RelayServer {
     // instead of spawning a new dedicated window per reconnect.
     this.agentWindowByAffinityKey = new Map();
     this.sessionCounter = 0;
+    // tabId -> how many times a target has been registered for it. Chrome
+    // REUSES tab ids, so `bf-target-<tabId>` alone let a reopened tab present a
+    // closed tab's id and inherit every agent handle and name keyed on it. The
+    // first registration keeps the bare id (nothing observable changes); each
+    // later one is suffixed, which is exactly when reuse is possible.
+    this.syntheticTargetGeneration = new Map();
 
     // State
     this.autoAttachEnabled = false;
@@ -1028,7 +1034,7 @@ class RelayServer {
         ?? existing?.windowId;
       this.targets.set(relaySessionId, {
         tabId,
-        targetId: targetId || `bf-target-${tabId}`,
+        targetId: targetId || this._synthesizeTargetId(tabId),
         targetInfo: targetInfo || { url: '', title: '' },
         windowId: resolvedWindowId,
         debuggerAttached: true,
@@ -1450,6 +1456,16 @@ class RelayServer {
     }
   }
 
+  /**
+   * A target id for a tab the extension gave no real CDP id for. Unique per
+   * REGISTRATION, not per tab id — see `syntheticTargetGeneration`.
+   */
+  _synthesizeTargetId(tabId) {
+    const generation = (this.syntheticTargetGeneration.get(tabId) ?? 0) + 1;
+    this.syntheticTargetGeneration.set(tabId, generation);
+    return generation === 1 ? `bf-target-${tabId}` : `bf-target-${tabId}-${generation}`;
+  }
+
   // ─── Tab Management ─────────────────────────────────────────────────────
 
   async _autoAttachAllTabs(ws) {
@@ -1486,7 +1502,7 @@ class RelayServer {
       if (!Number.isInteger(tabId)) continue;
       const existingSessionId = this.tabToSession.get(tabId);
       const sessionId = existingSessionId || `bf-session-${++this.sessionCounter}`;
-      const targetId = tab.targetId || `bf-target-${tabId}`;
+      const targetId = tab.targetId || this._synthesizeTargetId(tabId);
       const existing = this.targets.get(sessionId);
       const isNewTarget = !existing;
       const targetInfo = {

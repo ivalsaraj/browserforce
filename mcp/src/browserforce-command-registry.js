@@ -341,6 +341,7 @@ const TAB_ERROR_SUGGESTIONS = {
   TAB_NAME_IN_USE: 'Pass --replace to move the name to this tab.',
   TAB_NAME_NOT_FOUND: 'Run "tabs" to see named tabs.',
   TAB_NOT_FOUND: 'Run "tabs" to list open tabs and their stable handles.',
+  TAB_NOT_RESOLVED: 'Run "tabs" to re-resolve names, or target the tab by its t<N> handle.',
   TAB_AMBIGUOUS: 'Use a stable t<N> handle or a more specific query.',
   TAB_NOT_USABLE: 'That tab is closed. Run "tabs" to list open tabs.',
   BAD_TAB_NAME: 'Use an identifier-like name such as docs or api-docs (t<N> is reserved for handles).',

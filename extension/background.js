@@ -490,7 +490,7 @@ async function attachTab(tabId, sessionId, options = {}) {
   } catch {
     // Fallback: synthesize from tab info
     const tab = await chrome.tabs.get(tabId);
-    targetId = `tab-${tabId}`;
+    targetId = synthesizeTargetId(tabId);
     targetInfo = { targetId, type: 'page', title: tab.title, url: tab.url };
   }
 
@@ -794,6 +794,19 @@ function onDebuggerDetach(source, reason) {
 }
 
 // ─── Tab Lifecycle Events ────────────────────────────────────────────────────
+
+// tabId -> registration count. Chrome REUSES tab ids, so `tab-<tabId>` alone
+// let a reopened tab present the closed tab's target id. The first attach keeps
+// the bare id; each later one is suffixed, which is exactly when reuse can
+// happen. Monotonic for the life of the service worker — a restart re-attaches
+// and re-registers every target anyway.
+const syntheticTargetGeneration = new Map();
+
+function synthesizeTargetId(tabId) {
+  const generation = (syntheticTargetGeneration.get(tabId) ?? 0) + 1;
+  syntheticTargetGeneration.set(tabId, generation);
+  return generation === 1 ? `tab-${tabId}` : `tab-${tabId}-${generation}`;
+}
 
 function onTabRemoved(tabId) {
   // Bookkeeping is cleared even for tabs we never attached: hydrated agent tabs

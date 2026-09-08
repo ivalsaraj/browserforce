@@ -155,6 +155,15 @@ export function createBrowserSessionRuntime(deps = {}) {
   // on the relay (it mints one per Target.attachToTarget).
   const AMBIGUOUS_RESOLUTION_LIMIT = 8;
 
+  // Ids learned from Target.getTargetInfo rather than from /json/list. They are
+  // real CDP target ids, so they are NEVER in the relay's listing for a lazily
+  // attached tab — and "absent from /json/list" is the test both handle
+  // eviction and name deletion use for "this tab is gone". Without this set
+  // every duplicate-URL tab lost its handle and its name on the next listing.
+  // A real CDP target id is globally unique and never reused, so exempting it
+  // costs nothing: the tab closing is caught by the page disappearing instead.
+  const exactlyResolvedTargetIds = new Set();
+
   /** Relay identity applies only to the real-Chrome backend. Null = MCP = real. */
   function relayBackendActive() {
     return !backendInfo.backend || backendInfo.backend === 'real';
@@ -620,6 +629,7 @@ export function createBrowserSessionRuntime(deps = {}) {
         const { targetInfo } = await session.send('Target.getTargetInfo');
         if (targetInfo?.targetId) {
           row.targetId = targetInfo.targetId;
+          exactlyResolvedTargetIds.add(targetInfo.targetId);
           targetIdByPage.set(row.page, targetInfo.targetId);
           row.handle = getStablePageHandle(row.page, targetInfo.targetId);
         }
@@ -686,7 +696,9 @@ export function createBrowserSessionRuntime(deps = {}) {
       // handle. Evict ids the relay no longer lists. Only on an authoritative
       // listing: a failed fetch is not evidence that a tab closed.
       const live = new Set(targets.map((t) => t?.id).filter(Boolean));
-      for (const id of handlesByTargetId.keys()) if (!live.has(id)) handlesByTargetId.delete(id);
+      for (const id of handlesByTargetId.keys()) {
+        if (!live.has(id) && !exactlyResolvedTargetIds.has(id)) handlesByTargetId.delete(id);
+      }
     }
     if (startedAt !== connectionGeneration) return listIdentifiedPages(); // retry on the new connection
     identityCache = { generation: connectionGeneration, rows };
@@ -725,7 +737,8 @@ export function createBrowserSessionRuntime(deps = {}) {
       if (!entry.targetId) continue;
       const page = byTargetId.get(entry.targetId);
       if (page) { entry.page = page; entry.gen = connectionGeneration; continue; }
-      if (authoritative && !liveTargetIds.has(entry.targetId)) namedPages.delete(name);
+      if (authoritative && !liveTargetIds.has(entry.targetId)
+        && !exactlyResolvedTargetIds.has(entry.targetId)) namedPages.delete(name);
     }
     pruneNamedPages();
   }
@@ -928,6 +941,15 @@ export function createBrowserSessionRuntime(deps = {}) {
 
       const named = getNamedPage(q);
       if (named) return { page: named, matchedBy: 'name', warning: null };
+      // A name we HOLD but cannot resolve must not fall through to the URL and
+      // title tiers: `use docs` would then select any tab whose URL says
+      // "docs". Acting on the wrong tab is worse than a retryable failure.
+      if (namedPages.has(q)) {
+        throw tabStateError(
+          'TAB_NOT_RESOLVED',
+          `Tab "${q}" is named but its tab could not be resolved right now (the relay may be unreachable). Run tabs to list open tabs.`,
+        );
+      }
 
       if (/^\d+$/.test(q)) {
         const row = stable[Number(q) - 1];
@@ -1090,6 +1112,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     // page graph.
     stableHandles = new WeakMap();
     handlesByTargetId.clear();
+    exactlyResolvedTargetIds.clear();
     targetIdByPage = new WeakMap();
     lastRelayTargets = null;
     identityCache = { generation: -1, rows: [] };

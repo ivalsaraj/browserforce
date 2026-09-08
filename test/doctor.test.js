@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-import { runDoctor, OK, WARN, FAIL } from '../mcp/src/doctor.js';
+import { runDoctor, OK, WARN, FAIL, UNREADABLE_SKILL } from '../mcp/src/doctor.js';
 
 const exec = promisify(execFile);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -282,5 +282,32 @@ describe('doctor: tab count', () => {
       probeExtensionStatus: async () => ({ connected: true, activeTargets: 1, attachedTabs: [{ tabId: 'abc' }] }),
     }));
     assert.match(find(report, 'tabs').detail, /cannot determine/i);
+  });
+});
+
+describe('doctor: unreadable deployed skill', () => {
+  it('maps a real non-ENOENT read failure to the unreadable sentinel, not to absent', async () => {
+    // A directory read fails with EISDIR: exercises the default reader's own
+    // discrimination, which the injected readers below bypass.
+    const seen = [];
+    await runDoctor(healthyDeps({
+      readSkillText: undefined,
+      paths: { ...PATHS, shippedSkillFile: '/repo/shipped/SKILL.md', deployedSkillFiles: [ROOT] },
+      probeExtensionStatus: async () => ({ connected: true }),
+    })).then((r) => seen.push(find(r, 'skill')));
+    assert.equal(seen[0].status, WARN, 'an unreadable path must not read as "not installed"');
+    assert.match(seen[0].detail, /cannot read/i);
+  });
+
+  it('warns rather than reporting a permission-denied copy as not installed', async () => {
+    // Reading it as "absent" hides exactly the drift this check exists to catch.
+    const report = await runDoctor(healthyDeps({
+      readSkillText: (p) => (p.includes('shipped') ? 'shipped copy' : UNREADABLE_SKILL),
+      paths: { ...PATHS, deployedSkillFiles: ['/home/deployed/SKILL.md'] },
+    }));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, WARN);
+    assert.match(skill.detail, /\/home\/deployed\/SKILL\.md/);
+    assert.doesNotMatch(skill.detail, /not installed/i);
   });
 });
