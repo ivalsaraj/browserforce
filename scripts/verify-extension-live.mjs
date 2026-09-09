@@ -46,8 +46,16 @@ function resolveChrome() {
 const CHROME = resolveChrome();
 const RELAY = 'http://127.0.0.1:19222';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const status = async () => (await fetch(`${RELAY}/extension/status`)).json();
-const list = async () => (await fetch(`${RELAY}/json/list`)).json();
+// Non-2xx must THROW, never parse: the ownership check treats a thrown error as
+// "unknown" and fails closed, but a parsed error body carrying connected:false
+// would read as "slot free" and launch Chrome under unknown ownership.
+async function getJson(path) {
+  const response = await fetch(`${RELAY}${path}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${path}`);
+  return response.json();
+}
+const status = () => getJson('/extension/status');
+const list = () => getJson('/json/list');
 
 let ctx;
 let failed = false;
