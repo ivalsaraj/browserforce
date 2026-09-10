@@ -31,6 +31,7 @@ const parallelVisibilitySelect = document.getElementById('bf-parallel-visibility
 const lockUrlCb = document.getElementById('bf-lock-url');
 const noNewTabsCb = document.getElementById('bf-no-new-tabs');
 const readOnlyCb = document.getElementById('bf-read-only');
+const allowProfileWideClearCb = document.getElementById('bf-allow-profile-wide-clear');
 const dedicatedWindowCb = document.getElementById('bf-dedicated-window');
 const ghostCursorCb = document.getElementById('bf-ghost-cursor');
 // Mirrors extension/agent-defaults.js — popup.js is a classic script and cannot
@@ -56,7 +57,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 
 const SETTINGS_KEYS = [
   'relayUrl', 'autoDetachMinutes', 'autoCloseMinutes',
-  'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions',
+  'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'allowProfileWideClear', 'userInstructions',
   'executionMode', 'parallelVisibilityMode', 'dedicatedWindow', 'ghostCursorEnabled',
 ];
 
@@ -74,6 +75,7 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   lockUrlCb.checked = !!s.lockUrl;
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
+  allowProfileWideClearCb.checked = !!s.allowProfileWideClear;
   dedicatedWindowCb.checked = s.dedicatedWindow !== false;
   ghostCursorCb.checked = !!s.ghostCursorEnabled;
   instructionsEl.value = s.userInstructions || '';
@@ -185,6 +187,7 @@ function onRestrictionToggle() {
     lockUrl: lockUrlCb.checked,
     noNewTabs: noNewTabsCb.checked,
     readOnly: readOnlyCb.checked,
+    allowProfileWideClear: allowProfileWideClearCb.checked,
   });
   updateInstructions();
 }
@@ -192,6 +195,7 @@ function onRestrictionToggle() {
 lockUrlCb.addEventListener('change', onRestrictionToggle);
 noNewTabsCb.addEventListener('change', onRestrictionToggle);
 readOnlyCb.addEventListener('change', onRestrictionToggle);
+allowProfileWideClearCb.addEventListener('change', onRestrictionToggle);
 
 // Save user edits to instructions (debounced)
 let instrTimeout;

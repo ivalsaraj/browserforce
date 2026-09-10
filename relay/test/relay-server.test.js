@@ -3122,6 +3122,7 @@ describe('GET /restrictions endpoint', () => {
       lockUrl: false,
       noNewTabs: false,
       readOnly: false,
+      allowProfileWideClear: false,
       instructions: '',
     });
   });
@@ -4198,6 +4199,155 @@ describe('synthetic target ids are unique per registration', () => {
       cdp?.close();
       ext?.close();
       relay.stop();
+    }
+  });
+});
+
+describe('profile-wide clear guard', () => {
+  let relay;
+  let port;
+
+  const PERMISSIVE = {
+    mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '',
+  };
+
+  /**
+   * Fake extension exposing one tab. `restrictions` is what getRestrictions
+   * answers (pass null to stay silent, so the relay's fetch times out).
+   * Records every cdpCommand that reaches it — keeping these away from
+   * chrome.debugger is the guard's entire job.
+   */
+  function fakeExtension(ext, restrictions) {
+    const forwarded = [];
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'getRestrictions') {
+        if (restrictions) ext.send(JSON.stringify({ id: msg.id, result: restrictions }));
+        return;
+      }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { tabs: [{ tabId: 41, windowId: 3, url: 'https://a.test/', title: 'A', active: true }] },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'attachTab') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: {
+            tabId: msg.params.tabId,
+            targetId: `real-target-${msg.params.tabId}`,
+            targetInfo: { targetId: `real-target-${msg.params.tabId}`, type: 'page', title: 'A', url: 'https://a.test/', windowId: 3 },
+            sessionId: msg.params.sessionId,
+          },
+        }));
+        return;
+      }
+      if (msg.id && msg.method === 'cdpCommand') {
+        forwarded.push(msg.params?.method);
+        ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      }
+    });
+    return forwarded;
+  }
+
+  /**
+   * Drive the path Playwright actually takes: auto-attach, then issue the
+   * command against the page's session id. Sending it without a sessionId
+   * would hit the browser-level handler, which answers {} for anything it does
+   * not know — so the command would never reach the extension and the test
+   * would pass whether or not the guard exists.
+   */
+  async function openTabSession(restrictions) {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    const forwarded = fakeExtension(ext, restrictions);
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    const events = [];
+    cdp.on('message', (data) => events.push(JSON.parse(data.toString())));
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(300);
+    const attached = events.find((m) => m.method === 'Target.attachedToTarget');
+    assert.ok(attached, 'tab session required for this test to mean anything');
+    return { ext, cdp, events, forwarded, sessionId: attached.params.sessionId };
+  }
+
+  before(async () => {
+    port = getRandomPort();
+    relay = new RelayServer({ port });
+    await relay.start({ writeCdpUrl: false });
+  });
+
+  after(() => relay.stop());
+
+  for (const method of ['Network.clearBrowserCookies', 'Network.clearBrowserCache', 'Storage.clearCookies']) {
+    it(`refuses ${method} on a tab session and never forwards it`, async () => {
+      const { ext, cdp, events, forwarded, sessionId } = await openTabSession({ ...PERMISSIVE });
+      try {
+        cdp.send(JSON.stringify({ id: 9, method, sessionId }));
+        await sleep(300);
+        const res = events.find((m) => m.id === 9);
+        assert.ok(res, 'a response is required');
+        assert.ok(res.error, 'the command must fail, not succeed silently');
+        assert.match(res.error.message, /EVERY site/);
+        assert.match(res.error.message, /Network\.deleteCookies/,
+          'the refusal must name the scoped alternative so the agent can recover');
+        assert.match(res.error.message, /ask them first/,
+          'the refusal must tell the agent to ask the user, not merely fail');
+        assert.ok(!forwarded.includes(method), 'nothing may reach chrome.debugger');
+      } finally {
+        cdp.close(); ext.close(); await sleep(50);
+      }
+    });
+  }
+
+  it('forwards the clear once the user ticks the popup permission', async () => {
+    const { ext, cdp, events, forwarded, sessionId } =
+      await openTabSession({ ...PERMISSIVE, allowProfileWideClear: true });
+    try {
+      cdp.send(JSON.stringify({ id: 9, method: 'Network.clearBrowserCookies', sessionId }));
+      await sleep(300);
+      const res = events.find((m) => m.id === 9);
+      assert.ok(res && !res.error, `expected success, got ${res?.error?.message}`);
+      assert.ok(forwarded.includes('Network.clearBrowserCookies'),
+        'the permission must actually let the command through');
+    } finally {
+      cdp.close(); ext.close(); await sleep(50);
+    }
+  });
+
+  it('fails closed when the extension cannot answer getRestrictions', async () => {
+    // An unreadable permission must never read as "granted".
+    const { ext, cdp, events, forwarded, sessionId } = await openTabSession(null);
+    try {
+      cdp.send(JSON.stringify({ id: 9, method: 'Network.clearBrowserCookies', sessionId }));
+      await sleep(3000);
+      const res = events.find((m) => m.id === 9);
+      assert.ok(res?.error, 'an unreadable permission must refuse');
+      assert.ok(!forwarded.includes('Network.clearBrowserCookies'));
+    } finally {
+      cdp.close(); ext.close(); await sleep(50);
+    }
+  });
+
+  it('leaves the scoped alternative alone', async () => {
+    const { ext, cdp, events, forwarded, sessionId } = await openTabSession({ ...PERMISSIVE });
+    try {
+      cdp.send(JSON.stringify({
+        id: 9,
+        method: 'Network.deleteCookies',
+        params: { name: 'sid', url: 'https://a.test/' },
+        sessionId,
+      }));
+      await sleep(300);
+      const res = events.find((m) => m.id === 9);
+      assert.ok(res && !res.error, `scoped delete must still work, got ${res?.error?.message}`);
+      assert.ok(forwarded.includes('Network.deleteCookies'));
+    } finally {
+      cdp.close(); ext.close(); await sleep(50);
     }
   });
 });

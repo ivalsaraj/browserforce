@@ -13,7 +13,11 @@ const COMMAND_TIMEOUT_MS = 30000;
 const PING_INTERVAL_MS = 5000;
 const DEFAULT_CDP_LOG_BUFFER_LIMIT = 10000;
 const RESTRICTIONS_FETCH_TIMEOUT_MS = 2000;
-const RESTRICTIONS_FAIL_CLOSED = Object.freeze({ mode: 'manual', noNewTabs: true });
+const RESTRICTIONS_FAIL_CLOSED = Object.freeze({
+  mode: 'manual',
+  noNewTabs: true,
+  allowProfileWideClear: false,
+});
 // Leak guard for label-keyed window affinity entries (which outlive their
 // connection by design). FIFO-evict the oldest pin beyond this size.
 const MAX_AFFINITY_ENTRIES = 50;
@@ -185,6 +189,30 @@ const INIT_ONLY_METHODS = new Set([
   'Emulation.setLocaleOverride', 'Emulation.setTimezoneOverride',
   'Emulation.setUserAgentOverride', 'Emulation.setGeolocationOverride',
 ]);
+
+// CDP commands whose blast radius is the WHOLE Chrome profile, not the target
+// tab. `Network.clearBrowserCookies` does not clear "this page's cookies" — it
+// clears every cookie for every domain the user is signed in to, so one stray
+// snippet signs them out of mail, source control and banking at once. Chrome
+// offers no scoped variant of these, so the relay refuses them by default and
+// the popup owns the opt-in (an env var would not: an agent runs shell commands
+// and could set one for itself, whereas it cannot tick a checkbox).
+//
+// Deliberately NOT listed: `Storage.clearDataForOrigin` /
+// `clearDataForStorageKey` take an origin and are already scoped, and
+// `Network.deleteCookies` deletes one named cookie. Those are the safe paths,
+// and the refusal below names them so the agent can recover without asking.
+const PROFILE_WIDE_CLEAR_METHODS = new Set([
+  'Network.clearBrowserCookies',
+  'Network.clearBrowserCache',
+  'Storage.clearCookies',
+]);
+
+function profileWideClearRefusal(method) {
+  return `${method} is blocked by BrowserForce: it clears data for EVERY site in the user's Chrome profile, not just this tab, and would sign them out everywhere. `
+    + 'To clear one site, read its cookies with Network.getCookies({ urls: [...] }) and remove them individually with Network.deleteCookies, or scope storage with Storage.clearDataForOrigin. '
+    + 'If the user truly wants the entire profile cleared, ask them first, then have them tick "Allow profile-wide data clearing" in the BrowserForce extension popup.';
+}
 
 // Return a well-shaped synthetic response for init commands that need more than {}.
 function syntheticInitResponse(method, target) {
@@ -462,7 +490,7 @@ class RelayServer {
 
     if (url.pathname === '/restrictions') {
       if (!this.ext) {
-        res.end(JSON.stringify({ mode: 'auto', lockUrl: false, noNewTabs: false, readOnly: false, instructions: '' }));
+        res.end(JSON.stringify({ mode: 'auto', lockUrl: false, noNewTabs: false, readOnly: false, allowProfileWideClear: false, instructions: '' }));
         return;
       }
       try {
@@ -1082,7 +1110,8 @@ class RelayServer {
   // ─── Restrictions Guard (fail-closed) ──────────────────────────────────────
 
   /**
-   * Fetch restrictions for the Target.createTarget guard. Fail-closed: every
+   * Fetch restrictions for the Target.createTarget and profile-wide-clear
+   * guards. Fail-closed: every
    * inability-to-read path (extension missing, timeout, malformed response,
    * extension error, transport failure) returns manual+noNewTabs so tab
    * creation is blocked deterministically. Do not cache — settings can change
@@ -1097,6 +1126,7 @@ class RelayServer {
       return {
         mode: raw.mode === 'manual' ? 'manual' : 'auto',
         noNewTabs: !!raw.noNewTabs,
+        allowProfileWideClear: !!raw.allowProfileWideClear,
       };
     } catch {
       return RESTRICTIONS_FAIL_CLOSED;
@@ -1281,6 +1311,16 @@ class RelayServer {
     });
 
     try {
+      // Guard before routing, not inside one branch: these arrive tab-scoped
+      // (Network.*, with a sessionId) or browser-scoped (Storage.clearCookies,
+      // without one), and both reach chrome.debugger.
+      if (PROFILE_WIDE_CLEAR_METHODS.has(method)) {
+        const restrictions = await this._getRestrictionsSafe();
+        if (!restrictions.allowProfileWideClear) {
+          throw new Error(profileWideClearRefusal(method));
+        }
+      }
+
       let result;
       if (sessionId && sessionId !== BF_BROWSER_SESSION_ID) {
         result = await this._forwardToTab(sessionId, method, params, id, clientId);
