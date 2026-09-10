@@ -77,7 +77,19 @@ export async function clearSessiondUrl({ urlPath, lockPath } = {}) {
 }
 
 /** Low-level authenticated localhost HTTP request to a running sessiond. */
-export function sessiondHttpRequest(method, url, body, token, { timeoutMs = 0 } = {}) {
+// Identifies the calling agent so the daemon can give it its own active tab
+// inside the shared session. Absent (or malformed) => the shared slot, i.e.
+// exactly today's sequential behaviour.
+const CLIENT_ID_HEADER = 'x-browserforce-client';
+const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** The caller's client id, or null when unset or not of the accepted shape. */
+export function resolveClientId(raw = process.env.BROWSERFORCE_CLIENT_ID) {
+  const id = String(raw ?? '').trim();
+  return CLIENT_ID_PATTERN.test(id) ? id : null;
+}
+
+export function sessiondHttpRequest(method, url, body, token, { timeoutMs = 0, clientId = null } = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const payload = body ? JSON.stringify(body) : undefined;
@@ -90,6 +102,7 @@ export function sessiondHttpRequest(method, url, body, token, { timeoutMs = 0 } 
         'Content-Type': 'application/json',
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(clientId ? { [CLIENT_ID_HEADER]: clientId } : {}),
       },
     }, (res) => {
       let data = '';
@@ -121,13 +134,13 @@ class SessiondNotRunningError extends Error {
  * token from the lock sidecar. Throws SessiondNotRunningError when no live
  * daemon lock exists.
  */
-export async function sessiondCommand({ method = 'POST', path, body = null, lockPath } = {}) {
+export async function sessiondCommand({ method = 'POST', path, body = null, lockPath, clientId = resolveClientId() } = {}) {
   const lock = await readSessiondLock({ lockPath });
   if (!lock) {
     throw new SessiondNotRunningError('BrowserForce session daemon is not running. Run `browserforce session start`.');
   }
   const url = `http://127.0.0.1:${lock.port}${path}`;
-  return sessiondHttpRequest(method, url, body, lock.token);
+  return sessiondHttpRequest(method, url, body, lock.token, { clientId });
 }
 
 /**

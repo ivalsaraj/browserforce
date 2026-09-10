@@ -98,5 +98,19 @@ test('background delegates hydration and the close fence to the pure helpers', (
 });
 
 test('closing an unattached tab still clears its agent bookkeeping', () => {
-  assert.match(bg, /function onTabRemoved\(tabId\) \{[\s\S]{0,500}agentCreatedTabs\.delete\(tabId\)[\s\S]{0,300}if \(!attachedTabs\.has\(tabId\)\) return;/);
+  // Two ordered facts rather than one long window: the bookkeeping delete
+  // happens, and it happens BEFORE the attached-only work is skipped.
+  const body = bg.slice(bg.indexOf('function onTabRemoved'), bg.indexOf('function onTabUpdated'));
+  assert.match(body, /agentCreatedTabs\.delete\(tabId\)/);
+  assert.ok(body.indexOf('agentCreatedTabs.delete(tabId)') < body.indexOf('if (!isAttached) return;'),
+    'bookkeeping must be cleared for tabs that were never attached');
+});
+
+test('closing an unattached tab is reported to the relay before the attached gate', () => {
+  // The relay serves url/title from /json/list with no debugger attach, so a
+  // close it never hears about leaves a target — and every handle and name
+  // derived from it — pointing at a tab that no longer exists.
+  const body = bg.slice(bg.indexOf('function onTabRemoved'), bg.indexOf('function onTabUpdated'));
+  assert.ok(body.indexOf("method: 'tabDetached'") < body.indexOf('if (!isAttached) return;'),
+    'tabDetached must be sent for every tab, not only attached ones');
 });

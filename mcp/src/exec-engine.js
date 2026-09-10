@@ -11,6 +11,7 @@ import {
   createSmartDiff, parseSearchPattern,
 } from './snapshot.js';
 import { getAriaSnapshot, renderRefLines, renderFrameErrors } from './aria-snapshot-engine.js';
+import { classifyReadiness } from './readiness.js';
 import { Semaphore, injectA11yClient, showLabels, hideLabels } from './a11y-labels.js';
 import { getCleanHTML } from './clean-html.js';
 import { getPageMarkdown } from './page-markdown.js';
@@ -113,20 +114,22 @@ export async function assertExtensionConnected({ baseUrl = getRelayHttpUrl(), ti
   // the extension is connected. Attached-page readiness is asserted separately
   // via assertAttachedPageAvailable() in the MCP startup preflight.
   const resolvedBaseUrl = String(baseUrl).replace(/\/+$/, '');
-  let status;
+  let status = null;
+  let statusError = null;
   try {
     status = await getExtensionStatus({ baseUrl: resolvedBaseUrl, timeoutMs });
   } catch (err) {
-    throw new Error(
-      `Cannot reach BrowserForce relay at ${resolvedBaseUrl}. ` +
-      'Start it with `browserforce serve`.'
-    );
+    statusError = err;
   }
 
-  if (!status?.connected) {
-    throw new Error(
-      `BrowserForce extension is not connected to relay at ${resolvedBaseUrl}.`
-    );
+  // No discoveredPageCount: this runs PRE-CONNECT, and attachedTabs is empty on
+  // a healthy browser until Target.setAutoAttach — asking the no-tabs question
+  // here rejects working sessions.
+  const readiness = classifyReadiness({ statusError, status });
+  if (readiness.code !== 'READY') {
+    const err = new Error(`${readiness.message} (relay: ${resolvedBaseUrl})`);
+    err.code = readiness.code;
+    throw err;
   }
 
   return status;

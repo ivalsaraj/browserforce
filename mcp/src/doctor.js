@@ -8,7 +8,9 @@
 // requires explicit, separate action by the user.
 
 import { readFileSync, statSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   BF_DIR,
   CDP_URL_FILE,
@@ -72,12 +74,54 @@ async function defaultProbeSessiondStatus(lock) {
   return body;
 }
 
+// The skill an agent reads is the DEPLOYED copy, not the repo's. They forked
+// silently once already (July -> September), so every text fix had to be made
+// twice and reached no agent. CI cannot see another machine's home directory;
+// this check can.
+const SKILL_INSTALL_HINT = 'npx -y skills add ivalsaraj/browserforce';
+/** A deployed skill that exists but could not be read. Distinct from absent. */
+export const UNREADABLE_SKILL = Symbol('unreadable-skill');
+const SHIPPED_SKILL_FILE = fileURLToPath(new URL('../../skills/browserforce/SKILL.md', import.meta.url));
+
+// Roots `npx skills add` writes to, per-home and per-project. A project-local
+// copy is what an agent working in that repo reads, so omitting it hides the
+// drift that matters most.
+const SKILL_ROOTS = ['.claude', '.config/opencode', '.agents', '.opencode'];
+
+/**
+ * Raw read: only trailing whitespace may differ between shipped and deployed.
+ * Returns null when the file is absent, UNREADABLE_SKILL when it exists but
+ * cannot be read — a permission error is an installation problem, not proof
+ * that no copy is deployed, and silently reading it as "not installed" hides
+ * exactly the drift this check exists to catch.
+ */
+function defaultReadSkillText(p) {
+  try {
+    return readFileSync(p, 'utf8');
+  } catch (err) {
+    return err?.code === 'ENOENT' || err?.code === 'ENOTDIR' ? null : UNREADABLE_SKILL;
+  }
+}
+
+function defaultDeployedSkillFiles() {
+  const bases = [homedir(), process.cwd()];
+  const files = [];
+  for (const base of bases) {
+    for (const root of SKILL_ROOTS) {
+      files.push(join(base, ...root.split('/'), 'skills', 'browserforce', 'SKILL.md'));
+    }
+  }
+  return [...new Set(files)];
+}
+
 function defaultPaths() {
   return {
     tokenFile: TOKEN_FILE,
     cdpUrlFile: CDP_URL_FILE,
     sessiondLockFile: resolveSessiondLockPath(),
     sessiondUrlFile: resolveSessiondUrlPath(),
+    shippedSkillFile: SHIPPED_SKILL_FILE,
+    deployedSkillFiles: defaultDeployedSkillFiles(),
   };
 }
 
@@ -92,8 +136,33 @@ export async function runDoctor({
   relayHttpUrl = getRelayHttpUrl(),
   fileStat = defaultFileStat,
   readText = defaultReadText,
+  readSkillText = defaultReadSkillText,
   readRawLock = defaultReadRawLock,
   lockAlive = (lock) => isLockAlive({ lock }),
+  // Returns { discovered, count }. Collapsing "not discovered" and
+  // "discovered, zero tabs" into one value makes the promised no-tabs state
+  // unreachable — the opposite failure from reporting it wrongly. Derived from
+  // the status ALREADY fetched at the top of runDoctor: a second probe throws
+  // in the relay-down state, which is precisely when doctor must still report.
+  deriveTabState = (status) => {
+    if (!Array.isArray(status?.attachedTabs)) return { discovered: false, count: 0 };
+    const tabs = status.attachedTabs;
+    // Integer tabId, not merely present: null, '' and 'abc' all pass a
+    // `!== undefined` check and would classify a malformed status as healthy.
+    const wellFormed = tabs.every((t) => t && typeof t === 'object' && Number.isInteger(t.tabId));
+    const active = status.activeTargets;
+    if (!wellFormed || (active !== undefined && !Number.isInteger(active))) {
+      return { discovered: false, count: 0 }; // malformed => unknown, never healthy-zero
+    }
+    // The relay derives activeTargets from the SAME target list, so
+    // { activeTargets: 3, attachedTabs: [] } is impossible — treat a
+    // disagreement as malformed, not as zero tabs.
+    if (Number.isInteger(active) && active !== tabs.length) return { discovered: false, count: 0 };
+    // Discovery cannot be inferred from a zero count: activeTargets is 0 both
+    // before Target.setAutoAttach and on a genuinely empty browser, so
+    // `discovered` is true only on positive evidence.
+    return { discovered: tabs.length > 0, count: tabs.length };
+  },
   probeSessiondStatus = defaultProbeSessiondStatus,
   removeFile = defaultRemoveFile,
   paths = defaultPaths(),
@@ -115,11 +184,61 @@ export async function runDoctor({
 
   if (!relayUp) {
     checks.push(check('extension', 'Chrome extension', WARN, 'cannot check — relay not reachable'));
-  } else if (relayStatus?.connected) {
+  } else if (relayStatus?.connected === true) {
+    // Strict, matching classifyReadiness: a malformed body such as
+    // { connected: "false" } is truthy and would report a broken relay healthy.
     checks.push(check('extension', 'Chrome extension', OK, 'connected to the relay'));
   } else {
     checks.push(check('extension', 'Chrome extension', FAIL,
       'relay is up but the extension is not connected — open Chrome and check the BrowserForce extension'));
+  }
+
+  // 2b. The deployed skill matches the shipped guide.
+  // NOT readText: defaultReadText trims BOTH ends, so a deployed copy whose
+  // leading whitespace or frontmatter drifted would compare equal. Only
+  // trailing whitespace is tolerated.
+  const shippedSkillRaw = readSkillText(paths.shippedSkillFile);
+  const shippedSkill = typeof shippedSkillRaw === 'string' ? shippedSkillRaw : null;
+  const deployedProbes = (paths.deployedSkillFiles || [])
+    .map((p) => ({ path: p, text: readSkillText(p) }))
+    .filter((d) => d.text !== null);
+  const unreadableSkills = deployedProbes.filter((d) => d.text === UNREADABLE_SKILL);
+  const deployedSkills = deployedProbes.filter((d) => typeof d.text === 'string');
+  const driftedSkills = shippedSkill
+    ? deployedSkills.filter((d) => d.text.trimEnd() !== shippedSkill.trimEnd())
+    : [];
+  // Visible drift outranks an unreadable path: an unreadable copy must never
+  // short-circuit the failure this check exists to produce. It is appended to
+  // whatever verdict the readable copies earn.
+  const unreadableNote = unreadableSkills.length > 0
+    ? ` Cannot read ${unreadableSkills.map((d) => d.path).join(', ')} — drift there cannot be detected; fix the permissions.`
+    : '';
+  if (driftedSkills.length > 0 && shippedSkill) {
+    checks.push(check('skill', 'BrowserForce skill', FAIL,
+      `stale — ${driftedSkills.map((d) => d.path).join(', ')} differ from the shipped guide. `
+      + `Agents read the stale copy. Reinstall: \`${SKILL_INSTALL_HINT}\`${unreadableNote}`));
+  } else if (unreadableSkills.length > 0) {
+    checks.push(check('skill', 'BrowserForce skill', WARN, unreadableNote.trim()));
+  } else if (!shippedSkill) {
+    checks.push(check('skill', 'BrowserForce skill', WARN,
+      `cannot read the shipped guide at ${paths.shippedSkillFile}`));
+  } else if (deployedSkills.length === 0) {
+    checks.push(check('skill', 'BrowserForce skill', OK,
+      `not installed for any agent — install with \`${SKILL_INSTALL_HINT}\``));
+  } else {
+    checks.push(check('skill', 'BrowserForce skill', OK,
+      `${deployedSkills.length} deployed copy/copies match the shipped guide`));
+  }
+
+  // 2c. Tab count. doctor REPORTS it; it never adjudicates emptiness — it
+  // connects no CDP client, so it cannot tell "no tabs" from "discovery has not
+  // run" (activeTargets is 0 in both cases). NO_TABS belongs to the agent path,
+  // where discovery has actually happened. This check is never a FAIL.
+  if (relayUp && relayStatus?.connected === true) {
+    const { discovered, count } = deriveTabState(relayStatus);
+    checks.push(check('tabs', 'Browser tabs', OK, discovered
+      ? `${count} tab(s) attached`
+      : 'cannot determine without a connected agent (run any browserforce command)'));
   }
 
   // 3. Stale cdp-url sidecar: present on disk while the relay is unreachable.

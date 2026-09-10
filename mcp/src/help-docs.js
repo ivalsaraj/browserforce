@@ -21,6 +21,7 @@ browserforce "snapshot --tab docs"
 browserforce "click @e2 --tab app"
 
 - tabs lists stable t<N> handles, names, and the active marker. Handles never shift when other tabs close — target tabs by handle or name, never by list position.
+- "tabs" lists the first 20 tabs and reports how many it omitted. Narrow with --match <text>, widen with --limit <n>, or list everything with --all.
 - use <t handle|name|text> soft-matches names, handles, and title/url text; ambiguity fails with candidates instead of guessing.
 - Name conflicts fail by default. Use --replace only when you intentionally want to move a name to another tab.
 - Refs (@e1, @e2, ...) come from the latest snapshot of that tab and go stale when the page changes — re-run "snapshot" after navigation or UI changes.
@@ -32,7 +33,7 @@ browserforce "click @e2 --tab app"
     summary: 'Choose existing, manual, and new tabs without creating blanks by accident.',
     text: `# Tabs
 
-- Prefer the command surface for tab work: browserforce "tabs" (stable t<N> handles + names), "use <handle|name|text>", "open <url> --as <name>". The rules below cover exec-scope tab work.
+- Prefer the command surface for tab work: browserforce "tabs" (t<N> handles, stable for the session — a handle names the same tab across calls and across reconnects), "use <handle|name|text>", "open <url> --as <name>". The rules below cover exec-scope tab work.
 - For attached/manual/current-tab listing, call getBrowserforceStatus() first; use status.manualAttachedTabs and status.activeManualTargets.
 - Fast path: const status = await getBrowserforceStatus(); return status.manualAttachedTabs;
 - To inspect the attached tab, use: state.page = await getBrowserforcePageForTab();
@@ -134,6 +135,18 @@ browserforce "click @e2 --tab app"
 - Use one tab/page per task with a small concurrency cap, then aggregate results.
 - Return useful telemetry for swarm runs: peakConcurrentTasks, wallClockMs, sumTaskDurationsMs, failures, and retries.`,
   },
+  subagents: {
+    title: 'Handing Browser Work to a Subagent',
+    summary: 'Delegate browser work: shared tabs by default, one active tab per agent.',
+    text: `# Handing Browser Work to a Subagent
+
+- Subagents share your browser session automatically — one daemon per machine, so they see your tabs, your logins and your snapshot refs with no setup.
+- Give each parallel subagent \`BROWSERFORCE_CLIENT_ID=<name>\`. It then has its OWN active tab: \`use\` and \`open\` move its tab, never yours. Without an id, every client shares one active tab and they overwrite each other mid-run.
+- Fallback for a client that cannot set the id: pass \`--tab <handle>\` on every command that accepts it (snapshot, click, fill, type, press, hover, wait, get, eval) and do not run \`use\`/\`open\`. \`tabs\` needs no \`--tab\` and does not accept one.
+- A subagent that should keep its own session state: export \`BF_SESSIOND_LOCK_PATH=/tmp/bf-<name>.json\` and \`BROWSERFORCE_CDP_CLIENT_LABEL=<name>\`. It gets its own session state and its own Chrome window for tabs it creates.
+- That is NOT a sandbox: every BrowserForce client can see and drive every tab in the browser. If a tab must not be touched, do not delegate work that reaches it.
+- Handles are stable for the session (see help(tabs)), so a handle you pass to a subagent still names the same tab when it runs.`,
+  },
   'cli-session': {
     title: 'CLI Session Daemon',
     summary: 'Persistent CLI browser session + session commands vs one-shot -e.',
@@ -145,7 +158,7 @@ browserforce "click @e2 --tab app"
 - Every command routes through the same guarded runCode() boundary as MCP exec. \`eval --stdin\` runs piped Playwright JS in the session with persistent \`state\` (and \`page\`, \`context\`, \`snapshot()\`, \`locatorForRef()\`).
 - In a command STRING (\`run "eval ..."\`, MCP browserforce tool), eval code is taken VERBATIM after the verb — quotes and newlines survive. Put \`--tab\` BEFORE the code: \`eval --tab app return page.url()\`.
 - One-shot \`-e\` stays independent — no persisted state — for self-contained scripts.
-- Add \`--json\` for a { success, data, error, warning } envelope; commands exit non-zero on failure (\`tabs --json\` prints the rows array directly).
+- Add \`--json\` for a { success, data, error, warning } envelope; commands exit non-zero on failure (\`tabs --json\` prints { tabs, total, omitted }).
 - Lifecycle: \`browserforce session start | status | stop\`. The daemon auto-starts on the first command and idles out after 5 minutes.`,
   },
   backends: {
@@ -215,6 +228,7 @@ export const HELP_SECTION_NAMES = Object.freeze([
   'errors',
   'parallel',
   'cli-session',
+  'subagents',
   'backends',
   'examples',
 ]);

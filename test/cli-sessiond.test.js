@@ -661,8 +661,11 @@ describe('CLI session daemon', () => {
       const viaRun = (await exec('node', ['bin.js', 'run', 'tabs', '--json'], { cwd: ROOT, env })).stdout;
       assert.equal(viaRun, direct, 'run and direct verbs share output formatting');
 
-      const rows = JSON.parse(direct);
-      assert.ok(Array.isArray(rows), 'tabs --json keeps the pre-registry top-level array shape');
+      const parsed = JSON.parse(direct);
+      assert.ok(Array.isArray(parsed.tabs), 'rows move under .tabs so a capped listing can report what it withheld');
+      assert.equal(typeof parsed.total, 'number');
+      assert.equal(typeof parsed.omitted, 'number');
+      const rows = parsed.tabs;
       const row = rows[0];
       // Superset contract: old fields kept, registry fields added.
       assert.equal(row.index, 0);
@@ -824,7 +827,7 @@ describe('CLI session daemon', () => {
     });
 
     it('tabs lists every opened tab with unique stable handles and its name', async () => {
-      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       assert.equal(rows.length, TAB_COUNT + 1, 'the original fixture tab plus every opened tab');
 
       const handles = rows.map((row) => row.handle);
@@ -853,7 +856,7 @@ describe('CLI session daemon', () => {
       });
 
       // Parallel --tab reads never moved the active tab.
-      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       assert.equal(rows.find((row) => row.active)?.name, `job-${TAB_COUNT - 1}`);
     });
 
@@ -872,14 +875,42 @@ describe('CLI session daemon', () => {
       assert.equal(replaced.data.tab.name, 'job-3');
       assert.equal(replaced.data.tab.url, 'https://newer.test/');
 
-      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const rows = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       const named = rows.filter((row) => row.name === 'job-3');
       assert.equal(named.length, 1, 'exactly one tab holds the name after --replace');
       assert.equal(named[0].url, 'https://newer.test/');
     });
 
+    it('two identified clients keep separate active tabs against one daemon', async () => {
+      // The whole chain: env -> header -> sessiond -> registry -> runtime ->
+      // buildExecContext. A break anywhere puts both clients on one tab.
+      const a = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-a' };
+      const b = { ...env, BROWSERFORCE_CLIENT_ID: 'agent-b' };
+      await exec('node', ['bin.js', 'use', 'job-1'], { cwd: ROOT, env: a });
+      await exec('node', ['bin.js', 'use', 'job-2'], { cwd: ROOT, env: b });
+
+      for (const [who, want] of [[a, 'https://job-1.test/'], [b, 'https://job-2.test/']]) {
+        for (const argv of [['get', 'url'], ['eval', 'return page.url()'], ['eval', 'return state.page.url()']]) {
+          const { stdout } = await exec('node', ['bin.js', ...argv, '--json'], { cwd: ROOT, env: who });
+          const resp = JSON.parse(stdout);
+          assert.equal(resp.success, true, `${argv.join(' ')} failed: ${stdout}`);
+          const got = resp.data?.url ?? resp.data?.result ?? resp.data;
+          assert.equal(String(got), want,
+            `${argv.join(' ')} must resolve the caller's own tab, not the shared one`);
+        }
+      }
+    });
+
+    it('an unidentified client still sees the shared active tab', async () => {
+      // No BROWSERFORCE_CLIENT_ID: byte-identical to the sequential behaviour
+      // every existing caller relies on.
+      await exec('node', ['bin.js', 'use', 'job-4'], { cwd: ROOT, env });
+      const { stdout } = await exec('node', ['bin.js', 'get', 'url', '--json'], { cwd: ROOT, env });
+      assert.equal(JSON.parse(stdout).data.url, 'https://job-4.test/');
+    });
+
     it('invalid tab names are rejected over the wire with the teaching suggestion', async () => {
-      const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const before = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
 
       for (const bad of ['my tab', 't2']) {
         const fail = await execFail(['open', 'https://invalid-name.test/', '--as', bad, '--json']);
@@ -890,7 +921,7 @@ describe('CLI session daemon', () => {
         assert.match(resp.error, /api-docs|docs/, 'the wire error keeps the teaching suggestion');
       }
 
-      const after = JSON.parse((await exec('node', ['bin.js', 'tabs', '--json'], { cwd: ROOT, env })).stdout);
+      const after = JSON.parse((await exec('node', ['bin.js', 'tabs', '--all', '--json'], { cwd: ROOT, env })).stdout).tabs;
       assert.equal(after.length, before.length, 'rejected names never created a tab');
     });
   });
@@ -1172,5 +1203,26 @@ describe('sessiond crash guard contract', () => {
       /installProcessCrashGuard\(\{\s*logPrefix: '\[bf-sessiond\]'/.test(directRunBlock),
       'guard installs in the direct-run (real daemon) block — programmatic startSessiond() in tests must keep default crash semantics'
     );
+  });
+});
+
+describe('sessiond CDP client label', () => {
+  // client-label.js reads the env once at module load, so the override must be
+  // exercised in a subprocess.
+  const readUrl = async (labelEnv) => {
+    const { stdout } = await exec('node', ['-e',
+      "import('./cli/sessiond.js').then(m => m.buildRealCdpUrl()).then(u => console.log(u))"],
+      { cwd: ROOT, env: { ...process.env, BROWSERFORCE_CDP_CLIENT_LABEL: labelEnv } });
+    return stdout;
+  };
+
+  it('labels its CDP connection so window affinity survives a reconnect', async () => {
+    assert.match(await readUrl('shared-team-window'), /[?&]label=shared-team-window\b/);
+  });
+
+  it('falls back to the per-process label when none is set', async () => {
+    // Documents WHY the label matters: without one the relay keys affinity on
+    // the connection id and the window pin dies on disconnect.
+    assert.match(await readUrl(''), /[?&]label=browserforce-mcp-[0-9a-f]{8}/);
   });
 });

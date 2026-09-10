@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-import { runDoctor, OK, WARN, FAIL } from '../mcp/src/doctor.js';
+import { runDoctor, OK, WARN, FAIL, UNREADABLE_SKILL } from '../mcp/src/doctor.js';
 
 const exec = promisify(execFile);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -19,6 +19,8 @@ const PATHS = {
   cdpUrlFile: '/tmp/bf-doctor/cdp-url',
   sessiondLockFile: '/tmp/bf-doctor/sessiond-lock.json',
   sessiondUrlFile: '/tmp/bf-doctor/sessiond-lock-url.json',
+  shippedSkillFile: '/repo/shipped/SKILL.md',
+  deployedSkillFiles: [],
 };
 
 // A fully-healthy baseline; individual tests override one probe to fault-inject.
@@ -31,6 +33,7 @@ function healthyDeps(overrides = {}) {
     readRawLock: () => null, // no session daemon
     lockAlive: async () => false,
     probeSessiondStatus: async () => ({ backend: 'real' }),
+    readSkillText: (p) => (p.includes('shipped') ? 'shipped copy' : null),
     removeFile: () => {},
     ...overrides,
   };
@@ -166,5 +169,165 @@ describe('doctor: real CLI path (browserforce doctor)', () => {
   it('doctor is listed in help', async () => {
     const { stdout } = await exec('node', ['bin.js', 'help'], { cwd: ROOT });
     assert.match(stdout, /browserforce doctor/);
+  });
+});
+
+describe('doctor: deployed skill drift', () => {
+  const skillDeps = (readSkillText) => healthyDeps({
+    readSkillText,
+    paths: { ...PATHS, deployedSkillFiles: ['/home/deployed/SKILL.md'] },
+  });
+
+  it('fails when a deployed skill has drifted from the shipped one', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? 'stale copy' : 'shipped copy')));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, FAIL);
+    assert.match(skill.detail, /\/home\/deployed\/SKILL\.md/);
+    assert.match(skill.detail, /npx -y skills add ivalsaraj\/browserforce/);
+    assert.equal(report.ok, false);
+  });
+
+  it('treats leading whitespace drift as a mismatch, not a pass', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? '\n same' : 'same')));
+    assert.equal(find(report, 'skill').status, FAIL);
+  });
+
+  it('passes when the deployed skill matches, ignoring trailing whitespace', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? 'same\n\n' : 'same')));
+    assert.equal(find(report, 'skill').status, OK);
+  });
+
+  it('reports no deployed skill without failing', async () => {
+    const report = await runDoctor(skillDeps((p) => (p.includes('deployed') ? null : 'shipped copy')));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, OK);
+    assert.match(skill.detail, /not installed/i);
+  });
+
+  it('warns rather than fails when the shipped guide cannot be read', async () => {
+    const report = await runDoctor(skillDeps(() => null));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, WARN);
+    assert.equal(report.ok, true);
+  });
+
+  it('looks for deployed copies in project-local skill roots too', async () => {
+    // `npx skills add` installs per-project as well as per-home; a drifted
+    // project copy is the one an agent working in that repo actually reads.
+    const seen = [];
+    await runDoctor(healthyDeps({ readSkillText: (p) => { seen.push(p); return null; }, paths: undefined }));
+    assert.ok(seen.some((p) => p.includes('.claude/skills/browserforce')), seen.join('\n'));
+    assert.ok(seen.some((p) => p.startsWith(process.cwd())), 'project-local roots must be probed');
+  });
+});
+
+describe('doctor: tab count', () => {
+  it('still reports when the relay is down, and never fires the tab check', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => { throw new Error('ECONNREFUSED'); },
+    }));
+    assert.equal(report.ok, false);
+    assert.equal(find(report, 'relay').status, FAIL);
+    assert.notEqual(find(report, 'tabs')?.status, FAIL,
+      'the tab check must not fire, and must not throw, when there is no relay');
+  });
+
+  it('never reaches the tab check on a malformed connected value', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: 'false', activeTargets: 3, attachedTabs: [] }),
+    }));
+    assert.equal(find(report, 'extension').status, FAIL);
+    assert.notEqual(find(report, 'tabs')?.status, FAIL);
+  });
+
+  it('does not claim zero tabs before discovery has run', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 0, attachedTabs: [] }),
+    }));
+    const tabs = find(report, 'tabs');
+    assert.notEqual(tabs?.status, FAIL);
+    assert.match(tabs.detail, /cannot determine|not yet/i);
+  });
+
+  it('never fails the tab check, in any state', async () => {
+    // It cannot connect a CDP client, so it has no evidence of emptiness.
+    for (const status of [
+      { connected: true, activeTargets: 0, attachedTabs: [] },
+      { connected: true, activeTargets: 2, attachedTabs: [{ tabId: 1 }, { tabId: 2 }] },
+    ]) {
+      const report = await runDoctor(healthyDeps({ probeExtensionStatus: async () => status }));
+      assert.notEqual(find(report, 'tabs')?.status, FAIL);
+    }
+  });
+
+  it('reports the count when discovery has run', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 2, attachedTabs: [{ tabId: 1 }, { tabId: 2 }] }),
+    }));
+    assert.match(find(report, 'tabs').detail, /2 tab/);
+  });
+
+  it('reads a self-contradictory status as unknown, not as zero tabs', async () => {
+    // The relay computes activeTargets from the same list, so 3-and-empty
+    // cannot occur; treating it as "discovered, zero tabs" would invent a
+    // NO_TABS that doctor has no evidence for.
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 3, attachedTabs: [] }),
+    }));
+    assert.match(find(report, 'tabs').detail, /cannot determine/i);
+  });
+
+  it('reads a malformed tab entry as unknown', async () => {
+    const report = await runDoctor(healthyDeps({
+      probeExtensionStatus: async () => ({ connected: true, activeTargets: 1, attachedTabs: [{ tabId: 'abc' }] }),
+    }));
+    assert.match(find(report, 'tabs').detail, /cannot determine/i);
+  });
+});
+
+describe('doctor: unreadable deployed skill', () => {
+  it('maps a real non-ENOENT read failure to the unreadable sentinel, not to absent', async () => {
+    // A directory read fails with EISDIR: exercises the default reader's own
+    // discrimination, which the injected readers below bypass.
+    const seen = [];
+    await runDoctor(healthyDeps({
+      readSkillText: undefined,
+      paths: { ...PATHS, shippedSkillFile: '/repo/shipped/SKILL.md', deployedSkillFiles: [ROOT] },
+      probeExtensionStatus: async () => ({ connected: true }),
+    })).then((r) => seen.push(find(r, 'skill')));
+    assert.equal(seen[0].status, WARN, 'an unreadable path must not read as "not installed"');
+    assert.match(seen[0].detail, /cannot read/i);
+  });
+
+  it('warns rather than reporting a permission-denied copy as not installed', async () => {
+    // Reading it as "absent" hides exactly the drift this check exists to catch.
+    const report = await runDoctor(healthyDeps({
+      readSkillText: (p) => (p.includes('shipped') ? 'shipped copy' : UNREADABLE_SKILL),
+      paths: { ...PATHS, deployedSkillFiles: ['/home/deployed/SKILL.md'] },
+    }));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, WARN);
+    assert.match(skill.detail, /\/home\/deployed\/SKILL\.md/);
+    assert.doesNotMatch(skill.detail, /not installed/i);
+  });
+});
+
+describe('doctor: drift outranks unreadability', () => {
+  it('fails on a readable stale copy even when another copy is unreadable', async () => {
+    // An unreadable path must not short-circuit the check the whole thing
+    // exists for: drift that IS visible still fails doctor.
+    const report = await runDoctor(healthyDeps({
+      readSkillText: (p) => {
+        if (p.includes('shipped')) return 'shipped copy';
+        if (p.includes('locked')) return UNREADABLE_SKILL;
+        return 'stale copy';
+      },
+      paths: { ...PATHS, deployedSkillFiles: ['/home/locked/SKILL.md', '/home/stale/SKILL.md'] },
+    }));
+    const skill = find(report, 'skill');
+    assert.equal(skill.status, FAIL);
+    assert.match(skill.detail, /\/home\/stale\/SKILL\.md/);
+    assert.match(skill.detail, /locked/, 'the unreadable path is still reported');
+    assert.equal(report.ok, false);
   });
 });

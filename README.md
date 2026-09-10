@@ -433,8 +433,10 @@ when you intentionally want to move a name to another tab.
 Refs accept `@e1`, `e1`, or `ref=e1` and go stale the moment the page changes —
 re-snapshot before the next ref interaction. Every command routes through the
 same guarded `runCode()` boundary as the MCP `exec` tool; add `--json` for a
-`{ success, data, error, warning }` envelope (`tabs --json` prints the rows
-array directly, a superset of the old `index`/`title`/`url` shape).
+`{ success, data, error, warning }` envelope (`tabs --json` prints
+`{ tabs, total, omitted }`; each row is a superset of the old
+`index`/`title`/`url` shape). `tabs` lists the first 20 tabs — narrow with
+`--match <text>`, widen with `--limit <n>`, or list everything with `--all`.
 
 One-shot `-e` stays independent (state does not persist between `-e` calls) for
 self-contained scripts. For a persistent session, use the session commands
@@ -455,6 +457,9 @@ The session daemon negotiates a browser backend at startup:
 `browserforce doctor` reports the active backend and flags a stale relay, a
 disconnected extension, a stale `cdp-url` sidecar, or loose secret-file
 permissions; `doctor --fix` removes only stale sidecars (never the auth token).
+Its `skill` check fails when a deployed `SKILL.md` differs from the shipped
+guide — agents read the deployed copy, so a fork there silently swallows every
+text fix. Reinstall with `npx -y skills add ivalsaraj/browserforce`.
 
 ### BrowserForce Agent Side Panel
 
@@ -1076,7 +1081,7 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 
 **Local HTTP API security:**
 - **Host header validation:** all HTTP routes reject non-local `Host` headers (`localhost`, `127.0.0.1`, `[::1]`, `::1` only) before URL parsing, blocking DNS-rebinding attacks. A missing `Host` header is allowed for local non-browser clients (curl, Node).
-- **CORS:** `/extension/status` and `/attached-tabs` intentionally omit `Access-Control-Allow-Origin` because they expose local browsing metadata (tab URLs/titles); arbitrary websites must not read them. Other routes retain wildcard CORS for CDP discovery.
+- **CORS:** wildcard `Access-Control-Allow-Origin` is an **allowlist** — only `/` (counts-only health) sends it. Every other route is denied cross-origin by default: `/json`, `/json/list` and `/json/version` embed the CDP auth token in `webSocketDebuggerUrl`, `/restrictions` and `/agent-preferences` return the user's settings including free-text instructions, and `/extension/status` and `/attached-tabs` expose tab URLs and titles. Extension pages are unaffected — they carry host permissions and bypass CORS.
 - **`/extension/status` vs `/json/list`:** `/json/list` returns CDP-discovery-shaped targets for Playwright; `/extension/status` returns relay-owned provenance — `manualAttachedTabs` are user-attached tabs (`origin: 'manual'`), while `attachedTabs` can also include `agent-created` and `relay-attached` tabs. Use `activeManualTargets`/`manualAttachedTabs` to confirm an attached page is ready for inspect/current-tab flows.
 
 Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window).

@@ -13,10 +13,27 @@ function makeFakePage() {
   };
 }
 
-function makeFakeBrowser({ pages = [makeFakePage()] } = {}) {
+function makeFakeBrowser({ pages = [makeFakePage()] , cdpSessions = null, cdpFail = () => false, cdpTargetId = (i) => `cdp-${i}` } = {}) {
   let connected = true;
   let disconnectedCb = null;
-  const context = { on() {}, pages: () => pages };
+  const context = {
+    on() {},
+    pages: () => pages,
+    // Per-page CDP session seam: exact identification of duplicate-URL tabs
+    // opens one of these per unmatched page and detaches it immediately.
+    async newCDPSession(page) {
+      const index = pages.indexOf(page);
+      cdpSessions?.push(page);
+      return {
+        async send(method) {
+          if (cdpFail()) throw new Error('CDP probe failed');
+          if (method !== 'Target.getTargetInfo') return {};
+          return { targetInfo: { targetId: cdpTargetId(index) } };
+        },
+        async detach() {},
+      };
+    },
+  };
   return {
     pages,
     get connected() { return connected; },
@@ -522,8 +539,8 @@ test('listTabRows returns structured rows with handles, active marker, and names
 
   const rows = await runtime.listTabRows();
   assert.deepEqual(rows, [
-    { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', active: false, name: 'docs' },
-    { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', active: true, name: null },
+    { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', targetId: null, active: false, name: 'docs' },
+    { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', targetId: null, active: true, name: null },
   ]);
 });
 
@@ -734,4 +751,707 @@ test('runCommand targets a usable state.page, drops closed/throwing handles, and
   const r3 = await runtime.runCommand({ code: 'noop' });
   assert.equal(r3, firstCtxPage, 'throwing isClosed() is treated as unusable, not propagated');
   assert.equal(runtime.userState.page, firstCtxPage);
+});
+
+// ─── Relay-sourced identity (targets, titles, freshness) ─────────────────────
+
+function makeRelayFetch(getTargets, { fail = () => false } = {}) {
+  return async (url) => {
+    if (fail()) throw new Error('relay unreachable');
+    const u = String(url);
+    if (u.endsWith('/json/list')) return { ok: true, json: async () => getTargets() };
+    return { ok: true, json: async () => ({}) };
+  };
+}
+
+/** A page whose title() never settles — the real relay behaviour on a lazily-attached tab. */
+function makeUntitleablePage(url) {
+  return { ...makeTabPage({ url }), title: async () => new Promise(() => {}) };
+}
+
+function makeRelayRuntime({ pages, targets, fail = () => false, relayUrl = 'http://127.0.0.1:19222', onFetch, cdpSessions = null, cdpFail = () => false, cdpTargetId }) {
+  const fetchImpl = makeRelayFetch(() => targets(), { fail });
+  return createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages, cdpSessions, cdpFail, ...(cdpTargetId ? { cdpTargetId } : {}) }),
+    getRelayHttpUrl: () => relayUrl,
+    fetch: async (url, ...rest) => { onFetch?.(String(url)); return fetchImpl(url, ...rest); },
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+}
+
+test('tab titles come from the relay target list, not page.title()', async () => {
+  const pages = [makeUntitleablePage('https://a.test/')];
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'Real Title' }],
+  });
+  const [row] = await runtime.listTabRows();
+  assert.equal(row.title, 'Real Title');
+});
+
+test('falls back to the bounded page title when no relay target matches', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'From Page' })];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getRelayHttpUrl: () => '',
+    fetch: async () => { throw new Error('no relay'); },
+  });
+  const [row] = await runtime.listTabRows();
+  assert.equal(row.title, 'From Page');
+});
+
+test('rows carry targetId so names and handles can key on it', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }] });
+  assert.equal((await runtime.listTabRows())[0].targetId, 'T1');
+});
+
+test('a managed backend never reads the real browser target list', async () => {
+  // NOT "zero fetches": waitForInitialPageDiscovery probes /extension/status on
+  // any backend whose getRelayHttpUrl is truthy, and sessiond wires that
+  // unconditionally. Assert on the URLs, not a count.
+  const urls = [];
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'Managed' })];
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'Real Chrome' }],
+    relayUrl: 'http://relay.test',
+    onFetch: (u) => urls.push(u),
+  });
+  runtime.setBackendInfo({ backend: 'managed', requestedBackend: 'auto' });
+  const [row] = await runtime.listTabRows();
+  assert.equal(urls.filter((u) => u.endsWith('/json/list')).length, 0,
+    'managed backend must not read the real browser target list');
+  assert.equal(row.targetId, null, 'no relay identity on a managed backend');
+  assert.equal(row.title, 'Managed', 'titles fall back to the bounded page read');
+});
+
+test('the discovery probe is also backend-gated', async () => {
+  const urls = [];
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'M' })];
+  const runtime = makeRelayRuntime({
+    pages, targets: () => [], relayUrl: 'http://relay.test', onFetch: (u) => urls.push(u),
+  });
+  runtime.setBackendInfo({ backend: 'managed', requestedBackend: 'auto' });
+  await runtime.listTabRows();
+  assert.deepEqual(urls, [], 'a managed session has no relay to ask about anything');
+});
+
+test('a stale snapshot never identifies a page it has not seen before', async () => {
+  // The hazard: a tab closes, a new tab opens at the same URL, the relay fetch
+  // fails, and the cached target list hands the newcomer the dead tab's id.
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+    relayUrl: 'http://relay.test',
+  });
+  await runtime.listTabRows();
+  pages[0] = makeTabPage({ url: 'https://a.test/' }); // replacement tab, same URL
+  fail = true;
+  const [row] = await runtime.listTabRows();
+  assert.notEqual(row.targetId, 'T1', 'a page never seen before must not inherit a cached id');
+  assert.notEqual(row.title, 'A', 'nor the dead tab title');
+});
+
+test('a transient relay failure keeps identity instead of renumbering', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+  });
+  const before = await runtime.listTabRows();
+  fail = true;
+  const during = await runtime.listTabRows();
+  assert.deepEqual(during.map((r) => r.handle), before.map((r) => r.handle));
+  assert.equal(during[0].targetId, 'T1', 'a known page keeps its target id when the fetch fails');
+});
+
+test('duplicate-URL tabs are resolved exactly through a bounded CDP probe', async () => {
+  // The URL matcher fails closed on duplicates; the small unmatched set is then
+  // identified precisely rather than left on renumbering handles.
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }],
+  });
+  const rows = await runtime.listTabRows();
+  assert.deepEqual(rows.map((r) => r.targetId), ['cdp-0', 'cdp-1']);
+});
+
+test('exact resolution is skipped when the ambiguous set is large', async () => {
+  // Cost guard: a broken match degrades to renumbering rather than opening
+  // dozens of alias sessions on the relay.
+  const pages = Array.from({ length: 20 }, () => makeTabPage({ url: 'about:blank' }));
+  const cdpSessions = [];
+  const runtime = makeRelayRuntime({
+    pages,
+    cdpSessions,
+    targets: () => pages.map((_, i) => ({ id: `D${i}`, url: 'about:blank', title: '' })),
+  });
+  const rows = await runtime.listTabRows();
+  assert.equal(rows.filter((r) => r.targetId).length, 0);
+  assert.equal(cdpSessions.length, 0, 'no alias sessions opened');
+});
+
+test('exact resolution never runs on a managed backend', async () => {
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const cdpSessions = [];
+  const runtime = makeRelayRuntime({ pages, cdpSessions, targets: () => [] });
+  runtime.setBackendInfo({ backend: 'managed', requestedBackend: 'auto' });
+  const rows = await runtime.listTabRows();
+  assert.equal(rows.filter((r) => r.targetId).length, 0);
+  assert.equal(cdpSessions.length, 0);
+});
+
+// ─── Handles keyed by relay target id ────────────────────────────────────────
+
+test('a handle names the same tab after an idle reconnect replaces every Page object', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://b.test/', title: 'B' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+
+  const before = await runtime.listTabRows();
+  browser.fireDisconnected();
+  // Reconnect: brand-new Page objects for the same tabs. The old ones stay
+  // open() — orphaned, not closed — exactly as Playwright leaves them.
+  pages.splice(0, pages.length, ...targets.map((t) => makeTabPage({ url: t.url })));
+  const after = await runtime.listTabRows();
+
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle));
+  assert.equal(after[0].handle, 't1');
+});
+
+test('a fallback handle is promoted, not replaced, when the relay recovers', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = true;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+    relayUrl: 'http://relay.test',
+  });
+  const first = (await runtime.listTabRows())[0].handle; // fallback handle
+  fail = false;
+  const second = (await runtime.listTabRows())[0];
+  assert.equal(second.handle, first, 'the handle already handed out must not change');
+  assert.equal(second.targetId, 'T1');
+});
+
+test('handles still work per-connection when no relay target is available', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'A' })];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getRelayHttpUrl: () => '',
+    fetch: async () => { throw new Error('no relay'); },
+  });
+  assert.equal((await runtime.listTabRows())[0].handle, 't1');
+  assert.equal((await runtime.listTabRows())[0].handle, 't1');
+});
+
+test('a reopened tab reusing a Chrome tab id does not inherit the old handle', async () => {
+  // The relay synthesizes bf-target-<tabId> and Chrome reuses tab ids, so
+  // without eviction the new tab silently answers to the closed tab's handle.
+  // A second tab stays open throughout so the browser is never empty.
+  const keep = { id: 'T9', url: 'https://keep.test/', title: 'Keep' };
+  let targets = [{ id: 'bf-target-7', url: 'https://a.test/', title: 'A' }, keep];
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://keep.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets, relayUrl: 'http://relay.test' });
+  const before = (await runtime.listTabRows())[0].handle;
+  targets = [keep]; pages.shift(); // tab closed, relay says so
+  await runtime.listTabRows();
+  targets = [{ id: 'bf-target-7', url: 'https://b.test/', title: 'B' }, keep]; // id reused
+  pages.unshift(makeTabPage({ url: 'https://b.test/' }));
+  assert.notEqual((await runtime.listTabRows())[0].handle, before,
+    'a different tab must not answer to the closed tab handle');
+});
+
+test('reset drops the cached relay snapshot, so a later failure cannot reuse it', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/', title: 'live' })];
+  let fail = false;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+    relayUrl: 'http://relay.test',
+  });
+  await runtime.listTabRows();
+  await runtime.reset();
+  fail = true;
+  const [row] = await runtime.listTabRows();
+  // Identity may only come from a live source. 'T1' would mean the pre-reset
+  // relay snapshot survived; the exact CDP probe is ground truth and may.
+  assert.notEqual(row.targetId, 'T1', 'a reset session must not resurrect the pre-reset target list');
+  assert.equal(row.handle, 't1', 'numbering restarts');
+});
+
+// ─── Names keyed by relay target id ──────────────────────────────────────────
+
+function makeReconnectableRelayRuntime({ targets, pages }) {
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets()),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  return {
+    runtime,
+    fireDisconnect() {
+      browser.fireDisconnected();
+      const replacements = pages.map((old) => makeTabPage({ url: old.url(), title: old.meta.title }));
+      pages.splice(0, pages.length, ...replacements);
+    },
+  };
+}
+
+test('a tab name still resolves after an idle reconnect', async () => {
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  fireDisconnect();
+
+  const rows = await runtime.listTabRows();
+  assert.equal(rows[0].name, 'docs');
+  assert.equal(runtime.getNamedPage('docs'), pages[0], 'the name must re-bind to the live page');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs']);
+});
+
+test('a name is dropped only when an authoritative listing no longer has its target', async () => {
+  // A second, unrelated tab stays open: an empty browser is a different case
+  // (NO_TABS), and this test is about the named tab specifically closing.
+  let targets = [
+    { id: 'T1', url: 'https://a.test/', title: 'A' },
+    { id: 'T9', url: 'https://keep.test/', title: 'Keep' },
+  ];
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://keep.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+
+  targets = [targets[1]]; pages.shift(); // the named tab really closed
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), []);
+});
+
+test('a name survives when its tab is present but unmatched', async () => {
+  // Two tabs share a URL, so the matcher fails closed — but both are in
+  // /json/list, so neither name is gone.
+  let targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets, relayUrl: '' });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId ?? 'T1' });
+
+  targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://a.test/', title: 'A2' }];
+  pages.push(makeTabPage({ url: 'https://a.test/' }));
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'unmatched is not the same as gone');
+});
+
+test('a failed relay fetch never deletes a name', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }],
+    fail: () => fail,
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  fail = true;
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'an unreachable relay is not evidence that a tab closed');
+});
+
+test('setNamedPage still honours { replace } and rejects a conflict without it', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages }),
+    getRelayHttpUrl: () => '',
+    fetch: async () => { throw new Error('no relay'); },
+  });
+  runtime.setNamedPage('docs', pages[0]);
+  assert.throws(() => runtime.setNamedPage('docs', pages[1]), /docs/);
+  assert.deepEqual(runtime.setNamedPage('docs', pages[1], { replace: true }), { name: 'docs', replaced: true });
+});
+
+test('a name whose target is unresolved fails closed instead of soft-matching another tab', async () => {
+  // getNamedPage must never fall through to a different page: acting on the
+  // wrong tab is worse than reporting the name as momentarily unresolvable.
+  // Reconnect orphans the stored Page (isClosed() is still false), and the
+  // relay is unreachable so identity cannot rebind.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: makeRelayFetch(() => targets, { fail: () => fail }),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+  const orphan = pages[0];
+
+  browser.fireDisconnected();
+  fail = true;
+  pages.splice(0, pages.length, makeTabPage({ url: 'https://elsewhere.test/' }));
+
+  assert.equal(orphan.isClosed(), false, 'fixture must model the real hazard');
+  assert.equal(runtime.getNamedPage('docs'), null, 'must not return the orphaned page');
+  await runtime.listTabRows();
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['docs'],
+    'an unreachable relay is not evidence the tab closed — keep the name');
+});
+
+// ─── Per-client active tab ───────────────────────────────────────────────────
+
+test('two identified clients keep separate active tabs in one shared session', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0], { clientId: 'agent-1' });
+  runtime.setActivePage(pages[1], { clientId: 'agent-2' });
+  assert.equal(runtime.getActivePage({ clientId: 'agent-1' }), pages[0],
+    'agent-1 must not see agent-2 switch tabs underneath it');
+  assert.equal(runtime.getActivePage({ clientId: 'agent-2' }), pages[1]);
+});
+
+test('unidentified clients still share one active tab', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0]);
+  runtime.setActivePage(pages[1]);
+  assert.equal(runtime.getActivePage(), pages[1], 'sequential CLI behaviour is unchanged');
+});
+
+test('a client falls back to the shared tab before it picks one', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0]);
+  assert.equal(runtime.getActivePage({ clientId: 'fresh-agent' }), pages[0],
+    'a subagent inherits the parent tab until it chooses its own — that is the point of sharing');
+});
+
+test('a client slot rebinds across a reconnect instead of falling back', async () => {
+  // The regression that matters: a Page-keyed slot dies on reconnect and the
+  // client silently lands on the SHARED page — another agent's tab.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }, { id: 'T2', url: 'https://b.test/', title: 'B' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[1], { clientId: 'agent-2', targetId: rows[1].targetId });
+  runtime.setActivePage(pages[0]); // shared slot = tab A
+  fireDisconnect();
+  await runtime.listTabRows();
+  const own = runtime.getActivePage({ clientId: 'agent-2' });
+  assert.equal(own?.url(), 'https://b.test/', 'agent-2 must still be on its own tab');
+  assert.notEqual(own, runtime.getActivePage(), 'and must not have fallen back to the shared tab');
+});
+
+test('an orphaned Page from the previous connection is never returned', async () => {
+  // Playwright Pages from a dead connection are NOT closed, so isClosed() is
+  // false and a usability-first check hands back a dead handle.
+  const targets = [{ id: 'T1', url: 'https://one.test/', title: '1' }, { id: 'T2', url: 'https://two.test/', title: '2' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const rows = await runtime.listTabRows();
+  const stale = pages[1];
+  runtime.setActivePage(stale, { clientId: 'agent-2', targetId: rows[1].targetId });
+  fireDisconnect();
+  assert.equal(stale.isClosed(), false, 'fixture must model the real hazard');
+  await runtime.listTabRows();
+  const got = runtime.getActivePage({ clientId: 'agent-2' });
+  assert.notEqual(got, stale, 'must not return the orphaned Page');
+  assert.equal(got.url(), 'https://two.test/', 'must rebind to the live page for that target');
+});
+
+test('a blocked slot stays blocked instead of silently sharing', async () => {
+  // Two consecutive failures. If the slot is deleted on the first, the second
+  // finds none and falls back to the shared tab — the stomp, one call later.
+  let targets = [{ id: 'T1', url: 'https://one.test/', title: '1' }, { id: 'T2', url: 'https://two.test/', title: '2' }];
+  const pages = targets.map((t) => makeTabPage({ url: t.url }));
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[1], { clientId: 'b', targetId: rows[1].targetId });
+  runtime.setActivePage(pages[0]); // shared slot = tab one
+  fireDisconnect();
+  targets = [targets[0]];
+  pages.length = 1; // b's tab is gone entirely
+  await runtime.listTabRows();
+  assert.equal(runtime.getActivePage({ clientId: 'b' }), null);
+  assert.equal(runtime.getActivePage({ clientId: 'b' }), null,
+    'the second call must not fall back to the shared tab');
+});
+
+test('a closed page clears only its own client slot', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' }), makeTabPage({ url: 'https://b.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0], { clientId: 'agent-1' });
+  runtime.setActivePage(pages[1], { clientId: 'agent-2' });
+  pages[0].closeNow();
+  assert.equal(runtime.getActivePage({ clientId: 'agent-1' }), null);
+  assert.equal(runtime.getActivePage({ clientId: 'agent-2' }), pages[1]);
+});
+
+test('state.page is client-scoped for reads and writes', async () => {
+  const pages = [makeTabPage({ url: 'https://one.test/' }), makeTabPage({ url: 'https://two.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  const rows = await runtime.listTabRows();
+  runtime.setActivePage(pages[0], { clientId: 'a', targetId: rows[0].targetId });
+  runtime.setActivePage(pages[1], { clientId: 'b', targetId: rows[1].targetId });
+  const stateA = runtime.stateViewFor('a');
+  const stateB = runtime.stateViewFor('b');
+  assert.equal(stateA.page.url(), 'https://one.test/');
+  assert.equal(stateB.page.url(), 'https://two.test/');
+
+  // B assigns a page A does NOT hold. Assigning A's own page would pass even
+  // against a shared implementation, leaving the stomp untested.
+  const third = makeTabPage({ url: 'https://three.test/' });
+  pages.push(third);
+  await runtime.listTabRows();
+  stateB.page = third;
+  assert.equal(stateB.page.url(), 'https://three.test/');
+  assert.equal(stateA.page.url(), 'https://one.test/', 'b assigning state.page must not move a');
+
+  // Every other key stays shared — the session is one session.
+  stateA.scratch = 42;
+  assert.equal(stateB.scratch, 42);
+});
+
+test('a slot stored before its page was identified adopts the id on the next listing', async () => {
+  // A `state.page = ...` inside eval names a page listIdentifiedPages has not
+  // seen, so the slot stores null and could never rebind after a reconnect.
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  runtime.setActivePage(pages[0], { clientId: 'late' }); // never listed: no targetId
+  await runtime.listTabRows();                           // adoption happens here
+  fireDisconnect();
+  await runtime.listTabRows();
+  assert.equal(runtime.getActivePage({ clientId: 'late' })?.url(), 'https://a.test/',
+    'the adopted id is what lets the slot survive the reconnect');
+});
+
+test('reset clears every client slot', async () => {
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => [] });
+  await runtime.ensureBrowser();
+  runtime.setActivePage(pages[0], { clientId: 'a' });
+  await runtime.reset();
+  assert.equal(runtime.getActivePage({ clientId: 'a' }), null);
+});
+
+// ─── Codex R1 regressions ────────────────────────────────────────────────────
+
+test('an exactly-resolved id is not treated as gone just because /json/list lacks it', async () => {
+  // Exact resolution stores the real CDP target id; /json/list reports the
+  // relay's synthetic id for a lazily-attached tab. Comparing the two deleted
+  // the handle and the name of every duplicate-URL tab on the next listing.
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const { runtime, fireDisconnect } = makeReconnectableRelayRuntime({ targets: () => targets, pages });
+  const before = await runtime.listTabRows();
+  assert.deepEqual(before.map((r) => r.targetId), ['cdp-0', 'cdp-1'], 'resolved exactly');
+  runtime.setNamedPage('dup', pages[0], { targetId: before[0].targetId });
+
+  const after = await runtime.listTabRows();
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle),
+    'duplicate-URL handles must not renumber on the very next listing');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup'],
+    'nor may the name be deleted');
+
+  fireDisconnect();
+  const afterReconnect = await runtime.listTabRows();
+  assert.deepEqual(afterReconnect.map((r) => r.handle), before.map((r) => r.handle),
+    'and they survive the reconnect, which is the whole point');
+});
+
+test('a known but unresolved name never soft-matches a different tab', async () => {
+  // getNamedPage fails closed, but resolveTabTarget then fell through to the
+  // URL/title tiers — so `use docs` could select any tab whose URL says "docs".
+  const targets = [{ id: 'T1', url: 'https://a.test/', title: 'A' }];
+  const pages = [makeTabPage({ url: 'https://a.test/' })];
+  let fail = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => { browser = makeFakeBrowser({ pages }); return browser; },
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: makeRelayFetch(() => targets, { fail: () => fail }),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const [row] = await runtime.listTabRows();
+  runtime.setNamedPage('docs', pages[0], { targetId: row.targetId });
+
+  browser.fireDisconnected();
+  fail = true;
+  // A DIFFERENT tab whose URL contains the name.
+  pages.splice(0, pages.length, makeTabPage({ url: 'https://elsewhere.test/docs', title: 'Other' }));
+
+  await assert.rejects(() => runtime.resolveTabTarget('docs'), (err) => {
+    assert.equal(err.code, 'TAB_NOT_RESOLVED');
+    assert.match(err.message, /docs/);
+    return true;
+  });
+});
+
+test('an exactly-resolved id IS evicted once its page is gone', async () => {
+  // The R1 exemption must not become "never evict": a stale name blocks its own
+  // reuse, so setNamedPage on a fresh page fails with TAB_NAME_IN_USE.
+  let targets = [
+    { id: 'D1', url: 'about:blank', title: '' },
+    { id: 'D2', url: 'about:blank', title: '' },
+    { id: 'K', url: 'https://keep.test/', title: 'Keep' },
+  ];
+  const pages = [
+    makeTabPage({ url: 'about:blank' }),
+    makeTabPage({ url: 'about:blank' }),
+    makeTabPage({ url: 'https://keep.test/' }),
+  ];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets });
+  const rows = await runtime.listTabRows();
+  runtime.setNamedPage('dup', pages[0], { targetId: rows[0].targetId });
+
+  // Both duplicate tabs close for real.
+  targets = [targets[2]];
+  pages.splice(0, 2);
+  await runtime.listTabRows();
+
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), [],
+    'a name whose tab is gone must be released');
+  assert.doesNotThrow(() => runtime.setNamedPage('dup', pages[0]),
+    'and the name must be reusable');
+});
+
+test('a skipped resolution round is not evidence that an exact id is gone', async () => {
+  // Past AMBIGUOUS_RESOLUTION_LIMIT the resolver does not run, so absence from
+  // this listing says nothing. Evicting there would renumber open tabs.
+  const pages = Array.from({ length: 3 }, () => makeTabPage({ url: 'about:blank' }));
+  const targets = () => pages.map((_, i) => ({ id: `D${i}`, url: 'about:blank', title: '' }));
+  const runtime = makeRelayRuntime({ pages, targets });
+  const before = (await runtime.listTabRows()).map((r) => r.handle);
+
+  // Blow past the cap: now the resolver is skipped entirely.
+  for (let i = 0; i < 20; i += 1) pages.push(makeTabPage({ url: 'about:blank' }));
+  await runtime.listTabRows();
+  // Back under the cap — the original three must still hold their handles.
+  pages.splice(3, 20);
+  const after = (await runtime.listTabRows()).slice(0, 3).map((r) => r.handle);
+  assert.deepEqual(after, before, 'a skipped round must not evict live exact ids');
+});
+
+test('a failed exact-resolution probe is not proof that an exact id is dead', async () => {
+  // The per-row catch leaves a row unresolved, but "the resolver ran" was still
+  // reported as full evidence — so a transient Target.getTargetInfo failure
+  // dropped the handle and name of a tab that is plainly still open.
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  let cdpFail = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => {
+      browser = makeFakeBrowser({ pages, cdpFail: () => cdpFail });
+      return browser;
+    },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const fireDisconnect = () => {
+    browser.fireDisconnected();
+    pages.splice(0, pages.length, makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' }));
+  };
+  const before = await runtime.listTabRows();
+  assert.deepEqual(before.map((r) => r.handle), ['t1', 't2']);
+  runtime.setNamedPage('dup', pages[0], { targetId: before[0].targetId });
+
+  // The reconnect is what makes this bite: targetIdByPage is a WeakMap keyed on
+  // the OLD Page objects, so after it the rows carry no remembered id and the
+  // probe is the only evidence there is.
+  fireDisconnect();
+  cdpFail = true;                       // transient probe failure, tabs untouched
+  await runtime.listTabRows();
+  cdpFail = false;
+  const after = await runtime.listTabRows();
+
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle),
+    'a failed probe must not renumber a live tab');
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup'],
+    'nor delete its name');
+});
+
+test('exact resolution refuses a duplicate target id rather than sharing a handle', async () => {
+  // matchPagesToTargets rejects duplicate ids; the probe path must too. Two
+  // tabs answering with one id would share a t<N> and route a name to the
+  // wrong tab — the exact failure this arc exists to prevent.
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const runtime = makeRelayRuntime({ pages, targets: () => targets, cdpTargetId: () => 'SAME' });
+  const rows = await runtime.listTabRows();
+  assert.deepEqual(rows.map((r) => r.targetId), [null, null], 'a duplicate id identifies nothing');
+  assert.equal(new Set(rows.map((r) => r.handle)).size, 2, 'and the two tabs keep distinct handles');
+});
+
+test('exact resolution refuses a malformed target id', async () => {
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  for (const bad of [42, '', { nope: true }, null]) {
+    const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+    const runtime = makeRelayRuntime({ pages, targets: () => targets, cdpTargetId: () => bad });
+    const rows = await runtime.listTabRows();
+    assert.deepEqual(rows.map((r) => r.targetId), [null, null], `id ${JSON.stringify(bad)} must not be accepted`);
+  }
+});
+
+test('a malformed probe answer leaves the round incomplete, so nothing is evicted', async () => {
+  const targets = [{ id: 'D1', url: 'about:blank', title: '' }, { id: 'D2', url: 'about:blank', title: '' }];
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  let bad = false;
+  let browser;
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => {
+      browser = makeFakeBrowser({ pages, cdpTargetId: (i) => (bad ? 42 : `cdp-${i}`) });
+      return browser;
+    },
+    getRelayHttpUrl: () => 'http://127.0.0.1:19222',
+    fetch: makeRelayFetch(() => targets),
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+  });
+  const before = await runtime.listTabRows();
+  runtime.setNamedPage('dup', pages[0], { targetId: before[0].targetId });
+
+  browser.fireDisconnected();
+  pages.splice(0, pages.length, makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' }));
+  bad = true;
+  await runtime.listTabRows();
+  bad = false;
+  const after = await runtime.listTabRows();
+  assert.deepEqual(after.map((r) => r.handle), before.map((r) => r.handle));
+  assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['dup']);
 });

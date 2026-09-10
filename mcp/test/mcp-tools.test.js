@@ -1114,3 +1114,44 @@ describe('CDP Busy Helpers', () => {
     assert.equal(waitCalls, 0);
   });
 });
+
+describe('MCP tool descriptions: discovery surface', () => {
+  // `index.js` calls main() at import time, so the descriptions cannot be
+  // imported — they are read from source. The capture must tolerate backslash
+  // escapes: a naive [^']+ stops at the first escaped apostrophe and silently
+  // truncates the description under test.
+  const QUOTED = (name) => new RegExp(`'${name}',\\s*\n\\s*'((?:[^'\\\\]|\\\\.)*)'`);
+  const source = () => readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+
+  it('only the browserforce tool claims browser work, so ToolSearch ranking is deterministic', () => {
+    const src = source();
+    const browserforceDesc = src.match(QUOTED('browserforce'))?.[1] ?? '';
+    assert.ok(browserforceDesc, 'browserforce description not found');
+    for (const term of [/\bbrowser\b/i, /real Chrome/i, /\bweb page\b/i, /\bopen\b/i, /\bclick\b/i, /\bscreenshot\b/i]) {
+      assert.match(browserforceDesc, term);
+    }
+
+    // The sibling tools must NOT compete for the same query. `help` is
+    // registered first and would otherwise outrank the tool that does the work.
+    const helpDesc = src.match(QUOTED('help'))?.[1] ?? '';
+    assert.ok(helpDesc, 'help description not found');
+    assert.doesNotMatch(helpDesc, /^[^.]*\bbrowser\b/i,
+      'help must not open by claiming browser work — it competes with the browserforce tool');
+    assert.match(helpDesc, /docs|documentation|reference/i);
+    assert.match(helpDesc, /No Chrome connection/);
+
+    const execFirstLine = src.match(/const EXECUTE_PROMPT = `([^\n]+)/)?.[1] ?? '';
+    assert.match(execFirstLine, /escape hatch/i,
+      'exec must present as the escape hatch, not as the browser tool');
+    assert.doesNotMatch(execFirstLine, /real Chrome|browser work|web page/i,
+      'exec must not claim the browser category — it outranks browserforce in ToolSearch if it does');
+  });
+
+  it('no tool description contains a raw apostrophe that would break single-quoted source', () => {
+    const src = source();
+    for (const name of ['browserforce', 'help']) {
+      const desc = src.match(QUOTED(name))?.[1] ?? '';
+      assert.doesNotMatch(desc, /\\'/, `${name} description escapes an apostrophe; reword to avoid it`);
+    }
+  });
+});

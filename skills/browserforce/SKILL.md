@@ -1,12 +1,12 @@
 ---
 name: browserforce
-description: Browse the web using the user's real Chrome browser — already logged in, with real cookies and extensions. No headless browser. Uses BrowserForce relay + Playwright API via CLI.
+description: "Drive the user's real Chrome — their tabs, their logins, their cookies, their extensions. Use for any browser or web-page work: open a page, click, fill, screenshot, scrape, sign in, verify what a page renders, QA a flow. Other browser tools launch a fresh Chromium and cannot see the user's sessions; this is the user's actual browser."
 read_when:
-  - Browsing as the user with logged-in sessions
-  - Accessing sites that require authentication
-  - Interacting with the user's real Chrome tabs
-  - Web automation with existing cookies and extensions
-  - Taking screenshots of authenticated pages
+  - Any browser, web page, or web app task
+  - Opening, clicking, filling, or screenshotting a page
+  - Checking what a page actually renders
+  - Reaching a site behind the user's existing login
+  - Reading a page the user is signed in to
 metadata: {"clawdbot":{"emoji":"🔌","requires":{"bins":["node","browserforce"]},"install":[{"kind":"node","package":"browserforce","bins":["browserforce"],"label":"Install BrowserForce CLI"}]}}
 allowed-tools: Bash(browserforce:*)
 ---
@@ -72,7 +72,45 @@ names are unique; pass `--replace` only when you intentionally want to move a
 name to another tab.
 
 Stable handles and names persist for the lifetime of the session; use
-`browserforce tabs` to discover them.
+`browserforce tabs` to discover them. A handle survives the idle reconnect; it
+is invalidated only by `reset`.
+
+## Handing browser work to a subagent
+
+Subagents share your browser session automatically — one daemon per machine, so
+they see your tabs, your logins and your snapshot refs with no setup. Paste one
+of these into the subagent's prompt.
+
+**Sequential subagents.** They share your active tab:
+
+> Browser: use the `browserforce` CLI. It is already connected to the user's real
+> Chrome and shares this session's tabs. Run `browserforce tabs` to see them,
+> `browserforce use <handle>` to pick one, then `snapshot` / `click @eN` /
+> `fill @eN <text>`.
+
+**Parallel subagents.** Give each one its own id, and its active tab is its own:
+
+> Browser: use the `browserforce` CLI with `BROWSERFORCE_CLIENT_ID=<your-name>`
+> exported. You share the session's tabs and logins with the other agents, but
+> your active tab is your own — `use` and `open` will not move theirs.
+
+For a client that cannot set the id, pin every run instead: pass
+`--tab <handle>` on `snapshot`, `click`, `fill`, `type`, `press`, `hover`,
+`wait`, `get` and `eval`, and do not run `use` or `open`. `tabs` needs no
+`--tab` and does not accept one.
+
+**A subagent that should keep its own session.** Give it its own daemon:
+
+> Browser: use the `browserforce` CLI with `BF_SESSIOND_LOCK_PATH=/tmp/bf-<name>.json`
+> and `BROWSERFORCE_CDP_CLIENT_LABEL=<name>` exported. You get your own session
+> state and your own Chrome window for tabs you create.
+
+That last one separates session state and where new tabs open. It is **not** a
+sandbox: every BrowserForce client can see and drive every tab in the browser.
+If a tab must not be touched, do not delegate work that reaches it.
+
+Handles (`t<N>`) are stable for the session, so a handle you pass to a subagent
+still names the same tab when it runs.
 
 ### Command reference
 
@@ -135,6 +173,13 @@ browserforce -e "
 6. **Backend fallback is visible** — `auto` uses real Chrome when the extension
    is connected and warns if it falls back to managed Chrome; use `--real` to
    fail instead of falling back.
+
+## A rendered page is not proof
+
+The tab you read may have been open, and logged in, before your change — the page
+can render correctly for reasons that have nothing to do with it. Corroborate a
+browser result against independent evidence (a fresh navigation, a server log, a
+test) before calling a flow verified.
 
 ## Troubleshooting
 

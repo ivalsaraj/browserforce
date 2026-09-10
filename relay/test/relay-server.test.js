@@ -4041,3 +4041,163 @@ describe('CDP Explicit Session Handshake (newCDPSession alias)', () => {
     }
   });
 });
+
+describe('wildcard CORS is an allowlist', () => {
+  // Every route that returns the CDP auth token, tab metadata, or user
+  // settings. `/` is the only wildcard route, so this list is the inverse of
+  // the allowlist and a new sensitive route is covered without editing it.
+  const SENSITIVE_ROUTES = [
+    '/json', '/json/list', '/json/version',
+    '/extension/status', '/attached-tabs',
+    '/restrictions', '/agent-preferences',
+  ];
+
+  it('serves no sensitive route cross-origin', async () => {
+    // Port 0: start() rebinds this.port from server.address(), and
+    // getRandomPort() collides across concurrent suites.
+    const relay = new RelayServer(0);
+    await relay.start({ writeCdpUrl: false });
+    try {
+      for (const route of SENSITIVE_ROUTES) {
+        const res = await fetch(`http://127.0.0.1:${relay.port}${route}`, {
+          headers: { Origin: 'https://evil.test' },
+        });
+        await res.arrayBuffer();
+        assert.equal(res.headers.get('access-control-allow-origin'), null,
+          `${route} must not send wildcard CORS`);
+      }
+    } finally {
+      relay.stop();
+    }
+  });
+
+  it('keeps the health route wildcard-readable', async () => {
+    const relay = new RelayServer(0);
+    await relay.start({ writeCdpUrl: false });
+    try {
+      const res = await fetch(`http://127.0.0.1:${relay.port}/`, { headers: { Origin: 'https://evil.test' } });
+      await res.arrayBuffer();
+      assert.equal(res.headers.get('access-control-allow-origin'), '*');
+      assert.equal(res.status, 200);
+    } finally {
+      relay.stop();
+    }
+  });
+});
+
+describe('tab metadata cache freshness', () => {
+  // Seed one target the way a real session does: extension connected, then a
+  // CDP client sends Target.setAutoAttach so the relay discovers tabs.
+  async function seedOneTarget(port, relay, tab) {
+    const ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id && msg.method === 'listTabs') {
+        ext.send(JSON.stringify({ id: msg.id, result: { tabs: [tab] } }));
+      }
+    });
+    const cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+    cdp.on('message', () => {});
+    cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+    await sleep(250);
+    assert.ok(relay.tabToSession.get(tab.tabId), 'target must be seeded');
+    return { ext, cdp };
+  }
+
+  it('applies an emptied title instead of ignoring it', async () => {
+    const relay = new RelayServer(0);
+    await relay.start({ writeCdpUrl: false });
+    const port = relay.port;
+    let conns;
+    try {
+      conns = await seedOneTarget(port, relay, { tabId: 7, url: 'https://a.test/', title: 'Before', active: true });
+      conns.ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 7, title: '' } }));
+      await sleep(150);
+      const { body } = await httpGet(`http://127.0.0.1:${port}/json/list`);
+      const entry = body.find((t) => t.url === 'https://a.test/');
+      assert.ok(entry, 'seeded target must be listed');
+      assert.equal(entry.title, '', 'a cleared title must not leave the old one cached');
+    } finally {
+      conns?.cdp.close();
+      conns?.ext.close();
+      relay.stop();
+    }
+  });
+
+  it('applies an emptied url instead of ignoring it', async () => {
+    const relay = new RelayServer(0);
+    await relay.start({ writeCdpUrl: false });
+    const port = relay.port;
+    let conns;
+    try {
+      conns = await seedOneTarget(port, relay, { tabId: 8, url: 'https://b.test/', title: 'B', active: true });
+      conns.ext.send(JSON.stringify({ method: 'tabUpdated', params: { tabId: 8, url: '' } }));
+      await sleep(150);
+      const { body } = await httpGet(`http://127.0.0.1:${port}/json/list`);
+      const entry = body.find((t) => t.title === 'B');
+      assert.equal(entry.url, '', 'a cleared url must not leave the old one cached');
+    } finally {
+      conns?.cdp.close();
+      conns?.ext.close();
+      relay.stop();
+    }
+  });
+});
+
+describe('synthetic target ids are unique per registration', () => {
+  it('a reopened tab reusing a Chrome tab id does not reuse the target id', async () => {
+    // Chrome REUSES tab ids. A target id derived from the tab id alone means a
+    // closed-then-reopened tab presents the same id, and every handle and name
+    // keyed on it silently transfers to a different tab.
+    const relay = new RelayServer(0);
+    await relay.start({ writeCdpUrl: false });
+    const port = relay.port;
+    let tabs = [{ tabId: 7, url: 'https://a.test/', title: 'A', active: true }];
+    let ext;
+    let cdp;
+    try {
+      ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+        headers: { Origin: 'chrome-extension://test' },
+      });
+      ext.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+        if (msg.id && msg.method === 'listTabs') {
+          ext.send(JSON.stringify({ id: msg.id, result: { tabs } }));
+        }
+      });
+      cdp = await connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+      cdp.on('message', () => {});
+      const discover = async () => {
+        cdp.send(JSON.stringify({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } }));
+        await sleep(250);
+        const { body } = await httpGet(`http://127.0.0.1:${port}/json/list`);
+        return body;
+      };
+
+      const first = await discover();
+      const firstId = first.find((t) => t.url === 'https://a.test/')?.id;
+      assert.ok(firstId, 'the tab must be listed');
+
+      // The tab closes; the relay learns of it (the extension reports every
+      // close now, attached or not).
+      ext.send(JSON.stringify({ method: 'tabDetached', params: { tabId: 7, reason: 'tab_closed' } }));
+      await sleep(150);
+
+      // A DIFFERENT tab reopens and Chrome hands it the same tab id.
+      tabs = [{ tabId: 7, url: 'https://b.test/', title: 'B', active: true }];
+      const second = await discover();
+      const secondId = second.find((t) => t.url === 'https://b.test/')?.id;
+      assert.ok(secondId, 'the reopened tab must be listed');
+      assert.notEqual(secondId, firstId,
+        'a different tab must never present the closed tab target id');
+    } finally {
+      cdp?.close();
+      ext?.close();
+      relay.stop();
+    }
+  });
+});

@@ -1447,16 +1447,20 @@ function compactTimelineDetails(timeline = []) {
     .filter(Boolean);
 }
 
+// Same reason as extension/agent-panel-runtime.js: a bare toLocaleString()
+// grouped digits by the host locale, so token counts differed per machine.
+const TOKEN_LOCALE = 'en-US';
+
 function formatUsageForCompaction(usage = {}) {
   const effective = getEffectiveContextTokens(usage);
   const windowSize = normalizePositiveUsageNumber(usage.modelContextWindow);
   if (effective == null && windowSize == null) return '';
   if (effective != null && windowSize != null) {
     const percent = ((effective / windowSize) * 100).toFixed(1);
-    return `${effective.toLocaleString()} / ${windowSize.toLocaleString()} effective tokens (${percent}%)`;
+    return `${effective.toLocaleString(TOKEN_LOCALE)} / ${windowSize.toLocaleString(TOKEN_LOCALE)} effective tokens (${percent}%)`;
   }
-  if (effective != null) return `${effective.toLocaleString()} effective tokens`;
-  return `${windowSize.toLocaleString()} context window`;
+  if (effective != null) return `${effective.toLocaleString(TOKEN_LOCALE)} effective tokens`;
+  return `${windowSize.toLocaleString(TOKEN_LOCALE)} context window`;
 }
 
 function formatMessageForCompaction(message, index) {

@@ -37,11 +37,13 @@ import {
   clearSessiondLock,
   writeSessiondUrl,
   clearSessiondUrl,
+  resolveClientId,
 } from './session-client.js';
 import {
   executeBrowserforceVerb,
   BrowserforceCommandError,
 } from '../mcp/src/browserforce-command-registry.js';
+import { withClientLabel } from '../mcp/src/client-label.js';
 import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
 import { installProcessCrashGuard } from '../mcp/src/process-crash-guard.js';
 
@@ -52,13 +54,26 @@ const DEFAULT_IDLE_MS = 5 * 60 * 1000;
 // ─── Backend connect factories (lazy: the browser is launched/connected only on
 // the first command, never during startup negotiation) ──────────────────────
 
+/**
+ * The CDP URL sessiond connects with, label included. Exported so the label
+ * contract is testable without a real browser — connectRealBrowser is private
+ * and the tests replace it wholesale via BF_SESSIOND_CONNECT_MODULE.
+ *
+ * Without a label the relay keys window affinity on the ephemeral connection
+ * id, so sessiond's agent-window pin was discarded on every disconnect and the
+ * next created tab could land in the user's own window.
+ */
+export async function buildRealCdpUrl() {
+  return withClientLabel(await getCdpUrl());
+}
+
 async function connectRealBrowser() {
   // Mirror bin.js connectBrowser: relay is already ensured by negotiation.
   const cReq = createRequire(fileURLToPath(new URL('../mcp/src/exec-engine.js', import.meta.url)));
   const pwPath = cReq.resolve('playwright-core');
   const { default: pw } = await import(pwPath);
   const { chromium } = pw;
-  const cdpUrl = await getCdpUrl();
+  const cdpUrl = await buildRealCdpUrl();
   const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
   await assertExtensionConnected({ baseUrl });
   return chromium.connectOverCDP(cdpUrl);
@@ -265,11 +280,20 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
     if (method === 'POST' && path.startsWith('/command/')) {
       const verb = path.slice('/command/'.length);
       const body = await readJsonBody(req);
-      await handleCommand(verb, body, res);
+      await handleCommand(verb, body, res, readClientId(req, body));
       return;
     }
 
     sendJson(res, 404, envelope({ success: false, error: `not found: ${path}` }));
+  }
+
+  /**
+   * The calling agent's id, so it gets its own active tab inside the shared
+   * session. Sanitized through the same shape check as the sender: a malformed
+   * value is IGNORED (shared slot), never used — it reaches Map keys and logs.
+   */
+  function readClientId(req, body) {
+    return resolveClientId(req.headers['x-browserforce-client']) ?? resolveClientId(body?.clientId);
   }
 
   // Atomic verbs. Verb execution lives in the shared command registry
@@ -277,9 +301,9 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
   // MCP `browserforce` tool share identical behavior: every action routes
   // through runtime.runCommand() → runCode() (the guarded execution boundary).
   // This handler only owns the sessiond HTTP envelope contract.
-  async function handleCommand(verb, body, res) {
+  async function handleCommand(verb, body, res, clientId = null) {
     try {
-      const data = await executeBrowserforceVerb({ verb, body, runtime });
+      const data = await executeBrowserforceVerb({ verb, body, runtime, clientId });
       // Attach the managed-fallback warning to EVERY command envelope (not just
       // snapshot) so the mandatory warning is visible regardless of which verb
       // the user runs first. It is null when no fallback occurred.

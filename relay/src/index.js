@@ -77,13 +77,18 @@ function parseHttpHostHeader(hostHeader) {
   return host || null;
 }
 
-// Introspection endpoints carry local browsing metadata (tab URLs/titles) and
-// must not be readable cross-origin by arbitrary websites. Wildcard CORS stays
-// the default for CDP-discovery/health routes only.
-const NO_WILDCARD_CORS_PATHS = new Set(['/extension/status', '/attached-tabs']);
+// Allowlist, not a denylist. Routes here are readable by any page the user
+// visits, so the default must be "denied": the old denylist exempted
+// /extension/status and /attached-tabs, then four sensitive routes were added
+// without being listed — /json/version and /json/list embed the CDP auth token
+// in webSocketDebuggerUrl, and /restrictions and /agent-preferences return the
+// user's settings including their free-text instructions.
+// `/` returns counts only. Extension pages are unaffected: they carry host
+// permissions and bypass CORS entirely.
+const WILDCARD_CORS_PATHS = new Set(['/']);
 
 function shouldAllowWildcardCors(pathname) {
-  return !NO_WILDCARD_CORS_PATHS.has(pathname);
+  return WILDCARD_CORS_PATHS.has(pathname);
 }
 
 // ─── Token Persistence ──────────────────────────────────────────────────────
@@ -284,6 +289,12 @@ class RelayServer {
     // instead of spawning a new dedicated window per reconnect.
     this.agentWindowByAffinityKey = new Map();
     this.sessionCounter = 0;
+    // tabId -> how many times a target has been registered for it. Chrome
+    // REUSES tab ids, so `bf-target-<tabId>` alone let a reopened tab present a
+    // closed tab's id and inherit every agent handle and name keyed on it. The
+    // first registration keeps the bare id (nothing observable changes); each
+    // later one is suffixed, which is exactly when reuse is possible.
+    this.syntheticTargetGeneration = new Map();
 
     // State
     this.autoAttachEnabled = false;
@@ -1023,7 +1034,7 @@ class RelayServer {
         ?? existing?.windowId;
       this.targets.set(relaySessionId, {
         tabId,
-        targetId: targetId || `bf-target-${tabId}`,
+        targetId: targetId || this._synthesizeTargetId(tabId),
         targetInfo: targetInfo || { url: '', title: '' },
         windowId: resolvedWindowId,
         debuggerAttached: true,
@@ -1181,8 +1192,11 @@ class RelayServer {
     const target = this.targets.get(sessionId);
     if (!target) return;
 
-    if (url) target.targetInfo.url = url;
-    if (title) target.targetInfo.title = title;
+    // Presence, not truthiness: a page that clears its title reports '' and a
+    // truthiness check leaves the previous title cached forever — /json/list
+    // then serves stale metadata, which breaks page-to-target matching.
+    if (url !== undefined) target.targetInfo.url = url;
+    if (title !== undefined) target.targetInfo.title = title;
 
     this._broadcastCdp({
       method: 'Target.targetInfoChanged',
@@ -1442,6 +1456,16 @@ class RelayServer {
     }
   }
 
+  /**
+   * A target id for a tab the extension gave no real CDP id for. Unique per
+   * REGISTRATION, not per tab id — see `syntheticTargetGeneration`.
+   */
+  _synthesizeTargetId(tabId) {
+    const generation = (this.syntheticTargetGeneration.get(tabId) ?? 0) + 1;
+    this.syntheticTargetGeneration.set(tabId, generation);
+    return generation === 1 ? `bf-target-${tabId}` : `bf-target-${tabId}-${generation}`;
+  }
+
   // ─── Tab Management ─────────────────────────────────────────────────────
 
   async _autoAttachAllTabs(ws) {
@@ -1478,7 +1502,7 @@ class RelayServer {
       if (!Number.isInteger(tabId)) continue;
       const existingSessionId = this.tabToSession.get(tabId);
       const sessionId = existingSessionId || `bf-session-${++this.sessionCounter}`;
-      const targetId = tab.targetId || `bf-target-${tabId}`;
+      const targetId = tab.targetId || this._synthesizeTargetId(tabId);
       const existing = this.targets.get(sessionId);
       const isNewTarget = !existing;
       const targetInfo = {

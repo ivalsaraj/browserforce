@@ -7,6 +7,7 @@ import assert from 'node:assert';
 
 import {
   parseBrowserforceCommand,
+  commandToBody,
   executeBrowserforceCommand,
   executeBrowserforceVerb,
   normalizeRef,
@@ -51,8 +52,18 @@ function fakePage({ url = 'about:blank', title = '' } = {}) {
   return page;
 }
 
-function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
+function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false } = {}) {
   const list = [...pages];
+  // Relay target ids, allocated per PAGE (never by list index — every id would
+  // shift when a tab closes) and read off the LIVE list, so pages opened during
+  // a test are visible to /json/list.
+  const idFor = new WeakMap();
+  let nextTargetId = 1;
+  const targetsNow = () => list.map((pg) => {
+    if (!idFor.has(pg)) idFor.set(pg, `T${nextTargetId++}`);
+    return { id: idFor.get(pg), url: pg.url(), title: pg._title ?? '' };
+  });
+  const cdpSessions = [];
   const context = {
     on() {},
     pages: () => list,
@@ -61,11 +72,19 @@ function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
       list.push(page);
       return page;
     },
+    async newCDPSession(page) {
+      cdpSessions.push(page);
+      return {
+        async send() { return { targetInfo: { targetId: idFor.get(page) ?? null } }; },
+        async detach() {},
+      };
+    },
   };
+  let disconnectedCb = null;
   const browser = {
     isConnected: () => true,
     contexts: () => [context],
-    on() {},
+    on(event, cb) { if (event === 'disconnected') disconnectedCb = cb; },
     close: async () => {},
   };
   const runtime = createBrowserSessionRuntime({
@@ -73,14 +92,39 @@ function tabRuntimeEnv({ pages = [], restrictions = null } = {}) {
     getRelayHttpUrl: () => 'http://relay.test',
     // Restrictions default to none unless the test injects some.
     fetch: async (url) => {
-      if (restrictions && url.endsWith('/restrictions')) {
+      if (restrictions && String(url).endsWith('/restrictions')) {
         return { ok: true, json: async () => restrictions };
       }
+      if (String(url).endsWith('/json/list')) return { ok: true, json: async () => targetsNow() };
       return { ok: true, json: async () => ({}) };
     },
+    initialPageDiscoveryTimeoutMs: 50,
+    initialPageDiscoveryPollMs: 5,
+    // Recording deps, opt-in: without them a snippet-backed verb fails on the
+    // missing-dep check before it ever reaches the runtime's own gates.
+    ...(execDeps ? {
+      buildExecContext: (page) => ({ page }),
+      runCode: async () => ({ ok: true }),
+    } : {}),
   });
-  const run = (command, timeout) => executeBrowserforceCommand({ command, runtime, timeout });
-  return { runtime, run, pages: list };
+  // `opts` is an object, never a bare timeout: Task 12 passes { clientId } and
+  // a positional timeout slot would swallow it silently.
+  const run = (command, opts = {}) => executeBrowserforceCommand({ command, runtime, ...opts });
+  /**
+   * Fire the browser `disconnected` handler and swap in fresh Page objects at
+   * the same URLs. The old ones stay OPEN but orphaned — which is what
+   * Playwright actually does, and what the generation check exists to catch.
+   */
+  const __fireDisconnect = () => {
+    disconnectedCb?.();
+    const replacements = list.map((old) => {
+      const next = fakePage({ url: old.url(), title: old._title });
+      if (idFor.has(old)) idFor.set(next, idFor.get(old));
+      return next;
+    });
+    list.splice(0, list.length, ...replacements);
+  };
+  return { runtime, run, pages: list, cdpSessions, __fireDisconnect };
 }
 
 // ─── --tab routing (per-run pinned pages) ─────────────────────────────────────
@@ -267,8 +311,8 @@ describe('tab commands: tabs / use / open / rename / forget', () => {
 
     const { data } = await run('tabs');
     assert.deepEqual(data.tabs, [
-      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', active: false, name: 'docs' },
-      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', active: true, name: null },
+      { handle: 't1', index: 0, title: 'Docs', url: 'https://docs.test/', targetId: 'T1', active: false, name: 'docs' },
+      { handle: 't2', index: 1, title: 'App', url: 'https://app.test/', targetId: 'T2', active: true, name: null },
     ]);
   });
 
@@ -436,9 +480,11 @@ describe('stress: many tabs, parallel named tabs, name conflicts', () => {
   // 84 filler tabs plus three realistic "interesting" tabs buried mid-list:
   // an MRR report whose URL carries query-string drift, and two tabs that
   // collide on the title "Dashboard".
-  function manyTabsEnv() {
+  // `n` is the TOTAL tab count: three named tabs are spliced in afterwards, so
+  // the filler loop runs n - 3.
+  function manyTabsEnv(n = 87) {
     const pages = [];
-    for (let i = 0; i < 84; i += 1) {
+    for (let i = 0; i < n - 3; i += 1) {
       pages.push(fakePage({
         url: `https://site-${i}.test/path/${i}?session=${i}&theme=dark`,
         title: `Site ${i}`,
@@ -457,7 +503,7 @@ describe('stress: many tabs, parallel named tabs, name conflicts', () => {
   it('tabs over 87 pages returns promptly with a unique stable handle on every row', async () => {
     const { run } = manyTabsEnv();
     const started = Date.now();
-    const { data } = await run('tabs');
+    const { data } = await run('tabs --all');
     const elapsed = Date.now() - started;
 
     assert.equal(data.tabs.length, 87);
@@ -495,14 +541,15 @@ describe('stress: many tabs, parallel named tabs, name conflicts', () => {
     const { runtime, run, pages, mrr } = manyTabsEnv();
     await run('use app.heymantle.com/reports/mrr');
 
-    const before = (await run('tabs')).data.tabs.find((row) => row.active);
+    // --all: the active row sits at position 41, which the default cap hides.
+    const before = (await run('tabs --all')).data.tabs.find((row) => row.active);
     assert.equal(before.url, mrr.url());
 
     // Close and remove ten tabs listed BEFORE the active one.
     for (const page of pages.slice(0, 10)) page.closeNow();
     pages.splice(0, 10);
 
-    const after = (await run('tabs')).data.tabs.find((row) => row.active);
+    const after = (await run('tabs --all')).data.tabs.find((row) => row.active);
     assert.equal(runtime.getActivePage(), mrr, 'the active page object is untouched');
     assert.equal(after.handle, before.handle, 'the stable handle survives earlier closes');
     assert.equal(after.url, before.url);
@@ -1182,5 +1229,181 @@ describe('BrowserforceCommandError', () => {
     const err = new BrowserforceCommandError('nope', { code: 'TEST' });
     assert.equal(err.resetHintAllowed, false);
     assert.equal(err.suggestion, null);
+  });
+});
+
+describe('tab names survive the idle reconnect', () => {
+  it('open --as after a reconnect still detects a name conflict', async () => {
+    const { runtime, run, __fireDisconnect } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await run('open https://a.test/ --as docs');
+    __fireDisconnect(); // new Page objects, same tabs
+    await assert.rejects(() => run('open https://b.test/ --as docs'), /docs/,
+      'the conflict check must run against rebound names, not stale entries');
+    assert.ok(runtime, 'runtime in scope');
+  });
+
+  it('open --as records a durable target id for the page it just created', async () => {
+    const { runtime, run, __fireDisconnect } = tabRuntimeEnv({ pages: [] });
+    await run('open https://a.test/ --as docs');
+    const [entry] = runtime.listPageNames();
+    assert.equal(entry.name, 'docs');
+    const rows = await runtime.listTabRows();
+    const named = rows.find((r) => r.name === 'docs');
+    assert.ok(named?.targetId, 'a name created by open --as must carry a target id');
+
+    __fireDisconnect();
+    const after = await runtime.listTabRows();
+    assert.equal(after.find((r) => r.name === 'docs')?.targetId, named.targetId,
+      'the name survives the reconnect it was created before');
+  });
+
+  it('rename after a reconnect moves the rebound name', async () => {
+    const { runtime, run, __fireDisconnect } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await run('open https://a.test/ --as docs');
+    __fireDisconnect();
+    await run('rename docs api-docs');
+    assert.deepEqual(runtime.listPageNames().map((n) => n.name), ['api-docs']);
+    const rows = await runtime.listTabRows();
+    assert.ok(rows.some((r) => r.name === 'api-docs'), 'the renamed tab is still identified');
+  });
+});
+
+describe('tabs is capped and filterable', () => {
+  function manyTabsEnv(n) {
+    const pages = [];
+    for (let i = 0; i < n; i += 1) {
+      pages.push(fakePage({ url: `https://site-${i}.test/path/${i}`, title: `Site ${i}` }));
+    }
+    return tabRuntimeEnv({ pages });
+  }
+
+  it('caps the default listing and says what it omitted', async () => {
+    const { data, text } = await manyTabsEnv(72).run('tabs');
+    assert.equal(data.tabs.length, 20);
+    assert.equal(data.total, 72);
+    assert.equal(data.omitted, 52);
+    assert.match(text, /52 more/);
+    assert.match(text, /--all/);
+  });
+
+  it('--all returns every row with no omission notice', async () => {
+    const { data, text } = await manyTabsEnv(72).run('tabs --all');
+    assert.equal(data.tabs.length, 72);
+    assert.equal(data.omitted, 0);
+    assert.doesNotMatch(text, /more of/);
+  });
+
+  it('--match filters on title and URL before the cap applies', async () => {
+    const { data } = await manyTabsEnv(72).run('tabs --match site-1');
+    assert.ok(data.tabs.length > 0);
+    assert.ok(data.tabs.every((t) => `${t.title} ${t.url}`.toLowerCase().includes('site-1')));
+  });
+
+  it('--limit overrides the default cap', async () => {
+    const { data } = await manyTabsEnv(72).run('tabs --limit 3');
+    assert.equal(data.tabs.length, 3);
+    assert.equal(data.omitted, 69);
+  });
+
+  it('rejects a non-integer or negative --limit instead of coercing it', async () => {
+    // Value flags are stored as RAW STRINGS with no numeric validation.
+    // Passing them to Array.slice() silently coerces: '-1' slices from the end,
+    // 'abc' becomes 0 and returns nothing.
+    for (const bad of ['abc', '-1', '2.5']) {
+      await assert.rejects(
+        () => manyTabsEnv(5).run(`tabs --limit ${bad}`),
+        (err) => { assert.match(err.message, /--limit/); return true; },
+      );
+    }
+  });
+
+  it('validates --limit on the sessiond direct-verb path too', async () => {
+    // executeBrowserforceVerb takes a raw body that never passes through
+    // commandToBody, so validation there alone would leave this surface coercing.
+    const { runtime } = manyTabsEnv(5);
+    await assert.rejects(
+      () => executeBrowserforceVerb({ verb: 'tabs', body: { limit: 'abc' }, runtime }),
+      /--limit/,
+    );
+  });
+
+  it('--limit 0 means no cap, matching --all', async () => {
+    const { data } = await manyTabsEnv(72).run('tabs --limit 0');
+    assert.equal(data.tabs.length, 72);
+    assert.equal(data.omitted, 0);
+  });
+
+  it('--all wins over --limit rather than silently disagreeing', async () => {
+    const { data } = await manyTabsEnv(72).run('tabs --all --limit 3');
+    assert.equal(data.tabs.length, 72);
+  });
+
+  it('reports a filtered total, so omitted counts the matches withheld', async () => {
+    const { data } = await manyTabsEnv(72).run('tabs --match site-1 --limit 2');
+    assert.equal(data.tabs.length, 2);
+    assert.ok(data.total < 72, 'total is the post-filter count');
+    assert.equal(data.omitted, data.total - 2);
+  });
+});
+
+describe('tabs refuses subcommands it does not have', () => {
+  it('rejects a positional argument instead of discarding it', () => {
+    // commandToBody, not parseBrowserforceCommand: parse never calls it.
+    const parsed = parseBrowserforceCommand('tabs close t5');
+    assert.equal(parsed.verb, 'tabs');
+    assert.deepEqual(parsed.args, ['close', 't5'], 'parse still tokenizes; the refusal happens later');
+
+    assert.throws(() => commandToBody(parsed), (err) => {
+      assert.match(err.message, /tabs takes no positional arguments/);
+      assert.match(err.message, /close/i, 'must name the thing the user actually tried');
+      return true;
+    });
+  });
+
+  it('surfaces the refusal through the real execution path', async () => {
+    const { run } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await assert.rejects(
+      () => run('tabs close t5'),
+      (err) => { assert.match(err.message, /tabs takes no positional arguments/); return true; },
+    );
+  });
+
+  it('never points at a bare close that would target an arbitrary tab', async () => {
+    const { run } = tabRuntimeEnv({ pages: [fakePage({ url: 'https://a.test/' })] });
+    await assert.rejects(() => run('tabs close t5'), (err) => {
+      assert.match(err.message, /use <handle>/, 'the fix must be selection, never a default target');
+      return true;
+    });
+  });
+
+  it('leaves bare tabs and its flags working', () => {
+    assert.equal(parseBrowserforceCommand('tabs').verb, 'tabs');
+    assert.deepEqual(commandToBody(parseBrowserforceCommand('tabs')),
+      { all: false, match: undefined, limit: undefined });
+    assert.equal(commandToBody(parseBrowserforceCommand('tabs --all')).all, true);
+  });
+});
+
+describe('an empty browser reports NO_TABS, not "no active page"', () => {
+  it('every inspect verb classifies as NO_TABS with an actionable message', async () => {
+    const { run } = tabRuntimeEnv({ pages: [], execDeps: true });
+    for (const cmd of ['tabs', 'snapshot', 'get url', 'click @e1', 'use t1']) {
+      await assert.rejects(() => run(cmd), (err) => {
+        assert.equal(err.code, 'NO_TABS', `${cmd} must classify as NO_TABS`);
+        assert.match(err.message, /open a tab/i);
+        assert.equal(err.resetHintAllowed, false, 'a missing tab is not a connection failure');
+        return true;
+      });
+    }
+  });
+
+  it('open still works on an empty browser', async () => {
+    const { run } = tabRuntimeEnv({ pages: [], execDeps: true });
+    await assert.doesNotReject(() => run('open https://a.test/'));
+  });
+
+  it('eval is not gated on an empty browser — it is how the escape hatch opens one', async () => {
+    const { run } = tabRuntimeEnv({ pages: [], execDeps: true });
+    await assert.doesNotReject(() => run('eval return typeof context'));
   });
 });

@@ -1052,10 +1052,13 @@ async function cmdBrowserforceCommand() {
   });
 
   if (values.json) {
-    // Compat: `tabs --json` keeps the pre-registry top-level array shape; each
-    // row keeps index/title/url and adds handle/active/name (a superset).
+    // Compat: rows keep the pre-registry shape (index/title/url plus
+    // handle/active/name/targetId). They move under `.tabs` so a capped
+    // listing can report `total`/`omitted` — a machine client must be able to
+    // tell that rows were withheld and how to ask for them.
     if (parsed.verb === 'tabs' && resp && resp.success !== false) {
-      output(resp.data?.tabs ?? [], true);
+      const { tabs = [], total = tabs.length, omitted = 0 } = resp.data ?? {};
+      output({ tabs, total, omitted }, true);
       return;
     }
     output(resp, true);

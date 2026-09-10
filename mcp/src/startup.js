@@ -14,6 +14,7 @@ import {
   assertOpenIntentAllowed,
   BrowserForceMcpError,
 } from './exec-engine.js';
+import { classifyReadiness, READY } from './readiness.js';
 
 // ─── Shared assertion gate (no I/O) ──────────────────────────────────────────
 
@@ -75,8 +76,16 @@ export async function preflightAttachedPageBeforeCdp({
   intent = 'inspect',
   fetchBrowserforceRestrictions,
 } = {}) {
-  await ensureRelay();
+  // ensureRelay() IS the auto-start. If it throws, that is the
+  // RELAY_UNREACHABLE case, and leaving it outside the catch lets the one
+  // state with an actionable fix escape as a raw error.
   const baseUrl = getRelayHttpUrl();
+  try {
+    await ensureRelay();
+  } catch (err) {
+    const readiness = classifyReadiness({ statusError: err });
+    throw new BrowserForceMcpError(readiness.message, { code: readiness.code, details: { intent } });
+  }
   let restrictions;
   try {
     restrictions = await fetchBrowserforceRestrictions({ forceRefresh: true });
@@ -89,7 +98,18 @@ export async function preflightAttachedPageBeforeCdp({
       },
     );
   }
-  const extensionStatus = await getExtensionStatus({ baseUrl });
+  let extensionStatus = null;
+  let statusError = null;
+  try {
+    extensionStatus = await getExtensionStatus({ baseUrl });
+  } catch (err) {
+    statusError = err;
+  }
+  // Pre-connect: never pass discoveredPageCount (see classifyReadiness).
+  const readiness = classifyReadiness({ statusError, status: extensionStatus });
+  if (readiness.code !== READY) {
+    throw new BrowserForceMcpError(readiness.message, { code: readiness.code, details: { intent } });
+  }
   return runPreflightAssertions({ intent, restrictions, extensionStatus });
 }
 
