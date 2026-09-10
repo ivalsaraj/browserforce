@@ -170,7 +170,14 @@ browserforce -e "
    layer cannot express the task.
 5. **Command errors teach the next step** — stale ref → re-snapshot; unknown
    tab → `browserforce tabs`. Fix and retry.
-6. **Backend fallback is visible** — `auto` uses real Chrome when the extension
+6. **Never clear cookies profile-wide** — `Network.clearBrowserCookies`,
+   `Network.clearBrowserCache` and `Storage.clearCookies` wipe every site in
+   the user's Chrome, not the current page; they would sign the user out of
+   everything. The relay refuses them. To clear one site, read its cookies with
+   `Network.getCookies({ urls: [...] })` and remove them with
+   `Network.deleteCookies`. If a whole-profile clear is genuinely wanted, ask
+   the user first — they enable it in the extension popup.
+7. **Backend fallback is visible** — `auto` uses real Chrome when the extension
    is connected and warns if it falls back to managed Chrome; use `--real` to
    fail instead of falling back.
 

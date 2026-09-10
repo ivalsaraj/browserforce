@@ -445,6 +445,20 @@ rewrites JS (`getByRole('button')` became `getByRole(button)` →
   `/restrictions` and `/agent-preferences` (user settings, including free-text
   instructions). Never add a route to the allowlist without establishing that
   its body is safe for any page the user visits to read.
+- Profile-wide clears are refused by default (`PROFILE_WIDE_CLEAR_METHODS`:
+  `Network.clearBrowserCookies`, `Network.clearBrowserCache`,
+  `Storage.clearCookies`). These are not tab-scoped — they wipe every cookie
+  for every domain in the user's profile, signing them out of mail, source
+  control and banking at once, and Chrome offers no scoped variant. The guard
+  sits in `_handleCdpClientMessage` **before** routing, because these arrive
+  both tab-scoped (`Network.*`, with a sessionId) and browser-scoped
+  (`Storage.clearCookies`, without one). It fails closed via
+  `_getRestrictionsSafe()`: an unreadable setting never reads as granted.
+  The opt-in is the popup checkbox `allowProfileWideClear`, deliberately not an
+  env var — an agent runs shell commands and could set an env var for itself,
+  but cannot tick a checkbox. Scoped operations stay allowed and the refusal
+  names them, so an agent recovers without asking: `Network.getCookies` +
+  `Network.deleteCookies`, or `Storage.clearDataForOrigin`.
 
 ## Operational Non-Goals
 

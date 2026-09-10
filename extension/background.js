@@ -330,12 +330,13 @@ async function executeCommand(msg) {
       return cdpCommand(msg.params);
     case 'getRestrictions':
       return new Promise((resolve) => {
-        chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], (s) => {
+        chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'allowProfileWideClear', 'userInstructions'], (s) => {
           resolve({
             mode: s.mode || 'auto',
             lockUrl: !!s.lockUrl,
             noNewTabs: !!s.noNewTabs,
             readOnly: !!s.readOnly,
+            allowProfileWideClear: !!s.allowProfileWideClear,
             instructions: s.userInstructions || '',
           });
         });
@@ -640,7 +641,7 @@ const INPUT_METHODS = new Set([
 
 async function checkRestriction(method, params, tabId) {
   const settings = await new Promise((resolve) => {
-    chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], resolve);
+    chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'allowProfileWideClear', 'userInstructions'], resolve);
   });
 
   // No restrictions active -> allow
@@ -1260,12 +1261,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'getRestrictions') {
-    chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions'], (s) => {
+    chrome.storage.local.get(['mode', 'lockUrl', 'noNewTabs', 'readOnly', 'allowProfileWideClear', 'userInstructions'], (s) => {
       sendResponse({
         mode: s.mode || 'auto',
         lockUrl: !!s.lockUrl,
         noNewTabs: !!s.noNewTabs,
         readOnly: !!s.readOnly,
+        allowProfileWideClear: !!s.allowProfileWideClear,
         instructions: s.userInstructions || '',
       });
     });
