@@ -40,11 +40,35 @@ function resolvePositiveInt(value, fallback) {
   return Math.floor(parsed);
 }
 
+const AGENT_NAME_MAX_LENGTH = 24;
+
 function sanitizeClientLabel(label) {
   if (typeof label !== 'string') return null;
   const cleaned = label.trim().replace(/[^\w .:@/-]/g, '');
   if (!cleaned) return null;
   return cleaned.slice(0, 80);
+}
+
+// Display-only agent name (BROWSERFORCE_AGENT_NAME -> ?agentName=), rendered
+// into a real page by the ghost cursor. This is the ONLY place the length and
+// character policy is applied — nothing downstream re-applies it, because
+// truncating twice with two constants is how a documented limit silently
+// becomes something else.
+//
+// Sanitize, never reject: a cosmetic label must not fail a click, so an
+// unrepresentable name degrades to a shorter name or to no label at all.
+// Bidi controls are stripped explicitly — they visually reverse the text that
+// follows and would let a name reorder the fixed "BrowserForce" prefix it is
+// supposed to sit behind.
+function sanitizeAgentName(name) {
+  if (typeof name !== 'string') return null;
+  const cleaned = name
+    .replace(/[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/[^A-Za-z0-9 ._-]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.slice(0, AGENT_NAME_MAX_LENGTH);
 }
 
 // ─── HTTP Host Validation ────────────────────────────────────────────────────
@@ -698,6 +722,20 @@ class RelayServer {
     }
   }
 
+  _agentNameFromRequest(req) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+      return sanitizeAgentName(url.searchParams.get('agentName') || '');
+    } catch {
+      // Malformed request URL — treat as unnamed.
+      return null;
+    }
+  }
+
+  _agentNameFor(clientId) {
+    return this.clientById.get(clientId)?.agentName || null;
+  }
+
   _deriveClientLabel(req) {
     const fromQuery = this._explicitClientLabel(req);
     if (fromQuery) return fromQuery;
@@ -1226,6 +1264,7 @@ class RelayServer {
       id: clientId,
       label: this._deriveClientLabel(req),
       affinityLabel: this._explicitClientLabel(req),
+      agentName: this._agentNameFromRequest(req),
       connectedAt: new Date().toISOString(),
       origin: req?.headers?.origin || null,
       userAgent: req?.headers?.['user-agent'] || null,
@@ -1776,6 +1815,12 @@ class RelayServer {
   // ─── CDP Command Forwarding ─────────────────────────────────────────────
 
   async _forwardToTab(sessionId, method, params, id, clientId) {
+    // Resolved once, before any await. The lazy-attach path awaits
+    // _ensureDebuggerAttached(), and a client that disconnects during that await
+    // is already gone from clientById (see the 'close' handler), so a lookup
+    // after the await would drop the label off an in-flight command.
+    const agentName = this._agentNameFor(clientId);
+
     // Main session
     const target = this.targets.get(sessionId);
     if (target) {
@@ -1800,6 +1845,17 @@ class RelayServer {
         // excluded, mirroring the extension's passive-flag idle semantics).
         target.lastCommandAt = Date.now();
       }
+      const payload = {
+        tabId: target.tabId,
+        method,
+        params: params || {},
+      };
+      // Init storm (Playwright re-sends ~40 init commands per reconnect) must
+      // not reset the extension's per-tab idle clock, or auto-close never fires.
+      if (INIT_ONLY_METHODS.has(method)) payload.passive = true;
+      if (agentName) payload.agentName = agentName;
+      // Logged after the payload is built and derived FROM it, so cdp.jsonl is
+      // evidence about the forwarded command rather than about the connection.
       this._logCdp({
         direction: 'to-extension',
         clientId,
@@ -1809,16 +1865,9 @@ class RelayServer {
           params: params || {},
           sessionId,
           tabId: target.tabId,
+          ...(payload.agentName ? { agentName: payload.agentName } : {}),
         },
       });
-      const payload = {
-        tabId: target.tabId,
-        method,
-        params: params || {},
-      };
-      // Init storm (Playwright re-sends ~40 init commands per reconnect) must
-      // not reset the extension's per-tab idle clock, or auto-close never fires.
-      if (INIT_ONLY_METHODS.has(method)) payload.passive = true;
       return this._sendToExt('cdpCommand', payload);
     }
 
@@ -1850,6 +1899,13 @@ class RelayServer {
         this._seedAgentWindowAffinity(clientId, primaryTarget);
         primaryTarget.lastCommandAt = Date.now();
       }
+      const aliasPayload = {
+        tabId: primaryTarget.tabId,
+        method,
+        params: params || {},
+      };
+      if (INIT_ONLY_METHODS.has(method)) aliasPayload.passive = true;
+      if (agentName) aliasPayload.agentName = agentName;
       this._logCdp({
         direction: 'to-extension',
         clientId,
@@ -1860,14 +1916,9 @@ class RelayServer {
           sessionId,
           tabId: primaryTarget.tabId,
           aliasOf: aliasPrimarySessionId,
+          ...(aliasPayload.agentName ? { agentName: aliasPayload.agentName } : {}),
         },
       });
-      const aliasPayload = {
-        tabId: primaryTarget.tabId,
-        method,
-        params: params || {},
-      };
-      if (INIT_ONLY_METHODS.has(method)) aliasPayload.passive = true;
       return this._sendToExt('cdpCommand', aliasPayload);
     }
 
@@ -1885,6 +1936,14 @@ class RelayServer {
         this._seedAgentWindowAffinity(clientId, parentTarget);
         parentTarget.lastCommandAt = Date.now();
       }
+      const childPayload = {
+        tabId: child.tabId,
+        method,
+        params: params || {},
+        childSessionId: sessionId,
+      };
+      if (INIT_ONLY_METHODS.has(method)) childPayload.passive = true;
+      if (agentName) childPayload.agentName = agentName;
       this._logCdp({
         direction: 'to-extension',
         clientId,
@@ -1896,15 +1955,9 @@ class RelayServer {
           tabId: child.tabId,
           childSessionId: sessionId,
           parentSessionId,
+          ...(childPayload.agentName ? { agentName: childPayload.agentName } : {}),
         },
       });
-      const childPayload = {
-        tabId: child.tabId,
-        method,
-        params: params || {},
-        childSessionId: sessionId,
-      };
-      if (INIT_ONLY_METHODS.has(method)) childPayload.passive = true;
       return this._sendToExt('cdpCommand', childPayload);
     }
 
@@ -1934,7 +1987,10 @@ class RelayServer {
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
-module.exports = { RelayServer, DEFAULT_PORT, BF_DIR, TOKEN_FILE, CDP_URL_FILE };
+module.exports = {
+  RelayServer, DEFAULT_PORT, BF_DIR, TOKEN_FILE, CDP_URL_FILE,
+  sanitizeAgentName, AGENT_NAME_MAX_LENGTH,
+};
 
 // ─── CLI Entry ───────────────────────────────────────────────────────────────
 

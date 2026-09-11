@@ -27,10 +27,32 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   const CURSOR_Z_INDEX = 2147483647;
   const MINIMAL_HOTSPOT_X_PX = 0;
   const MINIMAL_HOTSPOT_Y_PX = 0;
+  const CHIP_ID = '__browserforce_ghost_cursor_label__';
+  const AGENT_ID = '__browserforce_ghost_cursor_agent__';
+  const CHIP_PREFIX_TEXT = 'BrowserForce \u00B7';
+  const CHIP_PREFIX_GAP_PX = 4;
+  const CHIP_OFFSET_X_PX = CURSOR_SIZE_PX - 4;
+  const CHIP_OFFSET_Y_PX = CURSOR_SIZE_PX + 2;
+  // Sized so the relay's 24-character limit survives intact instead of being
+  // ellipsized: 24 capital W at 500 11px is ~216px, the prefix ~84px, plus the
+  // gap and 12px of padding. The overflow/ellipsis below is a backstop for an
+  // exotic fallback face, not the normal path.
+  const CHIP_MAX_WIDTH_PX = 360;
+  const CHIP_PADDING = '2px 6px';
+  const CHIP_RADIUS_PX = 4;
+  const CHIP_FONT = '500 11px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  const CHIP_BACKGROUND = 'rgba(17, 17, 17, 0.9)';
+  const CHIP_SHADOW = '0 1px 3px rgba(0, 0, 0, 0.45)';
+  const CHIP_PREFIX_COLOR = 'rgba(255, 255, 255, 0.62)';
+  const CHIP_NAME_COLOR = '#ffffff';
 
   const runtime = {
     outerElement: null,
     innerElement: null,
+    labelElement: null,
+    labelTextElement: null,
+    labelText: '',
+    chromeOpacity: '1',
     x: 0,
     y: 0,
     hasPosition: false,
@@ -55,6 +77,123 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   function applyScale() {
     if (!runtime.innerElement) return;
     runtime.innerElement.style.transform = 'scale(' + runtime.scale + ')';
+  }
+
+  // Page CSS reaches these elements — they are bare divs and spans in the page's
+  // own DOM. 'all: initial' MUST be written first: in an inline style block a
+  // later longhand overrides the earlier shorthand, so the reverse order would
+  // wipe everything set before it. direction/unicode-bidi are not cosmetic —
+  // on a globally RTL page the agent name would otherwise render BEFORE the
+  // fixed BrowserForce prefix it is supposed to sit behind. pointer-events must
+  // be re-set on every element because 'all: initial' restores 'auto', and a
+  // pointer-events:auto child inside a pointer-events:none parent IS
+  // hit-testable and would swallow real clicks landing under the label.
+  //
+  // Limit: inline styles, this reset included, lose to a page rule carrying
+  // !important. The existing arrow (outer/inner) has the identical exposure, so
+  // the guarantee here is against accidental page CSS, not a hostile page.
+  function applyOverlayReset(element) {
+    element.style.all = 'initial';
+    element.style.boxSizing = 'border-box';
+    element.style.direction = 'ltr';
+    element.style.unicodeBidi = 'isolate';
+    element.style.whiteSpace = 'nowrap';
+    element.style.pointerEvents = 'none';
+  }
+
+  // Appended AFTER the arrow, so ensureCursorElement()'s reuse path can keep
+  // re-acquiring the arrow as outer.firstElementChild.
+  function createChipElement(outer) {
+    const chip = document.createElement('div');
+    chip.id = CHIP_ID;
+    applyOverlayReset(chip);
+    chip.style.position = 'absolute';
+    chip.style.display = 'block';
+    chip.style.left = CHIP_OFFSET_X_PX + 'px';
+    chip.style.top = CHIP_OFFSET_Y_PX + 'px';
+    chip.style.maxWidth = CHIP_MAX_WIDTH_PX + 'px';
+    chip.style.overflow = 'hidden';
+    chip.style.textOverflow = 'ellipsis';
+    chip.style.padding = CHIP_PADDING;
+    chip.style.borderRadius = CHIP_RADIUS_PX + 'px';
+    chip.style.background = CHIP_BACKGROUND;
+    chip.style.boxShadow = CHIP_SHADOW;
+    chip.style.font = CHIP_FONT;
+    chip.style.transitionProperty = 'opacity';
+    chip.style.opacity = runtime.chromeOpacity;
+
+    // The prefix is renderer-owned and always present. Agent-supplied text
+    // rendered alone over a logged-in page is a phishing primitive — a
+    // prompt-injected agent would label itself 'Chrome - confirm your password'.
+    const prefix = document.createElement('span');
+    applyOverlayReset(prefix);
+    prefix.style.display = 'inline';
+    prefix.style.font = CHIP_FONT;
+    prefix.style.color = CHIP_PREFIX_COLOR;
+    // A margin, not a trailing space: 'all: initial' resets white-space on the
+    // spans, so a trailing space is collapsible and could render 'BrowserForce
+    // \u00B7Claude'. A margin cannot collapse away.
+    prefix.style.marginRight = CHIP_PREFIX_GAP_PX + 'px';
+    prefix.textContent = CHIP_PREFIX_TEXT;
+
+    const name = document.createElement('span');
+    name.id = AGENT_ID;
+    applyOverlayReset(name);
+    name.style.display = 'inline';
+    name.style.font = CHIP_FONT;
+    name.style.color = CHIP_NAME_COLOR;
+
+    chip.appendChild(prefix);
+    chip.appendChild(name);
+    outer.appendChild(chip);
+    runtime.labelElement = chip;
+    runtime.labelTextElement = name;
+    return chip;
+  }
+
+  // Rebound from the live DOM rather than trusted from module state: the reuse
+  // path can hand back an outer element mounted by a build that had no chip.
+  function bindChipElements() {
+    runtime.labelElement = document.getElementById(CHIP_ID);
+    runtime.labelTextElement = document.getElementById(AGENT_ID);
+  }
+
+  // runtime.labelText is the source of truth and the DOM is its reflection.
+  // That is what lets a label survive a mount deferred to DOMContentLoaded, and
+  // what makes an upgrade over an already-mounted cursor pick up a chip.
+  function syncLabel() {
+    if (!runtime.labelText) {
+      if (runtime.labelElement) runtime.labelElement.remove();
+      runtime.labelElement = null;
+      runtime.labelTextElement = null;
+      return;
+    }
+    if (!runtime.outerElement) return;
+    if (!runtime.labelElement || !runtime.labelTextElement) {
+      if (runtime.labelElement) runtime.labelElement.remove();
+      createChipElement(runtime.outerElement);
+    }
+    runtime.labelTextElement.textContent = runtime.labelText;
+  }
+
+  function setLabelText(text) {
+    if (text === runtime.labelText) return;
+    runtime.labelText = text;
+    syncLabel();
+  }
+
+  // Every opacity write goes through here — an exempted write is how the arrow
+  // and the chip drift to different opacities. The press *scale* deliberately
+  // stays on the inner element alone: the chip must not grow with a click.
+  function setChromeOpacity(value, durationMs) {
+    runtime.chromeOpacity = value;
+    const elements = [runtime.innerElement, runtime.labelElement];
+    for (const element of elements) {
+      if (!element) continue;
+      element.style.transitionDuration = durationMs + 'ms';
+      element.style.transitionTimingFunction = PRESS_EASING;
+      element.style.opacity = value;
+    }
   }
 
   function createCursorElement() {
@@ -97,6 +236,8 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     if (existing) {
       runtime.outerElement = existing;
       runtime.innerElement = existing.firstElementChild || null;
+      bindChipElements();
+      syncLabel();
       return existing;
     }
 
@@ -108,6 +249,7 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
 
     const outer = createCursorElement();
     root.appendChild(outer);
+    syncLabel();
     return outer;
   }
 
@@ -124,9 +266,7 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
       idleHideTimer = null;
       if (!runtime.enabled || !runtime.innerElement) return;
       runtime.idleHidden = true;
-      runtime.innerElement.style.transitionDuration = IDLE_FADE_OUT_MS + 'ms';
-      runtime.innerElement.style.transitionTimingFunction = PRESS_EASING;
-      runtime.innerElement.style.opacity = '0';
+      setChromeOpacity('0', IDLE_FADE_OUT_MS);
     }, IDLE_HIDE_DELAY_MS);
   }
 
@@ -135,11 +275,7 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     runtime.y = action.y;
     runtime.hasPosition = false;
     runtime.idleHidden = false;
-    if (runtime.innerElement) {
-      runtime.innerElement.style.transitionDuration = PRESS_DURATION_MS + 'ms';
-      runtime.innerElement.style.transitionTimingFunction = PRESS_EASING;
-      runtime.innerElement.style.opacity = '1';
-    }
+    setChromeOpacity('1', PRESS_DURATION_MS);
   }
 
   function moveCursor(action) {
@@ -165,20 +301,14 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   function setPressed(isPressed) {
     if (!runtime.enabled || !runtime.innerElement) return;
     runtime.scale = isPressed ? 0.95 : 1;
-    runtime.innerElement.style.transitionDuration = PRESS_DURATION_MS + 'ms';
-    runtime.innerElement.style.transitionTimingFunction = PRESS_EASING;
-    runtime.innerElement.style.opacity = '1';
+    setChromeOpacity('1', PRESS_DURATION_MS);
     applyScale();
   }
 
   function enable() {
     runtime.enabled = true;
     ensureCursorElement();
-    if (runtime.innerElement) {
-      runtime.innerElement.style.opacity = '1';
-      runtime.innerElement.style.transitionDuration = PRESS_DURATION_MS + 'ms';
-      runtime.innerElement.style.transitionTimingFunction = PRESS_EASING;
-    }
+    setChromeOpacity('1', PRESS_DURATION_MS);
     runtime.idleHidden = false;
     applyTranslate();
     applyScale();
@@ -190,14 +320,21 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     runtime.hasPosition = false;
     runtime.idleHidden = false;
     runtime.scale = 1;
+    runtime.labelText = '';
+    runtime.chromeOpacity = '1';
     clearIdleHideTimer();
     if (runtime.outerElement) runtime.outerElement.remove();
     runtime.outerElement = null;
     runtime.innerElement = null;
+    runtime.labelElement = null;
+    runtime.labelTextElement = null;
   }
 
   function applyMouseAction(action) {
     if (!runtime.enabled) return;
+    // Whoever dispatched THIS event owns the chip, so an unlabelled client's
+    // event clears a chip a labelled client left behind.
+    setLabelText(action.label || '');
     if (runtime.idleHidden) wakeFromIdle(action);
 
     if (action.type === 'move' || action.type === 'wheel') {
@@ -224,14 +361,19 @@ export function buildGhostCursorSource(cursorImageUrl = '') {
   );
 }
 
-export function buildGhostCursorAction({ type, params } = {}) {
+export function buildGhostCursorAction({ type, params, agentName } = {}) {
   const actionType = ACTION_TYPES.get(type);
   const x = params?.x;
   const y = params?.y;
   if (!actionType || !Number.isFinite(x) || !Number.isFinite(y)) return null;
 
   const button = VALID_BUTTONS.has(params?.button) ? params.button : 'none';
-  return { type: actionType, x, y, button };
+  const action = { type: actionType, x, y, button };
+  // Omitted, never empty: an unnamed client's payload stays byte-identical to
+  // what it was before labels existed. No truncation and no character filtering
+  // here — the relay's sanitizeAgentName is the single authority for that.
+  if (typeof agentName === 'string' && agentName) action.label = agentName;
+  return action;
 }
 
 export function buildGhostCursorActionExpression(action) {
@@ -400,11 +542,12 @@ export function handleGhostCursorInput({
   childSessionId,
   tabId,
   params,
+  agentName,
   controller,
   log,
 }) {
   if (childSessionId || method !== 'Input.dispatchMouseEvent') return false;
-  const action = buildGhostCursorAction({ type: params?.type, params });
+  const action = buildGhostCursorAction({ type: params?.type, params, agentName });
   if (!action) return false;
 
   try {

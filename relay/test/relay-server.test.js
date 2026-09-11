@@ -4201,3 +4201,201 @@ describe('synthetic target ids are unique per registration', () => {
     }
   });
 });
+
+// ─── Ghost cursor agent name ─────────────────────────────────────────────────
+
+describe('agent name sanitizer', () => {
+  const { sanitizeAgentName, AGENT_NAME_MAX_LENGTH } = require('../src/index.js');
+
+  it('passes an allowed name through unchanged', () => {
+    assert.equal(sanitizeAgentName('Claude Opus 5'), 'Claude Opus 5');
+    assert.equal(sanitizeAgentName('codex-cli_2.v1'), 'codex-cli_2.v1');
+  });
+
+  it('truncates at the documented limit', () => {
+    assert.equal(AGENT_NAME_MAX_LENGTH, 24);
+    assert.equal(sanitizeAgentName('W'.repeat(60)).length, AGENT_NAME_MAX_LENGTH);
+  });
+
+  it('strips bidi and control characters rather than rejecting the name', () => {
+    // U+202E visually reverses what follows and would let a name reorder the
+    // fixed "BrowserForce" prefix it is supposed to sit behind.
+    assert.equal(sanitizeAgentName('Cla\u202Eude'), 'Claude');
+    assert.equal(sanitizeAgentName('Claude'), 'Claude');
+  });
+
+  it('strips characters outside the allowlist', () => {
+    assert.equal(sanitizeAgentName('Claude \u{1F916} <b>'), 'Claude b');
+  });
+
+  it('collapses whitespace runs and trims', () => {
+    assert.equal(sanitizeAgentName('  Claude   Opus  '), 'Claude Opus');
+  });
+
+  it('returns null when nothing survives, so no chip is rendered', () => {
+    assert.equal(sanitizeAgentName('\u{1F916}\u{1F916}'), null);
+    assert.equal(sanitizeAgentName('   '), null);
+    assert.equal(sanitizeAgentName(''), null);
+  });
+
+  it('returns null for a non-string', () => {
+    assert.equal(sanitizeAgentName(undefined), null);
+    assert.equal(sanitizeAgentName(42), null);
+    assert.equal(sanitizeAgentName(null), null);
+  });
+});
+
+describe('agent name on forwarded cdpCommand', () => {
+  let relay;
+  let port;
+  let ext;
+  let forwarded;
+  let attachDelayMs;
+
+  beforeEach(async () => {
+    attachDelayMs = 0;
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    await sleep(150);
+
+    forwarded = [];
+    ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id === undefined) return;
+      if (msg.method === 'getRestrictions') {
+        ext.send(JSON.stringify({
+          id: msg.id,
+          result: { mode: 'auto', noNewTabs: false, lockUrl: false, readOnly: false, instructions: '' },
+        }));
+        return;
+      }
+      if (msg.method === 'cdpCommand') forwarded.push(msg.params);
+      const reply = () => ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      // A slow attachTab is what holds _forwardToTab open across the client's
+      // disconnect; without it the await resolves before the close handler runs
+      // and the in-flight case below never happens.
+      if (msg.method === 'attachTab' && attachDelayMs) setTimeout(reply, attachDelayMs);
+      else reply();
+    });
+    await sleep(100);
+
+    // Primary page target, already attached so commands forward immediately.
+    relay.targets.set('bf-session-1', {
+      targetId: 'TARGET-PRIMARY', tabId: 4242, debuggerAttached: true, url: 'https://example.com',
+    });
+    relay.tabToSession.set(4242, 'bf-session-1');
+  });
+
+  afterEach(() => {
+    ext.close();
+    relay.stop();
+  });
+
+  const connectAgent = (agentName) => connectWs(
+    `ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`
+    + (agentName ? `&agentName=${encodeURIComponent(agentName)}` : ''),
+  );
+
+  const mouseMove = (sessionId, id = 1) => ({
+    id, method: 'Input.dispatchMouseEvent', params: { type: 'mouseMoved', x: 1, y: 2 }, sessionId,
+  });
+
+  it('tags a labelled client command on the primary session', async () => {
+    const cdp = await connectAgent('Claude');
+    try {
+      await sendAndReceive(cdp, mouseMove('bf-session-1'));
+      assert.equal(forwarded.at(-1).agentName, 'Claude');
+    } finally { cdp.close(); }
+  });
+
+  it('omits the key entirely for an unlabelled client', async () => {
+    const cdp = await connectAgent(null);
+    try {
+      await sendAndReceive(cdp, mouseMove('bf-session-1'));
+      assert.equal('agentName' in forwarded.at(-1), false);
+    } finally { cdp.close(); }
+  });
+
+  it('applies the relay sanitizer to a hand-crafted query param', async () => {
+    const cdp = await connectAgent('W'.repeat(60));
+    try {
+      await sendAndReceive(cdp, mouseMove('bf-session-1'));
+      assert.equal(forwarded.at(-1).agentName, 'W'.repeat(24));
+    } finally { cdp.close(); }
+  });
+
+  it('tags commands routed through an alias session (newCDPSession)', async () => {
+    const cdp = await connectAgent('Claude');
+    try {
+      const rb = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToBrowserTarget' });
+      const ra = await sendAndReceive(cdp, {
+        id: 2,
+        method: 'Target.attachToTarget',
+        params: { targetId: 'TARGET-PRIMARY', flatten: true },
+        sessionId: rb.result.sessionId,
+      });
+      await sendAndReceive(cdp, mouseMove(ra.result.sessionId, 3));
+      assert.equal(forwarded.at(-1).agentName, 'Claude');
+    } finally { cdp.close(); }
+  });
+
+  it('omits the key on an alias session for an unlabelled client', async () => {
+    const cdp = await connectAgent(null);
+    try {
+      const rb = await sendAndReceive(cdp, { id: 1, method: 'Target.attachToBrowserTarget' });
+      const ra = await sendAndReceive(cdp, {
+        id: 2,
+        method: 'Target.attachToTarget',
+        params: { targetId: 'TARGET-PRIMARY', flatten: true },
+        sessionId: rb.result.sessionId,
+      });
+      await sendAndReceive(cdp, mouseMove(ra.result.sessionId, 3));
+      assert.equal('agentName' in forwarded.at(-1), false);
+    } finally { cdp.close(); }
+  });
+
+  it('tags commands routed through a child session (OOPIF)', async () => {
+    const cdp = await connectAgent('Codex');
+    relay.childSessions.set('bf-child-1', { tabId: 4242, childSessionId: 'CDP-CHILD' });
+    try {
+      await sendAndReceive(cdp, mouseMove('bf-child-1'));
+      assert.equal(forwarded.at(-1).agentName, 'Codex');
+    } finally { cdp.close(); }
+  });
+
+  it('records the forwarded name in the CDP traffic log', async () => {
+    const entries = [];
+    relay.cdpLogger = { log: (entry) => entries.push(entry) };
+    const cdp = await connectAgent('Claude');
+    try {
+      await sendAndReceive(cdp, mouseMove('bf-session-1'));
+      const toExt = entries.filter((entry) => entry.direction === 'to-extension');
+      assert.equal(toExt.at(-1).message.agentName, 'Claude');
+    } finally { cdp.close(); }
+  });
+
+  it('keeps the label on a command still in flight when its client disconnects', async () => {
+    // Lazy attach awaits the extension, and the close handler erases the client
+    // from clientById. A lookup after that await would drop the label.
+    relay.targets.set('bf-session-2', {
+      targetId: 'TARGET-LAZY', tabId: 4343, debuggerAttached: false, url: 'https://example.com',
+    });
+    relay.tabToSession.set(4343, 'bf-session-2');
+
+    attachDelayMs = 250;
+    const cdp = await connectAgent('Claude');
+    cdp.send(JSON.stringify(mouseMove('bf-session-2')));
+    await sleep(40);
+    cdp.close();
+    await sleep(600);
+
+    const mouse = forwarded.filter((payload) => payload.method === 'Input.dispatchMouseEvent');
+    assert.equal(mouse.length, 1, 'the in-flight command must still reach the extension');
+    assert.equal(mouse[0].agentName, 'Claude');
+  });
+});
