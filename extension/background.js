@@ -700,7 +700,7 @@ function buildRestrictionError(action, reason, settings, { lockedUrl } = {}) {
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
 
-async function cdpCommand({ tabId, method, params, childSessionId }) {
+async function cdpCommand({ tabId, method, params, childSessionId, agentName }) {
   // Check restrictions before forwarding
   const blocked = await checkRestriction(method, params, tabId);
   if (blocked) throw new Error(blocked);
@@ -727,6 +727,7 @@ async function cdpCommand({ tabId, method, params, childSessionId }) {
       childSessionId,
       tabId,
       params,
+      agentName,
       controller: ghostCursorController,
       log: (error) => console.warn('[bf] Ghost cursor input error:', error?.message || error),
     });

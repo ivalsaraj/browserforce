@@ -32,7 +32,7 @@ import {
   HELP_SECTION_NAMES,
 } from './help-docs.js';
 import { installProcessCrashGuard } from './process-crash-guard.js';
-import { withClientLabel } from './client-label.js';
+import { agentCdpUrl } from './client-label.js';
 
 // ─── Browser Session Runtime ─────────────────────────────────────────────────
 // Browser connection, persistent userState, idle-disconnect lifecycle, console
@@ -64,7 +64,7 @@ const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
 // that is not proof an attached page exists.
 async function connectBrowserOverRelay() {
   await ensureRelay();
-  const cdpUrl = withClientLabel(await getCdpUrl());
+  const cdpUrl = agentCdpUrl(await getCdpUrl());
   const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
   return connectOverCdpWithBusyRetry({
     connect: (url) => chromium.connectOverCDP(url),

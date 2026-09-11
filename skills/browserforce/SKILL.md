@@ -42,6 +42,26 @@ browserforce -e "<code>"         # Raw Playwright JavaScript (one-shot escape ha
 
 Use `-e` only when the command layer cannot express the task.
 
+## Put your name on the cursor
+
+If the user has the ghost cursor on, the cursor shows which agent is driving —
+but only if you say who you are. Export this before running any command:
+
+```bash
+export BROWSERFORCE_AGENT_NAME="Claude"
+```
+
+Max **24 characters**, allowed: `A-Z a-z 0-9 space . _ -`. Anything else is
+stripped (not rejected), whitespace runs collapse, longer names are truncated,
+and a name that sanitizes to nothing shows no label at all. Pick a name that
+survives intact.
+
+Sharing the machine with other agents? Also export a distinct
+`BF_SESSIOND_LOCK_PATH=/tmp/bf-<your-name>.json`. One session daemon serves every
+CLI caller over a single connection and takes its name from whichever
+environment started it, so without your own daemon your clicks are attributed to
+the first agent's name.
+
 ## Core Workflow: Observe → Act → Observe
 
 ```bash

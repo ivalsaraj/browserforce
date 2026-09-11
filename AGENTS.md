@@ -72,7 +72,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 | `detachTab` | `{ tabId }` | Detach debugger |
 | `createTab` | `{ url, sessionId, windowId?, ownerKey? }` | Create and attach new tab (`windowId` pins the agent's window; `ownerKey` records the owning agent) |
 | `closeTab` | `{ tabId, ownerKey? }` | Close tab (refused when `ownerKey` names a different agent than the tab's owner) |
-| `cdpCommand` | `{ tabId, method, params, childSessionId? }` | Forward CDP command |
+| `cdpCommand` | `{ tabId, method, params, childSessionId?, passive?, agentName? }` | Forward CDP command (`passive` excludes init-storm commands from the idle clock; `agentName` is the display-only name of the driving agent, present only when that client named itself) |
 | `ping` | — | Keepalive (every 5s) |
 
 **Extension → Relay (events):**
@@ -256,6 +256,45 @@ unsupported input, and failed browser commands cannot affect the cursor. Disable
 must complete the renderer teardown and registered-script removal before normal
 debugger detach; post-detach cleanup only invalidates queued work and must not send
 new debugger commands.
+
+**Agent label.** A client that connects with `?agentName=` (from
+`BROWSERFORCE_AGENT_NAME`, via `agentCdpUrl()` in `mcp/src/client-label.js`) gets
+its name rendered in a chip attached to the cursor, so a user running several
+agents can see which one is moving. The path is
+connect → `sanitizeAgentName()` → `clientMeta.agentName` → `payload.agentName` on
+the forwarded `cdpCommand` → `buildGhostCursorAction`'s `label` → the in-page
+chip's `textContent`.
+
+- **One authority for the name.** `sanitizeAgentName()` in `relay/src/index.js`
+  is the only place `AGENT_NAME_MAX_LENGTH` (24) and the
+  `A-Z a-z 0-9 space . _ -` allowlist are applied. Nothing downstream re-runs
+  either; truncating twice with two constants is how a documented limit
+  silently becomes something else. It sanitizes and never rejects — a cosmetic
+  label must not fail a click.
+- **Absent means absent.** `agentName` and the action's `label` are **omitted**,
+  never emitted empty, so an unnamed client's wire payload and page DOM are
+  byte-identical to what they were before labels existed.
+- **Resolved before the await.** `_forwardToTab()` calls `_agentNameFor()` once,
+  on its first line: the lazy-attach path awaits the extension, and a client
+  that disconnects during that await is already gone from `clientById`.
+- **The BrowserForce prefix is renderer-owned and not optional.** Agent-supplied
+  text rendered alone over a logged-in page is a phishing primitive; a
+  prompt-injected agent would label itself `Chrome - confirm your password`.
+  Never render the agent string as the whole chip.
+- **Isolation limit.** The chip's `all: initial` inline reset defends against
+  accidental page CSS (broad `div`/`span` rules, global RTL, inherited fonts),
+  not against a page using `!important`. The existing arrow has the identical
+  exposure, so hardening the chip alone would buy nothing.
+- **Attribution is per CDP connection, not per CLI call.** MCP (one connection
+  per process) and one-shot `bin.js` label correctly. `cli/sessiond.js` holds one
+  shared long-lived connection and takes its name from whichever environment
+  started it, so a second agent served by that daemon is labelled with the
+  daemon's name. The fix is a distinct `BF_SESSIOND_LOCK_PATH` per agent.
+- **Downgrade procedure.** The reuse-by-id path in a *pre-label* build never
+  removes children it does not recognise, so rolling back while a chip is
+  mounted leaves a frozen chip naming an agent that is no longer driving. Turn
+  the ghost cursor off in the popup before downgrading (disable removes the
+  whole outer element), or reload the affected tabs.
 
 ### Test Isolation: writeCdpUrl Flag
 
@@ -450,7 +489,12 @@ rewrites JS (`getByRole('button')` became `getByRole(button)` →
 
 - No new dependencies for client arbitration or standby behavior.
 - Tab ownership is metadata-only: agent-created tabs record an owning agent key, and an explicit `closeTab` from a different agent is refused. It is NOT a capability fence — every CDP client can still navigate any target, and auto-close remains per-tab idle time rather than per owner.
-- No extension protocol changes beyond the `ownerKey` field on `createTab`/`closeTab`.
+- No extension protocol changes beyond the `ownerKey` field on
+  `createTab`/`closeTab` and **optional, additive, display-only fields on
+  `cdpCommand`** that an older extension ignores (`passive`, `agentName`). No new
+  message types, no required fields, no structural change — that is what this
+  non-goal protects. A field that an old extension can ignore and a new
+  extension simply never receives from an old relay is not a protocol break.
 
 ## Development Workflow
 

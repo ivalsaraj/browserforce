@@ -43,7 +43,7 @@ import {
   executeBrowserforceVerb,
   BrowserforceCommandError,
 } from '../mcp/src/browserforce-command-registry.js';
-import { withClientLabel } from '../mcp/src/client-label.js';
+import { agentCdpUrl } from '../mcp/src/client-label.js';
 import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
 import { installProcessCrashGuard } from '../mcp/src/process-crash-guard.js';
 
@@ -64,7 +64,7 @@ const DEFAULT_IDLE_MS = 5 * 60 * 1000;
  * next created tab could land in the user's own window.
  */
 export async function buildRealCdpUrl() {
-  return withClientLabel(await getCdpUrl());
+  return agentCdpUrl(await getCdpUrl());
 }
 
 async function connectRealBrowser() {
