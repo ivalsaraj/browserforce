@@ -34,10 +34,11 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   const CHIP_OFFSET_X_PX = CURSOR_SIZE_PX - 4;
   const CHIP_OFFSET_Y_PX = CURSOR_SIZE_PX + 2;
   // Sized so the relay's 24-character limit survives intact instead of being
-  // ellipsized: 24 capital W at 500 11px is ~216px, the prefix ~84px, plus the
-  // gap and 12px of padding. The overflow/ellipsis below is a backstop for an
-  // exotic fallback face, not the normal path.
-  const CHIP_MAX_WIDTH_PX = 360;
+  // ellipsized. Measured in Chrome, not estimated: the worst allowed name
+  // ('W' x 24) renders a 357px chip at this font, so the cap clears it with
+  // room for a wider fallback face. The overflow/ellipsis below is a backstop
+  // for a face wider still, not the normal path.
+  const CHIP_MAX_WIDTH_PX = 400;
   const CHIP_PADDING = '2px 6px';
   const CHIP_RADIUS_PX = 4;
   const CHIP_FONT = '500 11px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';

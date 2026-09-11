@@ -294,7 +294,7 @@ CHIP_PREFIX_TEXT   = 'BrowserForce ·'
 CHIP_PREFIX_GAP_PX = 4
 CHIP_OFFSET_X_PX   = CURSOR_SIZE_PX - 4
 CHIP_OFFSET_Y_PX   = CURSOR_SIZE_PX + 2
-CHIP_MAX_WIDTH_PX  = 360   // see width arithmetic below
+CHIP_MAX_WIDTH_PX  = 400   // measured worst case, see below
 CHIP_PADDING       = '2px 6px'
 CHIP_RADIUS_PX     = 4
 CHIP_FONT          = '500 11px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
@@ -311,10 +311,12 @@ exactly two inline spans: a renderer-owned prefix whose `textContent` is exactly
 `textContent`, never `innerHTML`.
 
 **`CHIP_MAX_WIDTH_PX` is sized so the documented 24-character limit survives
-intact**, rather than being a round number the limit can exceed. Worst case at
-`500 11px` in the system stack: 24 capital `W`s ≈ 9px each ≈ 216px, plus the
-`BrowserForce ·` prefix ≈ 84px, plus `CHIP_PREFIX_GAP_PX`, plus 12px horizontal
-padding ≈ 316px. 360px clears that with margin for a wider fallback face. The
+intact**, rather than being a round number the limit can exceed. The figure is
+measured in Chrome, not estimated: the estimate used while drafting (~316px) was
+low, and the first cap chosen from it (360px) cleared the real worst case by only
+3px. Measured on a clean page at `500 11px`: 24 capital W renders a **357px**
+chip, 24 lowercase m 333px, `Claude Opus 5` 175px. 400px clears the worst case
+with room for a wider fallback face. The
 `overflow: hidden` + `text-overflow: ellipsis` below is therefore a backstop for
 an exotic fallback font, not the normal path — an agent that respects the
 documented limit never sees its name clipped. Because the name span is last, a
