@@ -4399,3 +4399,261 @@ describe('agent name on forwarded cdpCommand', () => {
     assert.equal(mouse[0].agentName, 'Claude');
   });
 });
+
+// ─── Orphaned Debugger Pauses ────────────────────────────────────────────────
+
+describe('orphaned paused child targets', () => {
+  const GRACE_MS = 60;
+  const TAB_ID = 4343;
+  const CHILD = 'CHILD-SESSION-1';
+  let relay;
+  let port;
+  let ext;
+  let forwarded;
+  let failResumes;
+  let attachDelayMs;
+  let failAttach;
+
+  beforeEach(async () => {
+    failResumes = 0;
+    attachDelayMs = 0;
+    failAttach = false;
+    port = getRandomPort();
+    relay = new RelayServer(port);
+    relay.orphanPauseGraceMs = GRACE_MS;
+    relay.start({ writeCdpUrl: false });
+    await sleep(150);
+
+    forwarded = [];
+    ext = await connectWs(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://test' },
+    });
+    ext.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+      if (msg.id === undefined) return;
+      if (msg.method === 'cdpCommand') {
+        forwarded.push(msg.params);
+        if (msg.params.method === 'Runtime.runIfWaitingForDebugger' && failResumes > 0) {
+          failResumes -= 1;
+          ext.send(JSON.stringify({ id: msg.id, error: 'No target with given id found' }));
+          return;
+        }
+      }
+      if (msg.method === 'attachTab' && failAttach) {
+        ext.send(JSON.stringify({ id: msg.id, error: 'Cannot attach to this target' }));
+        return;
+      }
+      const reply = () => ext.send(JSON.stringify({ id: msg.id, result: {} }));
+      if (msg.method === 'attachTab' && attachDelayMs) setTimeout(reply, attachDelayMs);
+      else reply();
+    });
+    await sleep(100);
+
+    relay.targets.set('bf-session-1', {
+      targetId: 'TARGET-PRIMARY', tabId: TAB_ID, debuggerAttached: true, url: 'https://example.com',
+    });
+    relay.tabToSession.set(TAB_ID, 'bf-session-1');
+  });
+
+  afterEach(() => {
+    ext.close();
+    relay.stop();
+  });
+
+  const connectAgent = () => connectWs(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`);
+
+  const emitEvent = (method, params, tabId = TAB_ID) => {
+    ext.send(JSON.stringify({ method: 'cdpEvent', params: { tabId, method, params } }));
+  };
+
+  const emitPausedChild = (tabId = TAB_ID, sessionId = CHILD) => emitEvent('Target.attachedToTarget', {
+    sessionId,
+    targetInfo: { targetId: `T-${sessionId}`, type: 'service_worker', url: 'https://example.com/sw.js' },
+    waitingForDebugger: true,
+  }, tabId);
+
+  const resumes = () => forwarded.filter((p) => p.method === 'Runtime.runIfWaitingForDebugger');
+
+  /** Send a client command and wait for ITS response (broadcast events interleave). */
+  const request = (ws, msg) => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`no response to ${msg.method}`)), 3000);
+    const onMessage = (data) => {
+      const reply = JSON.parse(data.toString());
+      if (reply.id !== msg.id) return;
+      clearTimeout(timeout);
+      ws.off('message', onMessage);
+      resolve(reply);
+    };
+    ws.on('message', onMessage);
+    ws.send(JSON.stringify(msg));
+  });
+
+  const closeAndWait = async (ws) => {
+    ws.close();
+    await waitForCondition(() => relay.clients.size === 0 || ![...relay.clients].includes(ws), {
+      description: 'client close',
+    });
+    await sleep(30);
+  };
+
+  it('resumes a waiting child immediately, passively, when no client is connected', async () => {
+    emitPausedChild();
+    const [resume] = await waitForCondition(() => (resumes().length ? resumes() : null), {
+      description: 'relay resume',
+    });
+    assert.equal(resume.childSessionId, CHILD);
+    assert.equal(resume.tabId, TAB_ID);
+    assert.equal(resume.passive, true);
+    assert.equal('agentName' in resume, false);
+  });
+
+  it('does not resume a child that is not waiting for the debugger', async () => {
+    emitEvent('Target.attachedToTarget', { sessionId: CHILD, targetInfo: { type: 'iframe' }, waitingForDebugger: false });
+    await sleep(GRACE_MS * 3);
+    assert.equal(resumes().length, 0);
+  });
+
+  it('leaves the resume to a connected client that sends it', async () => {
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild();
+      await sleep(10);
+      await request(cdp, { id: 1, method: 'Runtime.runIfWaitingForDebugger', sessionId: CHILD });
+      await sleep(GRACE_MS * 3);
+      assert.equal(resumes().length, 1, 'only the client resume is forwarded');
+      assert.equal(relay.pausedChildren.size, 0);
+    } finally { cdp.close(); }
+  });
+
+  it('resumes after the grace period when a connected client never touches the child', async () => {
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild();
+      await sleep(GRACE_MS / 3);
+      assert.equal(resumes().length, 0, 'never ahead of a connected client');
+      await waitForCondition(() => resumes().length === 1, { description: 'grace resume' });
+    } finally { cdp.close(); }
+  });
+
+  it('never cuts off a client that is still initialising the child', async () => {
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild();
+      await sleep(10);
+      await request(cdp, { id: 1, method: 'Runtime.enable', sessionId: CHILD });
+      await sleep(GRACE_MS * 4);
+      assert.equal(resumes().length, 0);
+    } finally { cdp.close(); }
+  });
+
+  it('counts a client as engaged before a slow lazy attach of the parent tab', async () => {
+    // Relay-restart shape: Chrome still has the tab attached and reports a
+    // paused child, but the relay has not attached it yet.
+    relay.targets.get('bf-session-1').debuggerAttached = false;
+    attachDelayMs = GRACE_MS * 4;
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild();
+      await waitForCondition(() => relay.childSessions.has(CHILD), { description: 'child tracked' });
+      await request(cdp, { id: 1, method: 'Runtime.enable', sessionId: CHILD });
+      await sleep(GRACE_MS * 2);
+      assert.equal(resumes().length, 0);
+    } finally { cdp.close(); }
+  });
+
+  it('takes the resume back when the lazy parent attach fails', async () => {
+    relay.targets.get('bf-session-1').debuggerAttached = false;
+    failAttach = true;
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild();
+      await waitForCondition(() => relay.childSessions.has(CHILD), { description: 'child tracked' });
+      const reply = await request(cdp, { id: 1, method: 'Runtime.enable', sessionId: CHILD });
+      assert.ok(reply.error, 'the client sees the attach failure');
+      await waitForCondition(() => resumes().length === 1, { description: 'grace resume after failed attach' });
+    } finally { cdp.close(); }
+  });
+
+  it('resumes at once when the engaged client leaves while an unaware client stays', async () => {
+    const engaged = await connectAgent();
+    const bystander = await connectAgent();
+    try {
+      emitPausedChild();
+      await sleep(10);
+      await request(engaged, { id: 1, method: 'Runtime.enable', sessionId: CHILD });
+      await closeAndWait(engaged);
+      await waitForCondition(() => resumes().length === 1, { timeoutMs: GRACE_MS / 2, description: 'immediate resume' });
+    } finally { bystander.close(); }
+  });
+
+  it('resumes pending children at once when the last client disconnects', async () => {
+    relay.orphanPauseGraceMs = 60_000;
+    const cdp = await connectAgent();
+    emitPausedChild();
+    await waitForCondition(() => relay.pausedChildren.size === 1, { description: 'tracked child' });
+    await closeAndWait(cdp);
+    await waitForCondition(() => resumes().length === 1, { description: 'last-close resume' });
+  });
+
+  it('cancels a pending resume when the child detaches', async () => {
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild();
+      await sleep(10);
+      emitEvent('Target.detachedFromTarget', { sessionId: CHILD });
+      await sleep(GRACE_MS * 3);
+      assert.equal(resumes().length, 0);
+    } finally { cdp.close(); }
+  });
+
+  it('resumes children of a tab the relay has not discovered', async () => {
+    emitPausedChild(9999, 'CHILD-UNKNOWN-TAB');
+    await waitForCondition(() => resumes().some((p) => p.tabId === 9999 && p.childSessionId === 'CHILD-UNKNOWN-TAB'), {
+      description: 'resume on undiscovered tab',
+    });
+  });
+
+  it('clears pending children when an undiscovered tab detaches', async () => {
+    const cdp = await connectAgent();
+    try {
+      emitPausedChild(9999, 'CHILD-UNKNOWN-TAB');
+      await waitForCondition(() => relay.pausedChildren.size === 1, { description: 'tracked child' });
+      ext.send(JSON.stringify({ method: 'tabDetached', params: { tabId: 9999, reason: 'target_closed' } }));
+      await sleep(GRACE_MS * 3);
+      assert.equal(resumes().length, 0);
+      assert.equal(relay.pausedChildren.size, 0);
+    } finally { cdp.close(); }
+  });
+
+  it('takes the resume back when a client resume fails', async () => {
+    const cdp = await connectAgent();
+    try {
+      failResumes = 1;
+      emitPausedChild();
+      await sleep(10);
+      const reply = await request(cdp, { id: 1, method: 'Runtime.runIfWaitingForDebugger', sessionId: CHILD });
+      assert.ok(reply.error, 'the client still sees its own failure');
+      await waitForCondition(() => resumes().length === 2, { description: 'relay retry after failed client resume' });
+    } finally { cdp.close(); }
+  });
+
+  it('retries a failed relay resume and gives up after three attempts', async () => {
+    failResumes = 10;
+    emitPausedChild();
+    await waitForCondition(() => resumes().length === 3, { description: 'three attempts' });
+    await sleep(GRACE_MS * 3);
+    assert.equal(resumes().length, 3);
+    assert.equal(relay.pausedChildren.size, 0);
+    // Still serving after the failures.
+    const res = await httpGet(`http://127.0.0.1:${port}/`);
+    assert.equal(res.status, 200);
+  });
+
+  it('ignores an attach event without a usable child session id', async () => {
+    emitEvent('Target.attachedToTarget', { sessionId: '', waitingForDebugger: true });
+    emitEvent('Target.attachedToTarget', { sessionId: 7, waitingForDebugger: true });
+    await sleep(GRACE_MS * 3);
+    assert.equal(resumes().length, 0);
+  });
+});

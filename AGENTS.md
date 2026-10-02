@@ -245,6 +245,52 @@ Auto-close/auto-detach state must survive MV3 service worker restarts and Playwr
 - **Alarm-driven sweep**: the `bf-reconnect` alarm also runs `checkInactiveTabs()` — `setInterval` dies with the SW; alarms don't.
 - **Observability**: `GET /attached-tabs` exposes `lastCommandAt`/`idleMs` per tab (real, non-init activity as seen by the relay).
 
+### Orphaned Debugger Pauses
+
+**Symptom:** a tab an agent has driven hangs blank on reload until the user
+clicks Cancel on Chrome's debugging infobar. It hits every surface: MCP after
+its 15s idle disconnect, one-shot CLI/skill runs, and a stopped relay.
+
+**Cause:** Playwright's page-level `Target.setAutoAttach` carries
+`waitForDebuggerOnStart: true`. It is in `INIT_ONLY_METHODS`, so it reaches
+Chrome for real once the tab is attached (every reconnect's init storm).
+Chrome then pauses every new child target (OOPIF, worker, service worker)
+until a debugger sends `Runtime.runIfWaitingForDebugger`. The debugger stays
+attached after the agent leaves, so nobody resumes it: a paused service worker
+blocks the navigation request. Cancel works because a full detach drops the
+setting.
+
+**Fix:**
+
+- The relay resumes a paused child (`_trackPausedChild`, `relay/src/index.js`)
+  in three cases:
+  - immediately when no `/cdp` client is open;
+  - immediately when the client that touched the child disconnects;
+  - after `ORPHAN_PAUSE_GRACE_MS` (2s) when connected clients never touch it.
+  Any command a client sends on the child cancels the timer: Playwright
+  installs init scripts before resuming, so the relay must never resume ahead
+  of an aware client.
+- Resumes are `passive: true`, retried up to `ORPHAN_RESUME_MAX_ATTEMPTS`, and
+  tracked before the unknown-tab return, so they still work after a relay
+  restart.
+- The extension handles what the relay cannot see.
+  `extension/orphan-pause-policy.js` resolves pauses locally when the relay
+  socket is down or the tab has no `attachedTabs` entry. Losing the live relay
+  socket resumes every known child session; resuming a running target is a
+  no-op.
+- Playwright releases service workers by `Target.detachFromTarget`, not a
+  resume. The relay forgets the child on `Target.detachedFromTarget`.
+
+**Wrong fixes:**
+
+- Do not send `Target.setAutoAttach { autoAttach: false }` on disconnect. It
+  mutates shared Chrome state that other connected clients rely on, detaches
+  OOPIF sessions, and misses connected-but-unaware clients.
+- Do not gate the resume on "any client connected". Ownership is per client.
+
+**Known gap:** `Fetch` interception left behind by `page.route` after its owner
+disconnects is not handled yet.
+
 ### Ghost Cursor
 
 The optional ghost cursor is controlled by the local-storage key
@@ -540,6 +586,7 @@ When reviewing changes to this project:
 | `mcp/src/tab-identity.js` | ~75 | Pure page↔relay-target pairing — the rule handles and names are keyed by |
 | `mcp/src/readiness.js` | ~45 | Pure four-state readiness classifier shared by the CLI assertion and the MCP preflight |
 | `extension/tab-update-policy.js` | ~30 | Pure predicates for what the extension reports to the relay about tab lifecycle |
+| `extension/orphan-pause-policy.js` | ~40 | Pure mapping from a debugger pause event to the reply that releases it (used when the relay cannot see the event) |
 
 ## Agent Roles
 

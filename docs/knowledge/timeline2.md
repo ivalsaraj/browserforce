@@ -1,5 +1,23 @@
 # Timeline 2
 
+## 2026-10-02 — Release orphaned debugger pauses
+
+- Fixed agent-driven tabs hanging on reload until the debugging infobar was
+  cancelled. Playwright's `waitForDebuggerOnStart` auto-attach stays live in
+  Chrome after the agent disconnects, and new child targets (service workers,
+  OOPIFs, workers) waited forever for a resume.
+- The relay now resumes a paused child:
+  - at once when no client is connected;
+  - at once when the client that engaged the child leaves;
+  - after a 2s grace when connected clients never touch it.
+  Retries are bounded, and resumes are passive.
+- The extension resolves pauses itself when the relay socket is down or the
+  tab entry is missing, and resumes all child sessions when the live relay
+  socket closes.
+- Deferred: request interception (`Fetch`) left behind by `page.route` owners.
+  Plan review showed it needs per-debuggee ownership and serialization; it is
+  tracked separately.
+
 ## 2026-09-09 — Agent discoverability and durable tab identity
 
 - Rewrote the skill description and the three MCP tool descriptions to claim

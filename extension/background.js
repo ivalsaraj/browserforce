@@ -4,6 +4,7 @@ import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-default
 import { hydrateAgentTabs, hydrateActivity, canCloseTab } from './auto-manage-state.js';
 import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
 import { shouldReportTabUpdate, shouldReportTabRemoval } from './tab-update-policy.js';
+import { resolveOrphanedPause, isNonEmptyString } from './orphan-pause-policy.js';
 
 // BrowserForce — MV3 Service Worker
 // Bridges relay server commands to chrome.debugger API on real browser tabs.
@@ -228,8 +229,10 @@ function connect(relayUrl) {
 
     socket.addEventListener('close', () => {
       clearTimeout(timeout);
+      const wasActiveRelay = ws === socket;
       ws = null;
       connectionState = 'disconnected';
+      if (wasActiveRelay) resumeAllChildSessions();
       // The WS was open and got closed (or the upgrade failed). Don't
       // immediately reclaim — another extension may own the slot, or the
       // relay may be in the middle of a slot handoff. The maintain loop
@@ -740,17 +743,23 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
 // ─── Debugger Event Listeners ────────────────────────────────────────────────
 
 function onDebuggerEvent(source, method, params) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-  const entry = attachedTabs.get(source.tabId);
-  if (!entry) return;
-
-  // Track child sessions (for iframes / OOPIFs)
-  if (method === 'Target.attachedToTarget' && params?.sessionId) {
+  // Track child sessions (for iframes / OOPIFs) before either guard below, so
+  // the map stays complete across relay outages and the close-time resume
+  // reaches every child.
+  if (method === 'Target.attachedToTarget' && isNonEmptyString(params?.sessionId)) {
     childSessions.set(params.sessionId, source.tabId);
   }
-  if (method === 'Target.detachedFromTarget' && params?.sessionId) {
+  if (method === 'Target.detachedFromTarget' && isNonEmptyString(params?.sessionId)) {
     childSessions.delete(params.sessionId);
+  }
+
+  const entry = attachedTabs.get(source.tabId);
+  if (!ws || ws.readyState !== WebSocket.OPEN || !entry) {
+    // Nobody will see this event, so nobody would release a pause it reports.
+    // Covers the relay being down and a service-worker restart that emptied
+    // attachedTabs while Chrome kept the debugger session.
+    resolveOrphanedPauseLocally(source, method, params);
+    return;
   }
 
   send({
@@ -762,6 +771,37 @@ function onDebuggerEvent(source, method, params) {
       childSessionId: source.sessionId || undefined,
     },
   });
+}
+
+function resolveOrphanedPauseLocally(source, method, params) {
+  const resolution = resolveOrphanedPause(method, params);
+  if (!resolution) return;
+  const debuggee = { tabId: source.tabId };
+  const sessionId = resolution.sessionId ?? source.sessionId;
+  if (sessionId) debuggee.sessionId = sessionId;
+  chrome.debugger.sendCommand(debuggee, resolution.method, resolution.params).catch((error) => {
+    console.warn('[bf] Orphaned pause resolution failed:', resolution.method, error?.message || error);
+  });
+}
+
+/**
+ * The relay may have died between forwarding a paused child's attach event and
+ * resuming it. Resuming a running target is a no-op, so resume every known
+ * child rather than tracking which ones are paused.
+ */
+function resumeAllChildSessions() {
+  for (const [childSessionId, tabId] of childSessions) {
+    chrome.debugger.sendCommand({ tabId, sessionId: childSessionId }, 'Runtime.runIfWaitingForDebugger').catch((error) => {
+      console.warn('[bf] Child resume on relay disconnect failed:', error?.message || error);
+    });
+  }
+}
+
+/** Children are tracked even for tabs without an attachedTabs entry, so clear them by tab id too. */
+function forgetChildSessions(tabId) {
+  for (const [childSessionId, parentTabId] of childSessions) {
+    if (parentTabId === tabId) childSessions.delete(childSessionId);
+  }
 }
 
 function onDebuggerDetach(source, reason) {
@@ -781,6 +821,7 @@ function onDebuggerDetach(source, reason) {
     persistAutoManageState();
     queueSyncTabGroup();
   } else {
+    forgetChildSessions(source.tabId);
     if (attachedTabs.has(source.tabId)) {
       send({
         method: 'tabDetached',
@@ -817,6 +858,7 @@ function onTabRemoved(tabId) {
   const hadActivity = tabLastActivity.delete(tabId);
   if (hadAgentEntry || hadActivity) persistAutoManageState();
 
+  forgetChildSessions(tabId);
   const isAttached = attachedTabs.has(tabId);
   if (!shouldReportTabRemoval({ isAttached })) return;
 
@@ -878,9 +920,7 @@ function onTabDetachedFromWindow(tabId) {
 function cleanupTab(tabId) {
   void ghostCursorController.cleanup(tabId);
   attachedTabs.delete(tabId);
-  for (const [childId, parentTabId] of childSessions) {
-    if (parentTabId === tabId) childSessions.delete(childId);
-  }
+  forgetChildSessions(tabId);
   tabLastActivity.delete(tabId);
   agentCreatedTabs.delete(tabId);
   persistAutoManageState();
