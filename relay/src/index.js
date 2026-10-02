@@ -17,6 +17,10 @@ const RESTRICTIONS_FAIL_CLOSED = Object.freeze({ mode: 'manual', noNewTabs: true
 // Leak guard for label-keyed window affinity entries (which outlive their
 // connection by design). FIFO-evict the oldest pin beyond this size.
 const MAX_AFFINITY_ENTRIES = 50;
+// A child target paused by waitForDebuggerOnStart that no connected client has
+// touched within this window is resumed by the relay — see _trackPausedChild.
+const ORPHAN_PAUSE_GRACE_MS = 2000;
+const ORPHAN_RESUME_MAX_ATTEMPTS = 3;
 
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
@@ -210,6 +214,10 @@ const INIT_ONLY_METHODS = new Set([
   'Emulation.setUserAgentOverride', 'Emulation.setGeolocationOverride',
 ]);
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
 // Return a well-shaped synthetic response for init commands that need more than {}.
 function syntheticInitResponse(method, target) {
   switch (method) {
@@ -306,6 +314,10 @@ class RelayServer {
     this.childSessions = new Map(); // childSessionId -> { tabId, parentSessionId }
     this.oopifTargets = new Map();  // iframe targetId -> { childSessionId, tabId, targetInfo }
     this.aliasSessions = new Map(); // aliasSessionId -> { primarySessionId, clientId } (explicit newCDPSession re-attach to an already-attached page)
+    // Child targets Chrome holds paused until a debugger resumes them:
+    // childSessionId -> { tabId, timer, engagedClients: Set<clientId>, attempts }
+    this.pausedChildren = new Map();
+    this.orphanPauseGraceMs = ORPHAN_PAUSE_GRACE_MS;
     // Agent window affinity: affinityKey -> windowId. Key is 'label:<explicit
     // label>' when the client passed ?label= (e.g. MCP's browserforce-mcp),
     // else the connection id. Explicit-label entries survive disconnects so
@@ -1021,6 +1033,7 @@ class RelayServer {
     this.childSessions.clear();
     this.oopifTargets.clear();
     this.aliasSessions.clear();
+    this._forgetPausedChildren(() => true);
   }
 
   _handleExtMessage(msg) {
@@ -1144,6 +1157,11 @@ class RelayServer {
   // ─── CDP Events from Extension ──────────────────────────────────────────
 
   _handleCdpEventFromExt({ tabId, method, params, childSessionId }) {
+    // Before the unknown-tab return: after a relay restart the extension still
+    // holds debugger sessions on tabs the relay has not rediscovered, and a
+    // resume needs only tabId + the child's session id.
+    this._notePausedChildEvent(tabId, method, params);
+
     const sessionId = this.tabToSession.get(tabId);
     if (!sessionId) {
       this._logCdp({
@@ -1153,8 +1171,9 @@ class RelayServer {
       return;
     }
 
-    // Track child sessions (iframes / OOPIFs)
-    if (method === 'Target.attachedToTarget' && params?.sessionId) {
+    // Track child sessions (iframes / OOPIFs). Only string ids: anything else
+    // would be stored and later forwarded to Chrome as a debuggee session.
+    if (method === 'Target.attachedToTarget' && isNonEmptyString(params?.sessionId)) {
       this.childSessions.set(params.sessionId, { tabId, parentSessionId: sessionId });
       // Index cross-origin iframe targets so Target.attachToTarget/getTargets can
       // resolve them. Store the NORMALIZED targetInfo so every command that returns
@@ -1167,7 +1186,7 @@ class RelayServer {
         });
       }
     }
-    if (method === 'Target.detachedFromTarget' && params?.sessionId) {
+    if (method === 'Target.detachedFromTarget' && isNonEmptyString(params?.sessionId)) {
       this.childSessions.delete(params.sessionId);
       for (const [targetId, info] of this.oopifTargets) {
         if (info.childSessionId === params.sessionId) this.oopifTargets.delete(targetId);
@@ -1198,6 +1217,9 @@ class RelayServer {
   }
 
   _handleTabDetached({ tabId, reason }) {
+    // Before the unknown-session return, so an undiscovered tab's paused
+    // children cannot fire a stale resume later.
+    this._forgetPausedChildren((entry) => entry.tabId === tabId);
     const sessionId = this.tabToSession.get(tabId);
     if (!sessionId) return;
 
@@ -1303,6 +1325,7 @@ class RelayServer {
       if (this.activeClient?.ws === ws) {
         this.activeClient = null;
       }
+      this._releasePausedChildrenOf(meta?.id);
     });
 
     ws.on('error', (err) => {
@@ -1925,11 +1948,33 @@ class RelayServer {
     // Child session (iframe / OOPIF)
     const child = this.childSessions.get(sessionId);
     if (child) {
+      // A client sending anything on a paused child is setting it up and owns
+      // its resume, however long that init takes — the grace timer is only for
+      // clients that never learned of the child. Recorded before the lazy-attach
+      // await so a slow attach cannot let the timer fire under the client.
+      const pausedEntry = this.pausedChildren.get(sessionId);
+      if (pausedEntry) {
+        clearTimeout(pausedEntry.timer);
+        pausedEntry.timer = null;
+        pausedEntry.engagedClients.add(clientId);
+      }
+      // A failure that stops this client from resuming hands the resume back
+      // to the grace timer, unless another client is still engaged.
+      const disengage = () => {
+        if (!pausedEntry || this.pausedChildren.get(sessionId) !== pausedEntry) return;
+        pausedEntry.engagedClients.delete(clientId);
+        if (pausedEntry.engagedClients.size === 0) this._armPausedChildTimer(sessionId, pausedEntry);
+      };
       // Ensure parent tab's debugger is attached
       const parentSessionId = this.tabToSession.get(child.tabId);
       const parentTarget = parentSessionId && this.targets.get(parentSessionId);
       if (parentTarget && !parentTarget.debuggerAttached) {
-        await this._ensureDebuggerAttached(parentTarget, parentSessionId);
+        try {
+          await this._ensureDebuggerAttached(parentTarget, parentSessionId);
+        } catch (err) {
+          disengage();
+          throw err;
+        }
       }
       // OOPIF work is real activity on the parent tab.
       if (parentTarget && !INIT_ONLY_METHODS.has(method)) {
@@ -1958,10 +2003,133 @@ class RelayServer {
           ...(childPayload.agentName ? { agentName: childPayload.agentName } : {}),
         },
       });
-      return this._sendToExt('cdpCommand', childPayload);
+      if (!pausedEntry || method !== 'Runtime.runIfWaitingForDebugger') {
+        return this._sendToExt('cdpCommand', childPayload);
+      }
+      try {
+        const result = await this._sendToExt('cdpCommand', childPayload);
+        // Forget only once the client's resume actually landed, and only the
+        // entry this command saw — a detach meanwhile may have replaced it.
+        if (this.pausedChildren.get(sessionId) === pausedEntry) this._forgetPausedChild(sessionId);
+        return result;
+      } catch (err) {
+        disengage();
+        throw err;
+      }
     }
 
     throw new Error(`Session '${sessionId}' not found`);
+  }
+
+  // ─── Orphaned Debugger Pauses ───────────────────────────────────────────
+  //
+  // Playwright's page-level Target.setAutoAttach uses waitForDebuggerOnStart,
+  // so Chrome pauses every new child target (OOPIF, worker, service worker)
+  // until a debugger sends Runtime.runIfWaitingForDebugger. The debugger stays
+  // attached after the agent disconnects (MCP idle, one-shot CLI), so without
+  // the relay a reload hangs on a paused service worker until the user cancels
+  // the debugging infobar. See AGENTS.md "Orphaned Debugger Pauses".
+
+  _hasOpenCdpClient() {
+    for (const client of this.clients) {
+      if (client.readyState === WebSocket.OPEN) return true;
+    }
+    return false;
+  }
+
+  _notePausedChildEvent(tabId, method, params) {
+    const childSessionId = params?.sessionId;
+    if (!isNonEmptyString(childSessionId)) return;
+    if (method === 'Target.attachedToTarget' && params.waitingForDebugger === true) {
+      this._trackPausedChild(tabId, childSessionId);
+    } else if (method === 'Target.detachedFromTarget') {
+      // Also how Playwright releases child types it does not drive (it
+      // detaches service workers rather than resuming them).
+      this._forgetPausedChild(childSessionId);
+    }
+  }
+
+  _trackPausedChild(tabId, childSessionId) {
+    this._forgetPausedChild(childSessionId);
+    const entry = { tabId, timer: null, engagedClients: new Set(), attempts: 0 };
+    this.pausedChildren.set(childSessionId, entry);
+    // Never resume ahead of a connected client: Playwright installs its init
+    // scripts in the child before resuming it.
+    if (this._hasOpenCdpClient()) {
+      this._armPausedChildTimer(childSessionId, entry);
+    } else {
+      void this._resumePausedChild(childSessionId, entry);
+    }
+  }
+
+  _armPausedChildTimer(childSessionId, entry) {
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => {
+      void this._resumePausedChild(childSessionId, entry);
+    }, this.orphanPauseGraceMs);
+    entry.timer.unref?.();
+  }
+
+  _forgetPausedChild(childSessionId) {
+    const entry = this.pausedChildren.get(childSessionId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.pausedChildren.delete(childSessionId);
+  }
+
+  _forgetPausedChildren(predicate) {
+    for (const [childSessionId, entry] of [...this.pausedChildren]) {
+      if (predicate(entry)) this._forgetPausedChild(childSessionId);
+    }
+  }
+
+  /** A closing client can leave children paused that only it was going to resume. */
+  _releasePausedChildrenOf(clientId) {
+    const hasOpenClient = this._hasOpenCdpClient();
+    for (const [childSessionId, entry] of [...this.pausedChildren]) {
+      const wasEngaged = entry.engagedClients.delete(clientId);
+      if (!hasOpenClient || (wasEngaged && entry.engagedClients.size === 0)) {
+        void this._resumePausedChild(childSessionId, entry);
+      }
+    }
+  }
+
+  async _resumePausedChild(childSessionId, entry) {
+    if (this.pausedChildren.get(childSessionId) !== entry) return;
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    if (!this.ext) {
+      // The extension resolves pauses itself while the relay is unreachable.
+      this.pausedChildren.delete(childSessionId);
+      return;
+    }
+    entry.attempts += 1;
+    const payload = {
+      tabId: entry.tabId,
+      method: 'Runtime.runIfWaitingForDebugger',
+      params: {},
+      childSessionId,
+      // Relay housekeeping, not agent activity: must not reset auto-close.
+      passive: true,
+    };
+    this._logCdp({
+      direction: 'to-extension',
+      message: { ...payload, origin: 'relay-orphan-resolve' },
+    });
+    try {
+      await this._sendToExt('cdpCommand', payload);
+      if (this.pausedChildren.get(childSessionId) === entry) this.pausedChildren.delete(childSessionId);
+    } catch (err) {
+      logErr(`[relay] Orphaned child resume failed (tab ${entry.tabId}, attempt ${entry.attempts}):`, err.message);
+      if (this.pausedChildren.get(childSessionId) !== entry) return;
+      // Usually the target is already gone; bounded retries cover a transient
+      // extension error without looping on a dead session.
+      if (entry.attempts >= ORPHAN_RESUME_MAX_ATTEMPTS) {
+        this.pausedChildren.delete(childSessionId);
+      } else if (entry.engagedClients.size === 0) {
+        this._armPausedChildTimer(childSessionId, entry);
+      }
+    }
   }
 
   // ─── Broadcast ──────────────────────────────────────────────────────────
@@ -1981,6 +2149,7 @@ class RelayServer {
 
   stop() {
     clearInterval(this.pingTimer);
+    this._forgetPausedChildren(() => true);
     this.server?.close();
   }
 }

@@ -1,5 +1,17 @@
 # Critical Patterns
 
+## Orphaned debugger pauses
+
+- Any Chrome pause that waits on a debugger reply must be released when no
+  connected client will send it. Driving a tab leaves
+  `waitForDebuggerOnStart` live after the agent disconnects.
+- Awareness is per client. A client that has sent any command on a paused
+  child owns its resume, with no deadline. Never resume ahead of it.
+- Events the extension cannot forward (relay down, missing tab entry) are
+  resolved in the extension, via the pure `orphan-pause-policy.js`.
+- Never "fix" this by disabling auto-attach on disconnect. Shared Chrome
+  state belongs to every connected client.
+
 ## Ghost cursor
 
 - The `ghostCursorEnabled` setting is local, defaults to `false`, and is read by
