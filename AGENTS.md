@@ -378,6 +378,14 @@ chip's `textContent`.
   the ghost cursor off in the popup before downgrading (disable removes the
   whole outer element), or reload the affected tabs.
 
+### Tab Badge
+
+While an agent is actively driving an attached tab, BrowserForce overlays a small black cursor arrow with a white outline on the bottom-right of the tab's favicon and restores the original favicon when the agent stops (`extension/tab-badge.js`, `test/agent/tab-badge.test.js`):
+
+- **Trigger**: any real (non-`passive`) top-level `cdpCommand` on an attached tab marks it `driven` (independent of `ghostCursorEnabled`; no setting). After `TAB_BADGE_IDLE_MS` (`15s`) with no real command, or on `detachTab` / `closeTab` / `onDebuggerDetach`, the original icon is restored.
+- **Composition**: fetches the page's current icon via `chrome-extension://<id>/_favicon/?pageUrl=<encoded>&size=32` (using the extension's `favicon` permission) and composites it with the cursor badge on a `32x32` `OffscreenCanvas` into a PNG data URL, falling back to a badge on a neutral square if unavailable.
+- **DOM & restore contract**: injected via `Runtime.evaluate` (`window.__browserforceTabBadge`). Snapshots existing `link[rel~=icon]` `href`/`type` attributes (or notes none existed), reuses `#__browserforce_tab_badge_icon__` idempotently, and keeps a `MutationObserver` that re-asserts the badge if the page rewrites its favicon (e.g. Gmail/Slack unread counts) while driven. On restore, disconnects the observer and restores the original `link[rel~=icon]` attributes (or removes `#__browserforce_tab_badge_icon__` if none existed). Top-level navigations mark the tab so the badge is re-applied on the next real command.
+
 ### Test Isolation: writeCdpUrl Flag
 
 `RelayServer.start()` accepts `{ writeCdpUrl: false }` to prevent test instances from clobbering `~/.browserforce/cdp-url`. **All test `relay.start()` calls must pass `{ writeCdpUrl: false }`** or the production cdp-url file gets overwritten with random test ports.
@@ -614,7 +622,8 @@ When reviewing changes to this project:
 |------|-------|---------|
 | `relay/src/index.js` | ~800 | `RelayServer` class — CDP proxy, session management, HTTP endpoints |
 | `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
-| `extension/ghost-cursor.js` | ~750 | Physics-driven ghost cursor renderer, pure animation math, per-tab serialized queue |
+| `extension/ghost-cursor.js` | ~1050 | Physics-driven ghost cursor renderer, pure animation math, optional pre-click sync, per-tab serialized queue |
+| `extension/tab-badge.js` | ~500 | Driven-tab favicon badge state machine, `_favicon` + `OffscreenCanvas` composition, `MutationObserver`-backed icon injection/restore |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
 | `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
 | `mcp/src/index.js` | ~400 | MCP server — browserforce + exec + reset + help tools via Playwright-core `connectOverCDP` |
