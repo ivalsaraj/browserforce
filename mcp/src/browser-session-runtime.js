@@ -363,6 +363,7 @@ export function createBrowserSessionRuntime(deps = {}) {
       const nextBrowser = await connectBrowserFn();
       browser = nextBrowser;
       browser.on('disconnected', () => {
+        dialogState.clearPending();
         clearIdleBrowserDisconnectTimer();
         browser = null;
         contextListenerAttached = false;
@@ -1128,22 +1129,24 @@ export function createBrowserSessionRuntime(deps = {}) {
     await ensureBrowser();
     beginOperation();
     try {
-      const ctx = getContext();
-      const page = await ctx.newPage();
-      setupConsoleCapture(page);
-      if (url) {
-        try {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-        } catch (err) {
-          try { await page.close(); } catch { /* already closed */ }
-          throw err;
+      return await dialogState.withRun(new AbortController().signal, {}, async () => {
+        const ctx = getContext();
+        const page = await ctx.newPage();
+        setupConsoleCapture(page);
+        if (url) {
+          try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+          } catch (err) {
+            try { await page.close(); } catch { /* already closed */ }
+            throw err;
+          }
         }
-      }
-      // The caller's OWN active tab, never the shared one: `open` in one
-      // subagent must not move another agent's page.
-      if (clientId) setActivePageForClient(page, clientId);
-      else setActivePage(page);
-      return page;
+        // The caller's OWN active tab, never the shared one: `open` in one
+        // subagent must not move another agent's page.
+        if (clientId) setActivePageForClient(page, clientId);
+        else setActivePage(page);
+        return page;
+      });
     } finally {
       endOperation();
     }

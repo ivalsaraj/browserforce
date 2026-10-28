@@ -257,10 +257,13 @@ or a macOS Space jump remains possible. Missing opener metadata is left alone.
 
 ### JavaScript dialogs
 
-While connected, BrowserForce records JavaScript dialogs and reports them with
-the next exec/browserforce result. Alerts and beforeunload dialogs are accepted;
-confirms and prompts are dismissed by default. Accept a confirmation or supply
-prompt text by arming a response before the action in the **same exec**:
+BrowserForce handles and records dialogs only during an active run on pages it
+drives: its active/`--tab` page, pages it creates, explicitly arms, or issues
+Playwright commands on. Unrelated user/agent pages are left alone. Handled dialogs
+are reported with the next exec/browserforce result. Alerts and beforeunload
+dialogs are accepted; confirms and prompts are dismissed by default. Accept a
+confirmation or supply prompt text by arming a response before the action in the
+**same exec**:
 
 ```js
 armDialog({ accept: true, promptText: 'answer' });
@@ -268,7 +271,9 @@ await page.getByRole('button', { name: 'Continue' }).click();
 return getDialogs();
 ```
 
-The response applies to the next confirm/prompt on the chosen page only and
+To target another Page, use `armDialog({ accept: true, page: p })`, for example
+a Page returned by `const p = await context.newPage()`. Omit `page` to target the
+active/`--tab` page. The response applies to its next confirm/prompt only and
 expires when that exec finishes, fails, or times out. Use this helper instead of
 adding another Playwright dialog listener. `getDialogs()` returns the last 100
 session records (`type`, `message`, `defaultValue`, `url`, `at`, `action`, and
@@ -276,6 +281,17 @@ session records (`type`, `message`, `defaultValue`, `url`, `at`, `action`, and
 output appends each notice once. CLI JSON wraps affected results as
 `{ _bf_type: 'dialog_result', result, dialogs }`; one-shot binary output puts
 notices on stderr. MCP help includes a `dialogs` section.
+
+Between runs, dialogs on previously driven pages stay pending (up to 100 pages).
+The next run driving that page handles its pending dialog with defaults before
+executing its action and emits the normal notice. An unrelated run leaves it
+alone. Pending Dialog objects are discarded on page close, disconnect, or reset;
+they are never rebound by URL to replacement Pages.
+
+One relay broadcasts dialog events to every client. Our listener prevents
+Playwright from auto-dismissing foreign dialogs. Older/foreign Playwright clients
+without this handler can still dismiss them, and concurrent runs intentionally
+driving the same page can still race.
 
 When MCP idle-disconnects after 15 seconds, a new dialog stays open for the user.
 The relay never handles dialogs without a CDP client, and dialogs opened during
