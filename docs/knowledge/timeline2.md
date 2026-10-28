@@ -85,3 +85,29 @@
 - Kept rollover in the existing serialized write queue and skipped individual
   entries that cannot fit within the configured cap.
 - Added regression coverage for sustained writes and oversized entries.
+
+## 2026-10-28 — Agent tabs stop stealing the user's screen
+
+- Agent-created tabs now open as background tabs in the pinned or last-focused
+  normal window, in a named tab group per agent (title from `agentName`, else
+  `Agent <id>`). A window is created only when no normal window exists. Live
+  test: Chrome on macOS opens every new window as a full-screen Space while the
+  user is in full screen, whatever bounds/state/focused flags are passed, so a
+  new window cannot avoid the jump; a new tab in an existing window can.
+- The dedicated agent window is now opt-in (`dedicatedWindow === true`).
+  `parallelVisibilityMode` no longer changes behaviour.
+- Top-level `Page.bringToFront` activates the tab inside its window and never
+  focuses the window.
+- Grouping happens once, on create; user drag/ungroup is never undone.
+
+## 2026-10-28 — Emulation overrides die with their agent; tab ownership shown
+
+- The relay records which client forwarded each `Emulation.*` override to an
+  attached tab and sends a passive reset when the last connected holder leaves
+  (viewport, media, touch, focus, geolocation, locale, timezone, background
+  color, script execution, automation). `setUserAgentOverride` is excluded: CDP
+  documents no reset.
+- MCP saves exactly-identified pages' viewports before its 15s idle disconnect
+  and re-applies them on reconnect (best-effort; never fails the reconnect).
+- `tabs` marks agent-created tabs `[yours]` or `[owned by <agent>]`; help text
+  tells agents to open their own tab instead of reusing another agent's.
