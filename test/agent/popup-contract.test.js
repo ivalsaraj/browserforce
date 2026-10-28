@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import vm from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -63,4 +64,85 @@ test('popup exposes a default-off ghost-cursor toggle wired to storage', () => {
 test('dedicated window copy explains full-screen Spaces and defaults off', () => {
   assert.match(html, /new Space.*full.screen/i);
   assert.match(popupJs, /dedicatedWindowCb\.checked = s\.dedicatedWindow === true/);
+});
+
+// Any property not set explicitly is a no-op function returning another stub,
+// so popup.js top-level DOM/Chrome wiring runs without a browser.
+function stub(base = {}) {
+  return new Proxy(base, {
+    get(target, key) {
+      if (key in target) return target[key];
+      if (key === Symbol.toPrimitive || key === 'then') return undefined;
+      return target[key] = stub(function () { return stub(); });
+    },
+  });
+}
+
+function element() {
+  const listeners = {};
+  return stub({
+    value: '', checked: false, hidden: false, disabled: false, textContent: '',
+    listeners,
+    addEventListener(type, fn) { listeners[type] = fn; },
+  });
+}
+
+function loadPopup(settings) {
+  const elements = new Map();
+  const writes = [];
+  const document = stub({
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, element());
+      return elements.get(id);
+    },
+    querySelectorAll: () => [],
+  });
+  const chrome = stub({
+    storage: stub({
+      local: stub({
+        get(keys, cb) { if (typeof cb === 'function') cb({ ...settings }); return Promise.resolve({ ...settings }); },
+        set(value) { writes.push(value); return Promise.resolve(); },
+      }),
+    }),
+  });
+  vm.runInNewContext(popupJs, {
+    document, chrome, window: stub(), console, setTimeout: () => 0, setInterval: () => 0,
+    clearTimeout() {}, clearInterval() {}, requestAnimationFrame: () => 0,
+    URL, Number, String, Promise,
+  });
+  return { el: (id) => document.getElementById(id), writes };
+}
+
+test('click sync is hidden and disabled while the ghost cursor is off', () => {
+  const { el } = loadPopup({ ghostCursorEnabled: false, userInstructions: 'keep me' });
+  assert.equal(el('bf-ghost-cursor-click-sync-row').hidden, true);
+  assert.equal(el('bf-ghost-cursor-click-sync').disabled, true);
+  assert.equal(el('bf-instructions').value, 'keep me', 'settings after the toggle must still load');
+});
+
+test('click sync is shown, enabled and saved while the ghost cursor is on', () => {
+  const { el, writes } = loadPopup({ ghostCursorEnabled: true, ghostCursorClickSync: false });
+  const sync = el('bf-ghost-cursor-click-sync');
+  assert.equal(el('bf-ghost-cursor-click-sync-row').hidden, false);
+  assert.equal(sync.disabled, false);
+  sync.checked = true;
+  sync.listeners.change();
+  assert.equal(JSON.stringify(writes.at(-1)), '{"ghostCursorClickSync":true}');
+});
+
+test('turning the ghost cursor on and off updates the click sync row', () => {
+  const { el } = loadPopup({ ghostCursorEnabled: false });
+  const cursor = el('bf-ghost-cursor');
+  cursor.checked = true;
+  cursor.listeners.change();
+  assert.equal(el('bf-ghost-cursor-click-sync').disabled, false);
+  assert.equal(el('bf-ghost-cursor-click-sync-row').hidden, false);
+  cursor.checked = false;
+  cursor.listeners.change();
+  assert.equal(el('bf-ghost-cursor-click-sync').disabled, true);
+  assert.equal(el('bf-ghost-cursor-click-sync-row').hidden, true);
+});
+
+test('a hidden checkbox row is not displayed', () => {
+  assert.match(popupCss, /\.checkbox-row\[hidden\]\s*\{\s*display:\s*none;/);
 });

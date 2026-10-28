@@ -141,8 +141,19 @@ dedicatedWindowCb.addEventListener('change', () => {
   chrome.storage.local.set({ dedicatedWindow: dedicatedWindowCb.checked });
 });
 
+// Click sync only means something while the cursor is shown.
+function syncGhostCursorClickSyncState(cursorEnabled) {
+  ghostCursorClickSyncRow.hidden = !cursorEnabled;
+  ghostCursorClickSyncCb.disabled = !cursorEnabled;
+}
+
 ghostCursorCb.addEventListener('change', () => {
   chrome.storage.local.set({ ghostCursorEnabled: ghostCursorCb.checked });
+  syncGhostCursorClickSyncState(ghostCursorCb.checked);
+});
+
+ghostCursorClickSyncCb.addEventListener('change', () => {
+  chrome.storage.local.set({ ghostCursorClickSync: ghostCursorClickSyncCb.checked });
 });
 
 autoDetachSelect.addEventListener('change', () => {

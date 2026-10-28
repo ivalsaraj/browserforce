@@ -358,6 +358,11 @@ button:active { background: var(--bf-accent-press); }
   color: var(--bf-text);
 }
 
+/* display: flex above would otherwise override the hidden attribute. */
+.checkbox-row[hidden] {
+  display: none;
+}
+
 .checkbox-row + .checkbox-row {
   border-top: 1px solid var(--bf-border-soft);
 }

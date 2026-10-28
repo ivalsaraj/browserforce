@@ -175,3 +175,14 @@
 - Live: two sessiond clients on real Chrome; B's 6s run left A's confirm open,
   A's next run dismissed it with one notice. Known limit: older/foreign
   Playwright clients without the listener still auto-dismiss.
+
+## 2026-10-28 — Popup click-sync toggle was never wired
+
+- Symptom: "Sync clicks with cursor arrival" always disabled; popup console
+  `ReferenceError: syncGhostCursorClickSyncState is not defined`. The throw also
+  skipped loading saved instructions and the auto-mode note.
+- Cause: the helper and the save handler were never written; the contract test
+  only regex-matched the name. `.checkbox-row { display: flex }` also beat the
+  `hidden` attribute, so the row never hid.
+- Fix: helper + handlers in `extension/popup.js`, `.checkbox-row[hidden]` rule,
+  and a vm test that runs popup.js and toggles the controls.
