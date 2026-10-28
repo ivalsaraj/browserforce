@@ -111,3 +111,19 @@
   and re-applies them on reconnect (best-effort; never fails the reconnect).
 - `tabs` marks agent-created tabs `[yours]` or `[owned by <agent>]`; help text
   tells agents to open their own tab instead of reusing another agent's.
+
+## 2026-10-28 — Physics ghost cursor, click sync, driven-tab badge
+
+- Ghost cursor motion rebuilt on fixed-step springs: curved Bézier arcs for
+  long moves (> 196px, chosen to stay 20px inside the viewport), tangent
+  rotation, speed narrowing, arrival detection, idle wiggle, fade/scale/blur
+  appear, blue glow, `prefers-reduced-motion` support.
+- `ghostCursorClickSync` (popup, default off): waits up to 600ms for the cursor
+  to arrive before forwarding a top-level `mousePressed`.
+- Driven-tab favicon badge (`extension/tab-badge.js`): a real top-level command
+  marks the tab driven; icon re-asserted against page rewrites; exact original
+  restored after 15s idle or detach.
+- `Denying load of chrome-extension://…/assets/ghost-cursor.png`: Chrome refuses
+  web-accessible resources to `about:blank`/`about:srcdoc`/opaque-origin
+  documents, where the new-document script also runs. The cursor now skips
+  subframes and uses an inline SVG on those origins.
