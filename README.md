@@ -932,6 +932,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
 | **Parallel visibility** | `foreground-tab` keeps new tabs visible inside the agent's dedicated window |
+| **Ghost cursor**        | Spring-driven pointer overlay with curved Bézier arcs, idle thinking wiggle, and agent-name chip (`ghostCursorEnabled`, on by default) |
 | **Tab grouping**        | Attached tabs stay grouped as `browserforce` inside their own Chrome window |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |

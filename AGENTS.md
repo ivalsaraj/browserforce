@@ -14,24 +14,24 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         AI Agent Layer                               │
 │                                                                      │
-│  ┌─────────────────────────────┐  ┌───────────────────────────────┐ │
+│  ┌─────────────────────────────┐  ┌────────────────────────────────┐ │
 │  │  MCP Client (Claude, etc.)  │  │  Direct Playwright Client     │ │
 │  │  Uses browserforce/exec     │  │  chromium.connectOverCDP()    │ │
-│  └──────────┬──────────────────┘  └──────────┬────────────────────┘ │
+│  └──────────┬──────────────────┘  └──────────┬─────────────────────┘ │
 │             │ MCP/stdio                      │ CDP/WebSocket        │
-└─────────────┼────────────────────────────────┼──────────────────────┘
+└─────────────┼────────────────────────────────┼───────────────────────┘
               │                                │
               ▼                                │
-┌──────────────────────────────────┐           │
+┌───────────────────────────────────┐           │
 │  MCP Server (mcp/src/index.js)   │           │
 │  - 4 tools: browserforce + exec  │           │
 │    + reset + help                │           │
 │  - Playwright-core CDP client    ├───────────┘
 │  - Auto-discovers relay token    │
-└──────────────┬───────────────────┘
+└──────────────┬────────────────────┘
                │ CDP over WebSocket
                ▼
-┌──────────────────────────────────┐
+┌───────────────────────────────────┐
 │  Relay Server (relay/src/index.js)│
 │  - ws://127.0.0.1:19222          │
 │  - /extension (single ext slot)  │
@@ -39,24 +39,24 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 │  - Intercepts Target.* commands  │
 │  - Forwards all else to ext      │
 │  - Tracks sessions + children    │
-└──────────────┬───────────────────┘
+└──────────────┬────────────────────┘
                │ WebSocket
                ▼
-┌──────────────────────────────────┐
+┌───────────────────────────────────┐
 │  Chrome Extension (MV3 SW)       │
 │  - background.js service worker  │
 │  - chrome.debugger.attach/send   │
 │  - Auto-reconnect + keepalive    │
 │  - Tab lifecycle tracking        │
-└──────────────┬───────────────────┘
+└──────────────┬────────────────────┘
                │ chrome.debugger API
                ▼
-┌──────────────────────────────────┐
+┌───────────────────────────────────┐
 │  Real Chrome Browser             │
 │  - User's logged-in sessions     │
 │  - All cookies and localStorage  │
 │  - Real tabs with real content   │
-└──────────────────────────────────┘
+└───────────────────────────────────┘
 ```
 
 ## Protocol Reference
@@ -295,13 +295,41 @@ disconnects is not handled yet.
 
 The optional ghost cursor is controlled by the local-storage key
 `ghostCursorEnabled` and defaults to disabled. `extension/ghost-cursor.js` owns the
-renderer, action mapping, and per-tab serialized queue; `extension/background.js`
-owns live setting state and debugger lifecycle. Only successful top-level
-`Input.dispatchMouseEvent` commands enqueue cosmetic updates, so child sessions,
+physics-driven renderer, pure animation helpers (`stepSpring`, `selectBezierArc`,
+`isArcInsideViewport`, `hasCursorArrived`, `computeWiggleAmplitude`,
+`computeWiggleAngleDeg`, `computeSpeedNarrowing`, `computeVisibilityEffect`),
+action mapping, and per-tab serialized queue; `extension/background.js` owns live
+setting state and debugger lifecycle. Only successful top-level
+`Input.dispatchMouseEvent` commands enqueue cursor updates, so child sessions,
 unsupported input, and failed browser commands cannot affect the cursor. Disable
 must complete the renderer teardown and registered-script removal before normal
 debugger detach; post-detach cleanup only invalidates queued work and must not send
 new debugger commands.
+
+**Physics & motion.** The renderer steps damped springs at a fixed timestep
+(`FIXED_TIMESTEP_MS = 1000 / 120`) per `requestAnimationFrame` for position,
+rotation, stretch, and visibility:
+- **Curved long moves (`> 196px`)**: `selectBezierArc` evaluates up to 20 candidate
+  cubic Bézier arcs varying bend side and magnitude, keeping the first whose path
+  stays `>= 20px` inside the viewport (`VIEWPORT_MARGIN_PX`). The arrow rotates to
+  follow the path tangent and settles back to its resting pointer tilt (`-44°`).
+  Shorter moves complete faster; retargeting mid-move preserves `(x, y, vx, vy)` so
+  the trajectory bends smoothly with no jump.
+- **Short moves (`<= 196px`)**: straight line with subtle mid-move squash-and-stretch
+  and tilt peaking at `progress = 0.5`.
+- **Motion blur & glow**: speed-dependent width narrowing down to `65%`
+  (`MIN_NARROWING_SCALE_X`), soft `#339cff` glow around the arrow, and synchronized
+  appear/disappear transitions (fade + scale from `40%` + `5px → 0px` blur).
+- **Arrival & idle thinking wiggle**: arrival is reached within `0.85px`
+  (`ARRIVAL_DISTANCE_THRESHOLD_PX`) at near-zero velocity and resolves
+  `waitForArrival()`. While idle after arrival, a gentle `±12.5°` rock (`0.66s`
+  period) ramps in over `1.4s` and stops on the next move.
+- **Reduced motion & subframe/blank-page safety**: `prefers-reduced-motion: reduce`
+  jumps directly to the target and disables wiggle. Subframes (`window.top !== window`)
+  never mount a cursor, and non-web-accessible documents (`about:`, `data:`, opaque
+  `'null'` origin) use an inline SVG fallback instead of requesting
+  `chrome-extension://<id>/assets/ghost-cursor.png` (which `<all_urls>` in
+  `web_accessible_resources` denies).
 
 **Agent label.** A client that connects with `?agentName=` (from
 `BROWSERFORCE_AGENT_NAME`, via `agentCdpUrl()` in `mcp/src/client-label.js`) gets
@@ -578,6 +606,7 @@ When reviewing changes to this project:
 |------|-------|---------|
 | `relay/src/index.js` | ~800 | `RelayServer` class — CDP proxy, session management, HTTP endpoints |
 | `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
+| `extension/ghost-cursor.js` | ~750 | Physics-driven ghost cursor renderer, pure animation math, per-tab serialized queue |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
 | `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
 | `mcp/src/index.js` | ~400 | MCP server — browserforce + exec + reset + help tools via Playwright-core `connectOverCDP` |

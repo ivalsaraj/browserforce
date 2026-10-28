@@ -65,6 +65,7 @@ Popup settings include:
 
 - `executionMode`: `parallel` or `sequential`
 - `parallelVisibilityMode`: `foreground-tab` or `rotate-visible`
+- `ghostCursorEnabled`: `true` (default) or `false` — spring-driven in-page ghost cursor with curved Bézier arcs for long moves, speed narrowing, idle wiggle, and an agent-label chip (`prefers-reduced-motion: reduce` respected)
 
 Current behavior lock:
 
