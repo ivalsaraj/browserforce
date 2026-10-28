@@ -27,6 +27,15 @@ import {
   handleTabBadgeCommand,
 } from '../../extension/tab-badge.js';
 
+import { CURSOR_ARROW_PATH, RESTING_TILT_DEG } from '../../extension/ghost-cursor.js';
+
+// Node has no canvas; retain the native Path2D input for geometry assertions.
+const originalPath2D = globalThis.Path2D;
+globalThis.Path2D = class Path2D {
+  constructor(path) { this.path = path; }
+};
+test.after(() => { globalThis.Path2D = originalPath2D; });
+
 const backgroundSource = fs.readFileSync(new URL('../../extension/background.js', import.meta.url), 'utf8');
 const manifestJson = JSON.parse(fs.readFileSync(new URL('../../extension/manifest.json', import.meta.url), 'utf8'));
 const packageJson = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -209,11 +218,10 @@ test('computeTabBadgeGeometry places cursor arrow badge in bottom-right corner w
   assert.equal(geo.badgeRect.x >= 12, true);
   assert.equal(geo.badgeRect.y >= 12, true);
   assert.equal(geo.outlineWidth >= 2, true);
-  assert.equal(geo.polygon.length, 7);
-  for (const pt of geo.polygon) {
-    assert.equal(pt.x >= geo.badgeRect.x && pt.x <= 32, true);
-    assert.equal(pt.y >= geo.badgeRect.y && pt.y <= 32, true);
-  }
+  assert.equal(geo.arrowPath, CURSOR_ARROW_PATH);
+  assert.equal(geo.arrowScale, geo.badgeRect.width / 24);
+  assert.equal(geo.arrowRotationRadians, RESTING_TILT_DEG * Math.PI / 180);
+  assert.deepEqual(geo.arrowCenter, { x: 23, y: 23 });
 });
 
 test('renderTabBadgeOnContext draws base favicon or fallback square plus white-outlined black arrow', () => {
@@ -225,6 +233,11 @@ test('renderTabBadgeOnContext draws base favicon or fallback square plus white-o
     lineJoin: '',
     lineCap: '',
     clearRect: (...args) => ops.push(['clearRect', ...args]),
+    save: () => ops.push(['save']),
+    restore: () => ops.push(['restore']),
+    translate: (...args) => ops.push(['translate', ...args]),
+    rotate: (...args) => ops.push(['rotate', ...args]),
+    scale: (...args) => ops.push(['scale', ...args]),
     drawImage: (...args) => ops.push(['drawImage', ...args]),
     fillRect: (...args) => ops.push(['fillRect', ...args]),
     strokeRect: (...args) => ops.push(['strokeRect', ...args]),
@@ -232,8 +245,8 @@ test('renderTabBadgeOnContext draws base favicon or fallback square plus white-o
     moveTo: (...args) => ops.push(['moveTo', ...args]),
     lineTo: (...args) => ops.push(['lineTo', ...args]),
     closePath: () => ops.push(['closePath']),
-    stroke: function () {
-      ops.push(['stroke', this.strokeStyle, this.lineWidth]);
+    stroke: function (path) {
+      ops.push(['stroke', this.strokeStyle, this.lineWidth, path.path]);
     },
     fill: function () {
       ops.push(['fill', this.fillStyle]);
@@ -249,7 +262,7 @@ test('renderTabBadgeOnContext draws base favicon or fallback square plus white-o
   assert.equal(ops.some((op) => op[0] === 'fillRect'), false);
   assert.deepEqual(
     ops.find((op) => op[0] === 'stroke'),
-    ['stroke', TAB_BADGE_OUTLINE_COLOR, res1.geometry.outlineWidth],
+    ['stroke', TAB_BADGE_OUTLINE_COLOR, res1.geometry.outlineWidth / res1.geometry.arrowScale, CURSOR_ARROW_PATH],
   );
   assert.deepEqual(ops.find((op) => op[0] === 'fill'), ['fill', TAB_BADGE_FILL_COLOR]);
 
@@ -270,6 +283,11 @@ test('composeTabBadgeDataUrl composes PNG via OffscreenCanvas and falls back whe
   const fakeCanvas = {
     getContext: () => ({
       clearRect: () => {},
+      save: () => {},
+      restore: () => {},
+      translate: () => {},
+      rotate: () => {},
+      scale: () => {},
       drawImage: () => {
         drewImage = true;
       },

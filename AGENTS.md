@@ -421,6 +421,10 @@ chip's `textContent`.
 
 ### Tab Badge
 
+The badge imports the approved SVG path and resting angle from `ghost-cursor.js`
+and draws it with `Path2D`, scaled into its existing bottom-right geometry.
+Keep the white outline width in canvas pixels when scaling the path.
+
 While an agent is actively driving an attached tab, BrowserForce overlays a small black cursor arrow with a white outline on the bottom-right of the tab's favicon and restores the original favicon when the agent stops (`extension/tab-badge.js`, `test/agent/tab-badge.test.js`):
 
 - **Trigger**: any real (non-`passive`) top-level `cdpCommand` on an attached tab marks it `driven` (independent of `ghostCursorEnabled`; no setting). After `TAB_BADGE_IDLE_MS` (`15s`) with no real command, or on `detachTab` / `closeTab` / `onDebuggerDetach`, the original icon is restored.
