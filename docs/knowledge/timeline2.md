@@ -142,3 +142,13 @@
   notice to the next result. `armDialog({accept, promptText})` pre-arms one
   response for the current run; `getDialogs()` returns bounded history. With no
   `/cdp` client connected the relay leaves dialogs open for the user.
+
+## 2026-10-28 — Approved ghost cursor redesign
+
+- Owner-approved inline SVG arrow (rounded, shallow notch, white outline, two-layer
+  #339cff glow), resting at -44°, tip is the hotspot and rotation pivot.
+- Motion retuned to measured reference values: response/damping springs at a
+  1/240s step, 20 scored path candidates leaving and landing tip-first, scoot
+  tilt/squash for short moves, one 1.41s wiggle burst on arrival, spring-driven
+  appear/disappear, click-sync bound 1500ms. Favicon badge shares the arrow path.
+- PNG asset and its `web_accessible_resources` entry removed (no reader left).
