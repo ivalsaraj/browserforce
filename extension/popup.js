@@ -33,6 +33,8 @@ const noNewTabsCb = document.getElementById('bf-no-new-tabs');
 const readOnlyCb = document.getElementById('bf-read-only');
 const dedicatedWindowCb = document.getElementById('bf-dedicated-window');
 const ghostCursorCb = document.getElementById('bf-ghost-cursor');
+const ghostCursorClickSyncCb = document.getElementById('bf-ghost-cursor-click-sync');
+const ghostCursorClickSyncRow = document.getElementById('bf-ghost-cursor-click-sync-row');
 // Mirrors extension/agent-defaults.js — popup.js is a classic script and cannot
 // import ES modules. test/agent/agent-defaults.test.js asserts they agree.
 const DEFAULT_AUTO_CLOSE_MINUTES = 10;
@@ -57,7 +59,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 const SETTINGS_KEYS = [
   'relayUrl', 'autoDetachMinutes', 'autoCloseMinutes',
   'mode', 'lockUrl', 'noNewTabs', 'readOnly', 'userInstructions',
-  'executionMode', 'parallelVisibilityMode', 'dedicatedWindow', 'ghostCursorEnabled',
+  'executionMode', 'parallelVisibilityMode', 'dedicatedWindow', 'ghostCursorEnabled', 'ghostCursorClickSync',
 ];
 
 chrome.storage.local.get(SETTINGS_KEYS, (s) => {
@@ -76,6 +78,8 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   readOnlyCb.checked = !!s.readOnly;
   dedicatedWindowCb.checked = s.dedicatedWindow !== false;
   ghostCursorCb.checked = !!s.ghostCursorEnabled;
+  ghostCursorClickSyncCb.checked = !!s.ghostCursorClickSync;
+  syncGhostCursorClickSyncState(ghostCursorCb.checked);
   instructionsEl.value = s.userInstructions || '';
   setAutoModeState(s.mode || 'auto');
 });

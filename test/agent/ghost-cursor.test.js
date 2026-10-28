@@ -31,11 +31,14 @@ import {
   computeWiggleAmplitude,
   computeWiggleAngleDeg,
   computeVisibilityEffect,
+  CLICK_SYNC_MAX_WAIT_MS,
   buildGhostCursorSource,
   buildGhostCursorAction,
   buildGhostCursorActionExpression,
+  buildGhostCursorSyncExpression,
   createGhostCursorController,
   handleGhostCursorInput,
+  syncGhostCursorBeforeClick,
 } from '../../extension/ghost-cursor.js';
 
 const background = fs.readFileSync(new URL('../../extension/background.js', import.meta.url), 'utf8');
@@ -674,6 +677,13 @@ test('extension wiring keeps cursor updates cosmetic and settings default-off', 
   assert.match(popupHtml, /id="bf-ghost-cursor"/);
   assert.match(popupHtml, /Show ghost cursor for agent actions/);
   assert.match(popupJs, /ghostCursorEnabled/);
+  assert.match(popupHtml, /id="bf-ghost-cursor-click-sync-row"[^>]*hidden/);
+  assert.match(popupHtml, /id="bf-ghost-cursor-click-sync"[^>]*disabled/);
+  assert.match(popupHtml, /Sync clicks with cursor arrival/);
+  assert.match(popupJs, /ghostCursorClickSync/);
+  assert.match(popupJs, /syncGhostCursorClickSyncState/);
+  assert.match(background, /syncGhostCursorBeforeClick/);
+  assert.match(background, /ghostCursorClickSync/);
   assert.match(background, /handleGhostCursorInput/);
   assert.match(background, /ghostCursorController/);
   assert.match(background, /chrome\.runtime\.getURL\(['"]assets\/ghost-cursor\.png['"]\)/);
@@ -866,4 +876,101 @@ test('forwards the agent name from the debugger bridge to the cursor action', ()
   });
 
   assert.equal(actions[0].label, 'Codex');
+});
+
+test('buildGhostCursorSyncExpression normalizes to move and races arrival with timeout', () => {
+  const expr = buildGhostCursorSyncExpression(
+    { type: 'down', x: 180, y: 260, button: 'left', label: 'Claude' },
+    CLICK_SYNC_MAX_WAIT_MS,
+  );
+  assert.match(expr, /"type":"move"/);
+  assert.match(expr, /"x":180,"y":260/);
+  assert.match(expr, /"label":"Claude"/);
+  assert.match(expr, /Promise\.race/);
+  assert.match(expr, new RegExp(String(CLICK_SYNC_MAX_WAIT_MS)));
+});
+
+test('syncGhostCursorBeforeClick animates before mousePressed only when click sync is enabled', async () => {
+  const commandRecorder = createCommandRecorder();
+  const controller = createGhostCursorController({
+    isEnabled: () => true,
+    isTabAttached: () => true,
+    sendCommand: commandRecorder.sendCommand,
+  });
+
+  const offResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 5,
+    params: { type: 'mousePressed', x: 120, y: 240, button: 'left' },
+    agentName: 'Claude',
+    controller,
+    isClickSyncEnabled: false,
+  });
+  assert.equal(offResult, false);
+  assert.equal(commandRecorder.calls.length, 0);
+
+  const moveResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 5,
+    params: { type: 'mouseMoved', x: 120, y: 240 },
+    controller,
+    isClickSyncEnabled: true,
+  });
+  assert.equal(moveResult, false);
+  assert.equal(commandRecorder.calls.length, 0);
+
+  const childResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    childSessionId: 'child-1',
+    tabId: 5,
+    params: { type: 'mousePressed', x: 120, y: 240, button: 'left' },
+    controller,
+    isClickSyncEnabled: true,
+  });
+  assert.equal(childResult, false);
+  assert.equal(commandRecorder.calls.length, 0);
+
+  const onResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 5,
+    params: { type: 'mousePressed', x: 120, y: 240, button: 'left' },
+    agentName: 'Claude',
+    controller,
+    isClickSyncEnabled: true,
+  });
+  assert.equal(onResult, true);
+  assert.deepEqual(
+    commandRecorder.calls.map((c) => c.method),
+    ['Page.addScriptToEvaluateOnNewDocument', 'Runtime.evaluate'],
+  );
+  assert.equal(commandRecorder.calls[1].params.awaitPromise, true);
+  assert.match(commandRecorder.calls[1].params.expression, /"type":"move"/);
+  assert.match(commandRecorder.calls[1].params.expression, /"label":"Claude"/);
+});
+
+test('syncGhostCursorBeforeClick bounds wait by maxWaitMs so a stuck animation never blocks a click', async () => {
+  const controller = createGhostCursorController({
+    isEnabled: () => true,
+    isTabAttached: () => true,
+    sendCommand: (_tabId, method) => {
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+        return Promise.resolve({ identifier: 'script-1' });
+      }
+      return new Promise(() => {});
+    },
+  });
+
+  const startedAt = Date.now();
+  const result = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 9,
+    params: { type: 'mousePressed', x: 400, y: 300, button: 'left' },
+    controller,
+    isClickSyncEnabled: true,
+    maxWaitMs: 35,
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(result, false);
+  assert.ok(elapsedMs < 250, `Expected bounded wait < 250ms, got ${elapsedMs}ms`);
 });

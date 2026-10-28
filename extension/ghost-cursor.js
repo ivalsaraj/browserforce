@@ -52,6 +52,9 @@ export const CURSOR_GLOW_COLOR = '#339cff';
 export const MIN_MOVE_DURATION_MS = 140;
 export const MAX_MOVE_DURATION_MS = 680;
 export const MOVE_SPEED_PX_PER_MS = 1.6;
+// Bounded wait for click-sync so a throttled tab or stuck animation never blocks
+// a real CDP mousePressed event indefinitely.
+export const CLICK_SYNC_MAX_WAIT_MS = 600;
 
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -1231,6 +1234,22 @@ export function buildGhostCursorActionExpression(action) {
   return `globalThis.${CURSOR_API_KEY}?.applyMouseAction?.(${JSON.stringify(action)})`;
 }
 
+export function buildGhostCursorSyncExpression(action, maxWaitMs = CLICK_SYNC_MAX_WAIT_MS) {
+  const safeTimeoutMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0
+    ? Math.round(maxWaitMs)
+    : CLICK_SYNC_MAX_WAIT_MS;
+  const moveAction = { ...action, type: "move" };
+  return `(() => {
+    const api = globalThis.${CURSOR_API_KEY};
+    if (!api || typeof api.applyMouseAction !== "function") return Promise.resolve({ arrived: false });
+    const arrival = Promise.resolve(api.applyMouseAction(${JSON.stringify(moveAction)}));
+    return Promise.race([
+      arrival,
+      new Promise((resolve) => setTimeout(() => resolve({ arrived: false, timedOut: true }), ${safeTimeoutMs})),
+    ]);
+  })()`;
+}
+
 function safeLog(log, error) {
   try {
     log?.(error);
@@ -1385,7 +1404,92 @@ export function createGhostCursorController({
     });
   }
 
-  return { enable, queueAction, disable, cleanup };
+  function syncBeforeClick(tabId, action, { maxWaitMs = CLICK_SYNC_MAX_WAIT_MS } = {}) {
+    if (!isEnabled() || !isTabAttached(tabId)) return Promise.resolve(false);
+    const state = getState(tabId);
+    const generation = state.generation;
+    const moveAction = { ...action, type: "move" };
+    const safeTimeoutMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0
+      ? maxWaitMs
+      : CLICK_SYNC_MAX_WAIT_MS;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      }, safeTimeoutMs);
+
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(Boolean(value));
+      };
+
+      const queued = enqueue(tabId, async () => {
+        if (!isEnabled() || !isTabAttached(tabId) || generation !== state.generation) return false;
+        if (!(await ensureScript(tabId, state, generation))) return false;
+        if (!isEnabled() || !isTabAttached(tabId) || generation !== state.generation) return false;
+        let evalTimer = null;
+        try {
+          return await Promise.race([
+            sendCommand(tabId, "Runtime.evaluate", {
+              expression: buildGhostCursorSyncExpression(moveAction, safeTimeoutMs),
+              awaitPromise: true,
+              returnByValue: true,
+            }).then(() => true),
+            new Promise((r) => {
+              evalTimer = setTimeout(() => r(false), safeTimeoutMs);
+            }),
+          ]);
+        } finally {
+          if (evalTimer !== null) clearTimeout(evalTimer);
+        }
+      }, { action: moveAction, generation });
+
+      Promise.resolve(queued).then(finish, (error) => {
+        safeLog(log, error);
+        finish(false);
+      });
+    });
+  }
+
+  return { enable, queueAction, syncBeforeClick, disable, cleanup };
+}
+
+export async function syncGhostCursorBeforeClick({
+  method,
+  childSessionId,
+  tabId,
+  params,
+  agentName,
+  controller,
+  isClickSyncEnabled = false,
+  maxWaitMs = CLICK_SYNC_MAX_WAIT_MS,
+  log,
+}) {
+  const enabled = typeof isClickSyncEnabled === "function"
+    ? Boolean(isClickSyncEnabled())
+    : Boolean(isClickSyncEnabled);
+  if (!enabled) return false;
+  if (childSessionId || method !== "Input.dispatchMouseEvent" || params?.type !== "mousePressed") {
+    return false;
+  }
+  const action = buildGhostCursorAction({ type: "mouseMoved", params, agentName });
+  if (!action) return false;
+
+  try {
+    if (typeof controller?.syncBeforeClick === "function") {
+      return Boolean(await controller.syncBeforeClick(tabId, action, { maxWaitMs }));
+    }
+    const result = await controller?.queueAction?.(tabId, action);
+    return Boolean(result);
+  } catch (error) {
+    safeLog(log, error);
+    return false;
+  }
 }
 
 export function handleGhostCursorInput({

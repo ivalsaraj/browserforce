@@ -324,6 +324,14 @@ rotation, stretch, and visibility:
   (`ARRIVAL_DISTANCE_THRESHOLD_PX`) at near-zero velocity and resolves
   `waitForArrival()`. While idle after arrival, a gentle `±12.5°` rock (`0.66s`
   period) ramps in over `1.4s` and stops on the next move.
+- **Optional click sync (`ghostCursorClickSync`, default `false`)**: exposed in the
+  popup under the ghost-cursor toggle (only shown/enabled when the ghost cursor is
+  on). When ON and the ghost cursor is enabled, `cdpCommand` awaits
+  `syncGhostCursorBeforeClick()` before forwarding a top-level
+  `Input.dispatchMouseEvent` of type `mousePressed` to Chrome, moving the cursor
+  to the click point and waiting for `waitForArrival()` bounded by
+  `CLICK_SYNC_MAX_WAIT_MS` (`600ms`) so a stuck animation never blocks a click.
+  When OFF (or absent), the cursor remains purely post-command cosmetic.
 - **Reduced motion & subframe/blank-page safety**: `prefers-reduced-motion: reduce`
   jumps directly to the target and disables wiggle. Subframes (`window.top !== window`)
   never mount a cursor, and non-web-accessible documents (`about:`, `data:`, opaque

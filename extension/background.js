@@ -2,7 +2,7 @@ import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
 import { hydrateAgentTabs, hydrateActivity, canCloseTab } from './auto-manage-state.js';
-import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
+import { createGhostCursorController, handleGhostCursorInput, syncGhostCursorBeforeClick } from './ghost-cursor.js';
 import { shouldReportTabUpdate, shouldReportTabRemoval } from './tab-update-policy.js';
 import { resolveOrphanedPause, isNonEmptyString } from './orphan-pause-policy.js';
 
@@ -56,6 +56,7 @@ const dedicatedWindowIds = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
 let isGhostCursorEnabled = false;
+let isGhostCursorClickSyncEnabled = false;
 
 const ghostCursorController = createGhostCursorController({
   isEnabled: () => isGhostCursorEnabled,
@@ -120,9 +121,10 @@ let restrictionExplained = false;
   // anything can attach tabs or serve listTabs.
   await hydrateAutoManageState();
 
-  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled']);
+  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled', 'ghostCursorClickSync']);
   currentRelayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
   isGhostCursorEnabled = !!stored.ghostCursorEnabled;
+  isGhostCursorClickSyncEnabled = !!stored.ghostCursorClickSync;
 
   // Register debugger listeners once (persists across reconnections)
   chrome.debugger.onEvent.addListener(onDebuggerEvent);
@@ -723,6 +725,23 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
     ? { tabId, sessionId: childSessionId }
     : { tabId };
 
+  if (isGhostCursorEnabled && isGhostCursorClickSyncEnabled) {
+    try {
+      await syncGhostCursorBeforeClick({
+        method,
+        childSessionId,
+        tabId,
+        params,
+        agentName,
+        controller: ghostCursorController,
+        isClickSyncEnabled: isGhostCursorEnabled && isGhostCursorClickSyncEnabled,
+        log: (error) => console.warn('[bf] Ghost cursor click-sync error:', error?.message || error),
+      });
+    } catch (error) {
+      console.warn('[bf] Ghost cursor click-sync adapter error:', error?.message || error);
+    }
+  }
+
   const result = await chrome.debugger.sendCommand(debuggee, method, params || {});
   try {
     handleGhostCursorInput({
@@ -1000,6 +1019,10 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
         : ghostCursorController.disable(tabId)
     ));
     await Promise.allSettled(operations);
+  }
+
+  if (changes.ghostCursorClickSync) {
+    isGhostCursorClickSyncEnabled = !!changes.ghostCursorClickSync.newValue;
   }
 });
 
