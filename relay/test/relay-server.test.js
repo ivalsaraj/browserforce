@@ -4855,3 +4855,64 @@ describe('orphaned paused child targets', () => {
     assert.equal(resumes().length, 0);
   });
 });
+
+describe('agent popup discovery', () => {
+  it('preserves opener identity and ownership in immediate popup attachment events', () => {
+    const relay = new RelayServer(getRandomPort());
+    const messages = [];
+    relay.clients.add({ readyState: 1, send: (raw) => messages.push(JSON.parse(raw)) });
+    relay.targets.set('parent-session', {
+      tabId: 2, targetId: 'relay-opener', chromeTargetId: 'chrome-opener',
+      targetInfo: { url: 'https://opener.test' }, origin: 'agent-created', ownerKey: 'label:owner',
+    });
+    relay.tabToSession.set(2, 'parent-session');
+    relay._handleExtMessage({ method: 'manualTabAttached', params: {
+      tabId: 3, targetId: 'chrome-popup', origin: 'agent-created', windowId: 10,
+      targetInfo: { openerId: 'chrome-opener', url: 'https://popup.test' },
+    } });
+    const attached = messages.find((m) => m.method === 'Target.attachedToTarget');
+    assert.equal(attached.params.targetInfo.openerId, 'relay-opener');
+    assert.equal(relay.targets.get(relay.tabToSession.get(3)).ownerKey, 'label:owner');
+    assert.equal(messages[0].method, 'Target.targetCreated');
+  });
+
+  it('Playwright emits both page and popup for an extension-announced popup', async () => {
+    const { chromium } = require('playwright-core');
+    const port = getRandomPort();
+    const relay = new RelayServer(port);
+    relay.start({ writeCdpUrl: false });
+    let ext;
+    let browser;
+    try {
+      ext = await connectWs(`ws://127.0.0.1:${port}/extension`, { headers: { Origin: 'chrome-extension://test' } });
+      ext.on('message', (raw) => {
+        const msg = JSON.parse(raw);
+        if (msg.method === 'ping') { ext.send(JSON.stringify({ method: 'pong' })); return; }
+        if (!msg.id) return;
+        let result = {};
+        if (msg.method === 'listTabs') result = { tabs: [{ tabId: 2, url: 'https://opener.test', origin: 'agent-created', ownerKey: 'label:owner' }] };
+        if (msg.method === 'cdpCommand' && msg.params.method === 'Page.getFrameTree') {
+          result = { frameTree: { frame: { id: 'popup-frame', loaderId: 'loader', url: 'https://popup.test', securityOrigin: 'https://popup.test', mimeType: 'text/html' } } };
+        }
+        ext.send(JSON.stringify({ id: msg.id, result }));
+      });
+      browser = await chromium.connectOverCDP(`ws://127.0.0.1:${port}/cdp?token=${relay.authToken}`, { timeout: 3000 });
+      const context = browser.contexts()[0];
+      const opener = context.pages()[0];
+      assert.ok(opener);
+      const pageEvent = context.waitForEvent('page', { timeout: 3000 });
+      const popupEvent = opener.waitForEvent('popup', { timeout: 3000 });
+      ext.send(JSON.stringify({ method: 'manualTabAttached', params: {
+        tabId: 3, targetId: 'popup-target', origin: 'agent-created', windowId: 10,
+        targetInfo: { openerId: 'bf-target-2', url: 'https://popup.test', title: 'Popup' },
+      } }));
+      const [page, popup] = await Promise.all([pageEvent, popupEvent]);
+      assert.equal(page, popup);
+      assert.equal(await popup.opener(), opener);
+    } finally {
+      await browser?.close();
+      ext?.close();
+      relay.stop();
+    }
+  });
+});

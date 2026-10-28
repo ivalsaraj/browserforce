@@ -282,6 +282,7 @@ function buildTargetInfo(target) {
     attached: true,
     browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
   };
+  if (target.targetInfo?.openerId) info.openerId = target.targetInfo.openerId;
   const windowId = integerWindowId(target.windowId ?? target.targetInfo?.windowId);
   if (windowId !== undefined) info.windowId = windowId;
   return info;
@@ -1107,10 +1108,15 @@ class RelayServer {
       const existing = this.targets.get(relaySessionId);
       const resolvedWindowId = integerWindowId(windowId ?? targetInfo?.windowId)
         ?? existing?.windowId;
+      const opener = targetInfo?.openerId && [...this.targets.values()].find((target) =>
+        target.targetId === targetInfo.openerId || target.chromeTargetId === targetInfo.openerId);
+      const popupTargetInfo = opener ? { ...targetInfo, openerId: opener.targetId } : targetInfo;
       this.targets.set(relaySessionId, {
         tabId,
         targetId: targetId || this._synthesizeTargetId(tabId),
-        targetInfo: targetInfo || { url: '', title: '' },
+        targetInfo: popupTargetInfo || { url: '', title: '' },
+        chromeTargetId: targetId || existing?.chromeTargetId,
+        ownerKey: existing?.ownerKey || (storedOrigin === 'agent-created' ? opener?.ownerKey : undefined),
         windowId: resolvedWindowId,
         debuggerAttached: true,
         // Preserve provenance when updating an existing tab; only overwrite when
@@ -1671,6 +1677,7 @@ class RelayServer {
         if (result.targetInfo) {
           target.targetInfo = {
             ...result.targetInfo,
+            ...(target.targetInfo?.openerId ? { openerId: target.targetInfo.openerId } : {}),
             targetId: target.targetId,
             browserContextId: DEFAULT_BROWSER_CONTEXT_ID,
           };

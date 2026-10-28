@@ -175,6 +175,24 @@ Agent-created tabs are pinned to the Chrome **window** the agent created them in
 
 **Focus requests:** Top-level `Page.bringToFront` is intercepted after restriction checks and answered with `{}`. It selects the tab (`chrome.tabs.update(tabId, { active: true })`) only inside a window the extension opened as a dedicated agent window; in a window shared with the user it is a no-op, because selecting the agent's tab there replaces the tab the user is looking at (the takeover that originally motivated the dedicated window). Background tabs stay fully drivable because the debugger is attached. Never forward it to the debugger or focus a Chrome window: that can switch the user's macOS Space. Child-session commands are forwarded unchanged.
 
+### Agent Popups Stay in the Background
+
+- `tabs.onCreated` + `openerTabId` adopts popups from agent-created tabs, or
+  attached tabs with a real (non-passive) command in the last five seconds.
+  Attachment/init alone never qualifies. The short window covers delayed click
+  popups without treating a user-attached tab as permanently agent-owned.
+- Move the new popup tab into its opener's window, restore the previous selected
+  tab before attaching the debugger, and join the opener's current group. Inherit
+  the opener's owner/name (a user-attached opener has no owner); checkpoint agent
+  membership/activity for auto-close. Never move the opener or user-only popups.
+- Reuse `manualTabAttached` with `origin: 'agent-created'` to announce the real
+  popup immediately. Preserve/remap Chrome's `targetInfo.openerId` to the relay
+  target id, or Playwright sees a page but never emits `page.on('popup')`.
+- No new permissions. Chrome creates the tab/window before this event, so a brief
+  selection/window flash or macOS Space jump remains possible. Do not promise
+  zero flicker or focus windows to compensate. Missing `openerTabId` cannot be
+  attributed safely and is left alone.
+
 ### Tab Identity Survives Reconnect
 
 Handles (`t<N>`) and names are keyed by **relay target id**, not by Playwright

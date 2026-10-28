@@ -221,3 +221,18 @@ This is the user's REAL browser. Be respectful:
 - Don't close tabs you didn't open
 - Don't navigate tabs you didn't create
 - Don't modify browser settings or stored data
+
+### Popup placement
+
+Agent-created tabs and attached tabs driven in the last five seconds keep their
+popups in the opener's window and group, with inherited ownership and auto-close.
+User-only popups stay untouched. Wait for the actual popup before the action:
+
+```js
+const popupPromise = page.waitForEvent('popup');
+await page.getByRole('link', { name: 'Open details' }).click();
+state.popup = await popupPromise;
+```
+
+Chrome creates popups before the extension can restore selection; brief flicker
+or a macOS Space jump remains possible. Missing opener metadata is left alone.
