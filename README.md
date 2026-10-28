@@ -1097,7 +1097,7 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 - **CORS:** wildcard `Access-Control-Allow-Origin` is an **allowlist** — only `/` (counts-only health) sends it. Every other route is denied cross-origin by default: `/json`, `/json/list` and `/json/version` embed the CDP auth token in `webSocketDebuggerUrl`, `/restrictions` and `/agent-preferences` return the user's settings including free-text instructions, and `/extension/status` and `/attached-tabs` expose tab URLs and titles. Extension pages are unaffected — they carry host permissions and bypass CORS.
 - **`/extension/status` vs `/json/list`:** `/json/list` returns CDP-discovery-shaped targets for Playwright; `/extension/status` returns relay-owned provenance — `manualAttachedTabs` are user-attached tabs (`origin: 'manual'`), while `attachedTabs` can also include `agent-created` and `relay-attached` tabs. Use `activeManualTargets`/`manualAttachedTabs` to confirm an attached page is ready for inspect/current-tab flows.
 
-Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window).
+Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window). The CLI uses `browserforce-cli-<name>` when `BROWSERFORCE_AGENT_NAME` is set, so separate CLI calls by one named agent own the same tabs; unnamed one-shot calls send no label.
 
 
 </details>

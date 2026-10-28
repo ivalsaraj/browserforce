@@ -42,19 +42,19 @@ browserforce -e "<code>"         # Raw Playwright JavaScript (one-shot escape ha
 
 Use `-e` only when the command layer cannot express the task.
 
-## Put your name on the cursor
+## Name yourself first
 
-If the user has the ghost cursor on, the cursor shows which agent is driving —
-but only if you say who you are. Export this before running any command:
+Before your first command, export a short name unique to this task:
 
 ```bash
-export BROWSERFORCE_AGENT_NAME="Claude"
+export BROWSERFORCE_AGENT_NAME="Claude auth-fix"
 ```
 
-Max **24 characters**, allowed: `A-Z a-z 0-9 space . _ -`. Anything else is
-stripped (not rejected), whitespace runs collapse, longer names are truncated,
-and a name that sanitizes to nothing shows no label at all. Pick a name that
-survives intact.
+Max **24 characters**, allowed: `A-Z a-z 0-9 space . _ -` (others are stripped).
+Keep the same name for every call. It labels the ghost cursor and your tab
+group, and it is how BrowserForce knows which tabs are yours across separate
+CLI calls. Without it, each `-e` call is a different owner. Agents sharing a
+name share ownership.
 
 Sharing the machine with other agents? Also export a distinct
 `BF_SESSIOND_LOCK_PATH=/tmp/bf-<your-name>.json`. One session daemon serves every

@@ -43,7 +43,12 @@ import {
   executeBrowserforceVerb,
   BrowserforceCommandError,
 } from '../mcp/src/browserforce-command-registry.js';
-import { agentCdpUrl } from '../mcp/src/client-label.js';
+import {
+  agentCdpUrl,
+  cliClientLabel,
+  ownerKeyForLabel,
+  PROCESS_CLIENT_LABEL,
+} from '../mcp/src/client-label.js';
 import { loadPluginRuntime } from '../mcp/src/plugin-runtime.js';
 import { installProcessCrashGuard } from '../mcp/src/process-crash-guard.js';
 
@@ -63,8 +68,12 @@ const DEFAULT_IDLE_MS = 5 * 60 * 1000;
  * id, so sessiond's agent-window pin was discarded on every disconnect and the
  * next created tab could land in the user's own window.
  */
+// A named agent's daemon uses its CLI label, so tabs its one-shot `-e` calls
+// open still read as `yours` in `tabs`.
+const SESSIOND_CLIENT_LABEL = cliClientLabel() ?? PROCESS_CLIENT_LABEL;
+
 export async function buildRealCdpUrl() {
-  return agentCdpUrl(await getCdpUrl());
+  return agentCdpUrl(await getCdpUrl(), { label: SESSIOND_CLIENT_LABEL });
 }
 
 async function connectRealBrowser() {
@@ -209,6 +218,7 @@ export async function startSessiond({ lockPath, urlPath } = {}) {
   const pluginRuntime = await loadPluginRuntime({ logPrefix: '[bf-sessiond]' });
   const runtime = createBrowserSessionRuntime({
     getRelayHttpUrl,
+    getOwnerKey: () => ownerKeyForLabel(SESSIOND_CLIENT_LABEL),
     buildExecContext,
     runCode,
     pluginHelpers: pluginRuntime.helpers,

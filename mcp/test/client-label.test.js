@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { withClientLabel, withAgentName, ownerKeyForLabel, PROCESS_CLIENT_LABEL } from '../src/client-label.js';
+import { withClientLabel, withAgentName, ownerKeyForLabel, cliClientLabel, PROCESS_CLIENT_LABEL } from '../src/client-label.js';
 
 const readLabelFromSubprocess = (env) => execFileSync(process.execPath, [
   '--input-type=module', '-e',
@@ -98,12 +98,25 @@ test('agentCdpUrl applies both the affinity label and the agent name by default'
     'dropping withClientLabel here would delete the durable window affinity key');
 });
 
-test('agentCdpUrl with durableLabel false adds the name but no affinity label', () => {
+test('agentCdpUrl with label null adds the name but no affinity label', () => {
   const out = paramsFromSubprocess({ BROWSERFORCE_AGENT_NAME: 'Claude' },
-    `agentCdpUrl(${URL_IN}, { durableLabel: false })`);
+    `agentCdpUrl(${URL_IN}, { label: null })`);
   assert.equal(out.agentName, 'Claude');
   assert.equal(out.label, null,
-    'the one-shot CLI path must not start pinning a window');
+    'an unnamed one-shot CLI call must not start pinning a window');
+});
+
+test('agentCdpUrl uses an explicit label', () => {
+  const out = paramsFromSubprocess({}, `agentCdpUrl(${URL_IN}, { label: 'browserforce-cli-BF Check' })`);
+  assert.equal(out.label, 'browserforce-cli-BF Check');
+});
+
+test('a named CLI agent gets one stable label; an unnamed one gets none', () => {
+  assert.equal(cliClientLabel({ BROWSERFORCE_AGENT_NAME: ' BF Check ' }), 'browserforce-cli-BF Check');
+  assert.equal(cliClientLabel({ BROWSERFORCE_AGENT_NAME: '' }), null);
+  assert.equal(cliClientLabel({ BROWSERFORCE_AGENT_NAME: '   ' }), null);
+  assert.equal(cliClientLabel({}), null);
+  assert.equal(cliClientLabel({ BROWSERFORCE_CDP_CLIENT_LABEL: 'team', BROWSERFORCE_AGENT_NAME: 'x' }), 'team');
 });
 
 test('agentCdpUrl still applies the affinity label when the agent is unnamed', () => {
@@ -118,21 +131,15 @@ test('agentCdpUrl still applies the affinity label when the agent is unnamed', (
 // deliberately excluded — a developer repro script, not a user entrypoint.
 test('every connect factory routes its CDP URL through agentCdpUrl', () => {
   const factories = [
-    ['mcp/src/index.js', '../src/index.js', true],
-    ['cli/sessiond.js', '../../cli/sessiond.js', true],
-    ['bin.js', '../../bin.js', false],
+    ['mcp/src/index.js', '../src/index.js', /agentCdpUrl\(await getCdpUrl\(\)\)/],
+    ['cli/sessiond.js', '../../cli/sessiond.js', /label: SESSIOND_CLIENT_LABEL/],
+    ['bin.js', '../../bin.js', /label: cliClientLabel\(\)/],
   ];
-  for (const [name, relative, durableLabel] of factories) {
+  for (const [name, relative, labelUse] of factories) {
     const source = readFileSync(new URL(relative, import.meta.url), 'utf8');
     assert.match(source, /agentCdpUrl\(/, `${name} must build its connect URL with agentCdpUrl`);
     assert.doesNotMatch(source, /withClientLabel\(/,
       `${name} must not hand-compose the wrappers; agentCdpUrl owns that`);
-    if (durableLabel) {
-      assert.doesNotMatch(source, /durableLabel:\s*false/,
-        `${name} needs the durable affinity label — dropping it respawns a window per reconnect`);
-    } else {
-      assert.match(source, /durableLabel:\s*false/,
-        `${name} is the one-shot path and must not start pinning a window`);
-    }
+    assert.match(source, labelUse, `${name} must connect with its own label policy`);
   }
 });

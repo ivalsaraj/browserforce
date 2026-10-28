@@ -152,3 +152,12 @@
   tilt/squash for short moves, one 1.41s wiggle burst on arrival, spring-driven
   appear/disappear, click-sync bound 1500ms. Favicon badge shares the arrow path.
 - PNG asset and its `web_accessible_resources` entry removed (no reader left).
+
+## 2026-10-28 — The CLI agent name is its tab-ownership identity
+
+- Symptom: a CLI agent's own tabs showed `owned by <short id>` on its next call;
+  each one-shot `-e` connected unlabeled, so every call was a new owner.
+- `cliClientLabel()` maps `BROWSERFORCE_AGENT_NAME` to the label
+  `browserforce-cli-<name>` for one-shot calls and sessiond (owner check uses the
+  same label). Unnamed one-shot calls stay unlabeled; MCP keeps its random label.
+- Skill now opens with "Name yourself first": one name, ≤24 chars, every call.

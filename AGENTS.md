@@ -426,6 +426,12 @@ chip's `textContent`.
   accidental page CSS (broad `div`/`span` rules, global RTL, inherited fonts),
   not against a page using `!important`. The existing arrow has the identical
   exposure, so hardening the chip alone would buy nothing.
+- **The name is the CLI's owner identity.** `cliClientLabel()` turns
+  `BROWSERFORCE_AGENT_NAME` into the affinity label `browserforce-cli-<name>`
+  for one-shot `bin.js` and for sessiond (whose `getOwnerKey` uses the same
+  label), so separate CLI calls own the same tabs and share one window pin. An
+  unnamed one-shot call sends no label: each call is its own owner. MCP keeps
+  its random per-process label. Same name means shared ownership, by design.
 - **Attribution is per CDP connection, not per CLI call.** MCP (one connection
   per process) and one-shot `bin.js` label correctly. `cli/sessiond.js` holds one
   shared long-lived connection and takes its name from whichever environment
