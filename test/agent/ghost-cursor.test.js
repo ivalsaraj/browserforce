@@ -5,11 +5,40 @@ import assert from 'node:assert/strict';
 
 import {
   GHOST_CURSOR_SOURCE,
+  FIXED_TIMESTEP_MS,
+  LONG_MOVE_DISTANCE_THRESHOLD_PX,
+  BEZIER_CANDIDATE_COUNT,
+  VIEWPORT_MARGIN_PX,
+  RESTING_TILT_DEG,
+  MIN_NARROWING_SCALE_X,
+  ARRIVAL_DISTANCE_THRESHOLD_PX,
+  WIGGLE_MAX_AMPLITUDE_DEG,
+  WIGGLE_PERIOD_MS,
+  WIGGLE_RAMP_IN_MS,
+  APPEAR_INITIAL_SCALE,
+  APPEAR_INITIAL_BLUR_PX,
+  CURSOR_GLOW_COLOR,
+  stepSpring,
+  evaluateBezierPoint,
+  evaluateBezierTangent,
+  isArcInsideViewport,
+  selectBezierArc,
+  computeMoveDurationMs,
+  computeTargetRotationDeg,
+  computeSpeedNarrowing,
+  computeShortMoveStretch,
+  hasCursorArrived,
+  computeWiggleAmplitude,
+  computeWiggleAngleDeg,
+  computeVisibilityEffect,
+  CLICK_SYNC_MAX_WAIT_MS,
   buildGhostCursorSource,
   buildGhostCursorAction,
   buildGhostCursorActionExpression,
+  buildGhostCursorSyncExpression,
   createGhostCursorController,
   handleGhostCursorInput,
+  syncGhostCursorBeforeClick,
 } from '../../extension/ghost-cursor.js';
 
 const background = fs.readFileSync(new URL('../../extension/background.js', import.meta.url), 'utf8');
@@ -33,7 +62,18 @@ function createCommandRecorder({ shouldReject = false, onCommand } = {}) {
   return { calls, sendCommand };
 }
 
-function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE, { hasRoot = true, legacyCursor = false } = {}) {
+function createFakeRendererRuntime(
+  source = GHOST_CURSOR_SOURCE,
+  {
+    hasRoot = true,
+    legacyCursor = false,
+    withRaf = false,
+    reducedMotion = false,
+    isSubframe = false,
+    location = undefined,
+    origin = undefined,
+  } = {},
+) {
   class FakeElement {
     constructor(tagName) {
       this.tagName = tagName.toUpperCase();
@@ -71,8 +111,11 @@ function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE, { hasRoot = tru
 
   const documentElement = new FakeElement('html');
   const timers = [];
+  const rafQueue = [];
   const listeners = [];
   let nextTimerId = 1;
+  let nextRafId = 1;
+  let currentRafTimeMs = 0;
 
   function findById(element, id) {
     if (element.id === id) return element;
@@ -97,7 +140,25 @@ function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE, { hasRoot = tru
   const window = {
     innerWidth: 1280,
     innerHeight: 800,
+    ...(location !== undefined ? { location } : {}),
+    ...(origin !== undefined ? { origin } : {}),
+    matchMedia: (query) => ({
+      matches: reducedMotion && query.includes('prefers-reduced-motion'),
+    }),
   };
+  window.top = isSubframe ? {} : window;
+
+  if (withRaf) {
+    window.requestAnimationFrame = (callback) => {
+      const id = nextRafId++;
+      rafQueue.push({ id, callback, cancelled: false });
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      const entry = rafQueue.find((candidate) => candidate.id === id);
+      if (entry) entry.cancelled = true;
+    };
+  }
 
   const context = {
     document,
@@ -131,7 +192,10 @@ function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE, { hasRoot = tru
     document,
     documentElement,
     dispatch(action) {
-      context.globalThis.__browserforceGhostCursor.applyMouseAction(action);
+      return context.globalThis.__browserforceGhostCursor.applyMouseAction(action);
+    },
+    state() {
+      return context.globalThis.__browserforceGhostCursor.getState();
     },
     chip() {
       return findById(documentElement, '__browserforce_ghost_cursor_label__');
@@ -143,9 +207,6 @@ function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE, { hasRoot = tru
       const outer = findById(documentElement, '__browserforce_ghost_cursor__');
       return outer ? outer.children[0] : null;
     },
-    // Fires exactly one DOMContentLoaded handler. The renderer registers one per
-    // deferred ensureCursorElement() call, and firing them all would let a later
-    // handler's reuse branch cover for a broken mount branch.
     mountRoots() {
       document.documentElement = documentElement;
       document.body = documentElement;
@@ -159,6 +220,25 @@ function createFakeRendererRuntime(source = GHOST_CURSOR_SOURCE, { hasRoot = tru
       if (!timer) throw new Error('No active fake timer');
       timer.cleared = true;
       timer.callback();
+    },
+    stepRaf(dtMs = FIXED_TIMESTEP_MS) {
+      currentRafTimeMs += dtMs;
+      const pending = rafQueue.splice(0, rafQueue.length).filter((entry) => !entry.cancelled);
+      if (pending.length > 0) {
+        for (const entry of pending) entry.callback(currentRafTimeMs);
+      } else {
+        context.globalThis.__browserforceGhostCursor.stepFrame(currentRafTimeMs);
+      }
+      return context.globalThis.__browserforceGhostCursor.getState();
+    },
+    stepUntilArrived(maxFrames = 240, dtMs = FIXED_TIMESTEP_MS) {
+      const trajectory = [];
+      for (let i = 0; i < maxFrames; i += 1) {
+        const snapshot = this.stepRaf(dtMs);
+        trajectory.push(snapshot);
+        if (snapshot.arrived) return { arrived: true, frames: i + 1, trajectory };
+      }
+      return { arrived: false, frames: maxFrames, trajectory };
     },
   };
 }
@@ -176,6 +256,220 @@ test('packages the PNG and resolves its extension URL in the injected renderer',
     resources: ['assets/ghost-cursor.png'],
     matches: ['<all_urls>'],
   }]);
+});
+
+test('guards against chrome-extension:// asset load errors on about:blank and subframes', () => {
+  const imageUrl = 'chrome-extension://test-extension/assets/ghost-cursor.png';
+  const source = buildGhostCursorSource(imageUrl);
+
+  // Subframes must not mount a ghost cursor element at all.
+  const subframeRuntime = createFakeRendererRuntime(source, { isSubframe: true });
+  assert.equal(subframeRuntime.document.getElementById('__browserforce_ghost_cursor__'), null);
+
+  // about:blank and opaque origins do not match <all_urls> in web_accessible_resources;
+  // renderer falls back to an inline data: SVG URL instead of triggering Chrome's denial log.
+  const blankRuntime = createFakeRendererRuntime(source, {
+    location: { protocol: 'about:', href: 'about:blank' },
+    origin: 'null',
+  });
+  const blankInner = blankRuntime.inner();
+  assert.ok(blankInner);
+  assert.match(blankInner.style.backgroundImage, /^url\("data:image\/svg\+xml;utf8,/);
+  assert.ok(!blankInner.style.backgroundImage.includes('chrome-extension://'));
+});
+
+// ─── Pure Physics & Motion Unit Tests ────────────────────────────────────────
+
+test('stepSpring integrates with fixed-timestep sub-steps and converges to target', () => {
+  let stateA = { value: 0, velocity: 0 };
+  for (let i = 0; i < 60; i += 1) {
+    stateA = stepSpring(stateA, 100, { dtMs: FIXED_TIMESTEP_MS });
+  }
+  assert.ok(Math.abs(stateA.value - 100) < 0.5);
+  assert.ok(Math.abs(stateA.velocity) < 5);
+
+  // Fixed-timestep invariance: one 2*dt step matches two 1*dt steps exactly.
+  const oneDouble = stepSpring({ value: 10, velocity: 25 }, 200, { dtMs: FIXED_TIMESTEP_MS * 2 });
+  const firstHalf = stepSpring({ value: 10, velocity: 25 }, 200, { dtMs: FIXED_TIMESTEP_MS });
+  const secondHalf = stepSpring(firstHalf, 200, { dtMs: FIXED_TIMESTEP_MS });
+  assert.ok(Math.abs(oneDouble.value - secondHalf.value) < 1e-9);
+  assert.ok(Math.abs(oneDouble.velocity - secondHalf.velocity) < 1e-9);
+});
+
+test('selectBezierArc uses straight lines for short moves and curved viewport-safe arcs for long moves', () => {
+  const viewport = { width: 1280, height: 800 };
+
+  // Short move (<= 196px): straight line
+  const shortArc = selectBezierArc({ x: 100, y: 100 }, { x: 220, y: 180 }, viewport);
+  assert.equal(shortArc.isCurved, false);
+  const midShort = evaluateBezierPoint(shortArc, 0.5);
+  assert.ok(Math.abs(midShort.x - 160) < 1e-6);
+  assert.ok(Math.abs(midShort.y - 140) < 1e-6);
+
+  // Long move (> 196px) near top viewport edge: chooses a candidate arc that stays >= 20px inside viewport
+  const edgeStart = { x: 80, y: 24 };
+  const edgeEnd = { x: 700, y: 24 };
+  const longArc = selectBezierArc(edgeStart, edgeEnd, viewport);
+  assert.ok(longArc.distance > LONG_MOVE_DISTANCE_THRESHOLD_PX);
+  assert.equal(longArc.isCurved, true);
+  assert.ok(longArc.candidateIndex >= 0 && longArc.candidateIndex < BEZIER_CANDIDATE_COUNT);
+  assert.equal(isArcInsideViewport(longArc, viewport, VIEWPORT_MARGIN_PX), true);
+  const midLong = evaluateBezierPoint(longArc, 0.5);
+  // Must curve downward into the viewport, not upward past y=20px
+  assert.ok(midLong.y > edgeStart.y + 20);
+
+  // Shorter distance -> faster duration
+  assert.ok(computeMoveDurationMs(120) < computeMoveDurationMs(400));
+});
+
+test('computeTargetRotationDeg follows path tangent on long arcs and peaks mid-move on short moves', () => {
+  const tangent = evaluateBezierTangent(
+    selectBezierArc({ x: 100, y: 200 }, { x: 600, y: 450 }, { width: 1280, height: 800 }),
+    0.5,
+  );
+  const midArcRotation = computeTargetRotationDeg({
+    isCurved: true,
+    tangentAngleDeg: tangent.angleDeg,
+    progress: 0.5,
+    restingTiltDeg: RESTING_TILT_DEG,
+  });
+  const endArcRotation = computeTargetRotationDeg({
+    isCurved: true,
+    tangentAngleDeg: tangent.angleDeg,
+    progress: 1,
+    restingTiltDeg: RESTING_TILT_DEG,
+  });
+  assert.ok(Math.abs(midArcRotation) > 5);
+  assert.ok(Math.abs(endArcRotation) < 1e-6);
+
+  // Short move peaks at progress = 0.5 and settles to 0 at endpoints
+  const shortStart = computeTargetRotationDeg({ isCurved: false, progress: 0 });
+  const shortMid = computeTargetRotationDeg({ isCurved: false, progress: 0.5 });
+  const shortEnd = computeTargetRotationDeg({ isCurved: false, progress: 1 });
+  assert.equal(shortStart, 0);
+  assert.ok(Math.abs(shortMid) > 5);
+  assert.ok(Math.abs(shortEnd) < 1e-6);
+});
+
+test('computeSpeedNarrowing and computeShortMoveStretch deform width and squash-stretch', () => {
+  assert.equal(computeSpeedNarrowing(0), 1);
+  assert.ok(computeSpeedNarrowing(1200) < 1 && computeSpeedNarrowing(1200) > MIN_NARROWING_SCALE_X);
+  assert.equal(computeSpeedNarrowing(5000), MIN_NARROWING_SCALE_X);
+
+  const stretchStart = computeShortMoveStretch(0);
+  const stretchMid = computeShortMoveStretch(0.5);
+  const stretchEnd = computeShortMoveStretch(1);
+  assert.equal(stretchStart.scaleX, 1);
+  assert.equal(stretchStart.scaleY, 1);
+  assert.ok(stretchMid.scaleY > 1);
+  assert.ok(stretchMid.scaleX < 1);
+  assert.ok(Math.abs(stretchEnd.scaleY - 1) < 1e-6);
+});
+
+test('hasCursorArrived enforces <= 0.85px distance and near-zero velocity', () => {
+  assert.equal(
+    hasCursorArrived({ x: 100.5, y: 200.5, vx: 1, vy: 1 }, { x: 100, y: 200 }),
+    true,
+  );
+  assert.equal(
+    hasCursorArrived(
+      { x: 100 + ARRIVAL_DISTANCE_THRESHOLD_PX + 0.2, y: 200, vx: 0, vy: 0 },
+      { x: 100, y: 200 },
+    ),
+    false,
+  );
+  assert.equal(
+    hasCursorArrived({ x: 100, y: 200, vx: 40, vy: 0 }, { x: 100, y: 200 }),
+    false,
+  );
+});
+
+test('computeWiggleAmplitude and computeWiggleAngleDeg ramp to 12.5deg over 1.4s with 0.66s period', () => {
+  assert.equal(computeWiggleAmplitude(0), 0);
+  const halfRamp = computeWiggleAmplitude(WIGGLE_RAMP_IN_MS / 2);
+  assert.ok(halfRamp > 0 && halfRamp < WIGGLE_MAX_AMPLITUDE_DEG);
+  assert.equal(computeWiggleAmplitude(WIGGLE_RAMP_IN_MS), WIGGLE_MAX_AMPLITUDE_DEG);
+  assert.equal(computeWiggleAmplitude(WIGGLE_RAMP_IN_MS + 1000), WIGGLE_MAX_AMPLITUDE_DEG);
+
+  // Quarter period after ramp completes hits peak +12.5 deg; three-quarter period hits -12.5 deg
+  const cycleBase = WIGGLE_RAMP_IN_MS * 10; // exact multiple of 660ms? Let's use 10 * WIGGLE_PERIOD_MS (> 1400ms)
+  const fullCycleAtRamp = WIGGLE_PERIOD_MS * 3;
+  const quarterPeak = computeWiggleAngleDeg(fullCycleAtRamp + WIGGLE_PERIOD_MS * 0.25);
+  const threeQuarterPeak = computeWiggleAngleDeg(fullCycleAtRamp + WIGGLE_PERIOD_MS * 0.75);
+  assert.ok(Math.abs(quarterPeak - WIGGLE_MAX_AMPLITUDE_DEG) < 1e-6);
+  assert.ok(Math.abs(threeQuarterPeak + WIGGLE_MAX_AMPLITUDE_DEG) < 1e-6);
+});
+
+test('computeVisibilityEffect combines fade, 40% scale, and 5px->0 blur', () => {
+  const hidden = computeVisibilityEffect(0);
+  assert.equal(hidden.opacity, 0);
+  assert.equal(hidden.scale, APPEAR_INITIAL_SCALE);
+  assert.equal(hidden.blurPx, APPEAR_INITIAL_BLUR_PX);
+
+  const visible = computeVisibilityEffect(1);
+  assert.equal(visible.opacity, 1);
+  assert.equal(visible.scale, 1);
+  assert.equal(visible.blurPx, 0);
+});
+
+test('renderer bends smoothly when retargeted mid-move, resolves arrival promise, wiggles when idle, and respects reduced motion', async () => {
+  const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
+  const inner = runtime.inner();
+  assert.ok(inner.style.filter.includes(CURSOR_GLOW_COLOR));
+
+  // Initial placement
+  await runtime.dispatch({ type: 'move', x: 100, y: 100, button: 'none' });
+  assert.equal(runtime.state().arrived, true);
+
+  // Start a long move (> 196px)
+  let arrivedResolved = false;
+  const movePromise = runtime.dispatch({ type: 'move', x: 500, y: 400, button: 'none' }).then((res) => {
+    arrivedResolved = res.arrived;
+    return res;
+  });
+  assert.equal(runtime.state().arrived, false);
+  assert.equal(runtime.state().isLongMove, true);
+
+  // Step a few frames into the move
+  for (let i = 0; i < 12; i += 1) runtime.stepRaf();
+  const midMoveState = runtime.state();
+  assert.ok(midMoveState.x > 100 && midMoveState.x < 500);
+  assert.ok(Math.hypot(midMoveState.vx, midMoveState.vy) > 10);
+
+  // Retarget mid-move: position and velocity must not jump
+  runtime.dispatch({ type: 'move', x: 260, y: 520, button: 'none' });
+  const retargetedState = runtime.state();
+  assert.equal(retargetedState.x, midMoveState.x);
+  assert.equal(retargetedState.y, midMoveState.y);
+  assert.equal(retargetedState.vx, midMoveState.vx);
+  assert.equal(retargetedState.vy, midMoveState.vy);
+
+  // Step until arrival at the new target
+  const result = runtime.stepUntilArrived();
+  assert.equal(result.arrived, true);
+  await movePromise;
+  assert.equal(arrivedResolved, true);
+  assert.ok(Math.hypot(runtime.state().x - 260, runtime.state().y - 520) <= ARRIVAL_DISTANCE_THRESHOLD_PX);
+
+  // Step further while idle: thinking wiggle ramps in and rocks rotation; stops on next move
+  for (let i = 0; i < 30; i += 1) runtime.stepRaf(20);
+  assert.ok(runtime.state().idleWiggleMs > 0);
+  assert.ok(Math.abs(runtime.state().rotation) > 0.1);
+  runtime.dispatch({ type: 'move', x: 300, y: 530, button: 'none' });
+  assert.equal(runtime.state().idleWiggleMs, 0);
+
+  // Reduced motion jumps straight to target and skips wiggle
+  const reducedRuntime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, {
+    withRaf: true,
+    reducedMotion: true,
+  });
+  await reducedRuntime.dispatch({ type: 'move', x: 50, y: 60, button: 'none' });
+  await reducedRuntime.dispatch({ type: 'move', x: 600, y: 500, button: 'none' });
+  assert.equal(reducedRuntime.state().x, 600);
+  assert.equal(reducedRuntime.state().y, 500);
+  assert.equal(reducedRuntime.state().arrived, true);
+  reducedRuntime.stepRaf(200);
+  assert.equal(reducedRuntime.state().rotation, 0);
 });
 
 test('maps supported CDP mouse events into cursor actions', () => {
@@ -354,11 +648,10 @@ test('renderer source mounts, animates, fades, wakes, navigates, and disables', 
   assert.ok(api);
   assert.ok(outer);
   api.applyMouseAction({ type: 'move', x: 10, y: 20, button: 'none' });
-  assert.equal(outer.style.transitionDuration, '0ms');
+  assert.match(outer.style.transform, /translate3d\(10px, 20px, 0\)/);
 
   api.applyMouseAction({ type: 'move', x: 310, y: 420, button: 'none' });
-  assert.equal(outer.style.transitionTimingFunction, 'cubic-bezier(0.65, 0, 0.35, 1)');
-  assert.equal(outer.style.transitionDuration, '417ms');
+  assert.match(outer.style.transform, /translate3d\(310px, 420px, 0\)/);
 
   api.applyMouseAction({ type: 'down', x: 310, y: 420, button: 'left' });
   assert.equal(inner.style.transform, 'scale(0.95)');
@@ -368,6 +661,7 @@ test('renderer source mounts, animates, fades, wakes, navigates, and disables', 
 
   runtime.runNextTimer();
   assert.equal(inner.style.opacity, '0');
+  assert.match(inner.style.filter, /blur\(5px\)/);
   api.applyMouseAction({ type: 'move', x: 500, y: 520, button: 'none' });
   assert.equal(inner.style.opacity, '1');
   assert.match(outer.style.transform, /500px/);
@@ -383,6 +677,13 @@ test('extension wiring keeps cursor updates cosmetic and settings default-off', 
   assert.match(popupHtml, /id="bf-ghost-cursor"/);
   assert.match(popupHtml, /Show ghost cursor for agent actions/);
   assert.match(popupJs, /ghostCursorEnabled/);
+  assert.match(popupHtml, /id="bf-ghost-cursor-click-sync-row"[^>]*hidden/);
+  assert.match(popupHtml, /id="bf-ghost-cursor-click-sync"[^>]*disabled/);
+  assert.match(popupHtml, /Sync clicks with cursor arrival/);
+  assert.match(popupJs, /ghostCursorClickSync/);
+  assert.match(popupJs, /syncGhostCursorClickSyncState/);
+  assert.match(background, /syncGhostCursorBeforeClick/);
+  assert.match(background, /ghostCursorClickSync/);
   assert.match(background, /handleGhostCursorInput/);
   assert.match(background, /ghostCursorController/);
   assert.match(background, /chrome\.runtime\.getURL\(['"]assets\/ghost-cursor\.png['"]\)/);
@@ -452,9 +753,6 @@ test('does not rebuild the chip when the same name repeats', () => {
 });
 
 test('adds a chip to a cursor element mounted by a build that had none', () => {
-  // Upgrade in place: the page already holds a pre-label cursor, so
-  // ensureCursorElement() takes its reuse-by-id branch and never runs the
-  // create path where the chip refs would otherwise be established.
   const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { legacyCursor: true });
   assert.equal(runtime.documentElement.children.length, 1);
   assert.equal(runtime.chip(), null);
@@ -469,8 +767,6 @@ test('does not duplicate the chip when the renderer is re-injected', () => {
   const runtime = createFakeRendererRuntime();
   runtime.dispatch(move('Claude'));
 
-  // Re-evaluating the source resets module state but not the page DOM, so the
-  // chip refs must be rebound from the live DOM rather than recreated.
   runtime.reinject();
   runtime.dispatch(move('Codex'));
 
@@ -499,15 +795,11 @@ test('isolates the chip from page CSS without breaking its inline layout', () =>
     assert.equal(element.style.direction, 'ltr');
     assert.equal(element.style.unicodeBidi, 'isolate');
     assert.equal(element.style.boxSizing, 'border-box');
-    // `all: initial` restores pointer-events: auto, and an auto child inside a
-    // none parent is hit-testable — it would swallow clicks under the label.
     assert.equal(element.style.pointerEvents, 'none');
-    // A name with a space must not wrap out of the one-line chip.
     assert.equal(element.style.whiteSpace, 'nowrap');
   }
   assert.equal(chip.style.position, 'absolute');
   assert.equal(chip.style.display, 'block');
-  // Spans stay inline, or the prefix stacks above the name.
   assert.equal(chip.children[0].style.display, 'inline');
   assert.equal(chip.children[1].style.display, 'inline');
   assert.equal(chip.children[0].style.position, undefined);
@@ -558,8 +850,6 @@ test('carries the agent name on a cursor action and omits the key without one', 
     buildGhostCursorAction({ type: 'mouseMoved', params: { x: 40, y: 90 }, agentName: 'Claude' }),
     { type: 'move', x: 40, y: 90, button: 'none', label: 'Claude' },
   );
-  // Omitted, not empty: an unnamed client's payload stays byte-identical to
-  // what it was before labels existed.
   assert.equal('label' in buildGhostCursorAction({ type: 'mouseMoved', params: { x: 40, y: 90 } }), false);
   assert.equal('label' in buildGhostCursorAction({ type: 'mouseMoved', params: { x: 40, y: 90 }, agentName: '' }), false);
   assert.equal('label' in buildGhostCursorAction({ type: 'mouseMoved', params: { x: 40, y: 90 }, agentName: 42 }), false);
@@ -586,4 +876,101 @@ test('forwards the agent name from the debugger bridge to the cursor action', ()
   });
 
   assert.equal(actions[0].label, 'Codex');
+});
+
+test('buildGhostCursorSyncExpression normalizes to move and races arrival with timeout', () => {
+  const expr = buildGhostCursorSyncExpression(
+    { type: 'down', x: 180, y: 260, button: 'left', label: 'Claude' },
+    CLICK_SYNC_MAX_WAIT_MS,
+  );
+  assert.match(expr, /"type":"move"/);
+  assert.match(expr, /"x":180,"y":260/);
+  assert.match(expr, /"label":"Claude"/);
+  assert.match(expr, /Promise\.race/);
+  assert.match(expr, new RegExp(String(CLICK_SYNC_MAX_WAIT_MS)));
+});
+
+test('syncGhostCursorBeforeClick animates before mousePressed only when click sync is enabled', async () => {
+  const commandRecorder = createCommandRecorder();
+  const controller = createGhostCursorController({
+    isEnabled: () => true,
+    isTabAttached: () => true,
+    sendCommand: commandRecorder.sendCommand,
+  });
+
+  const offResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 5,
+    params: { type: 'mousePressed', x: 120, y: 240, button: 'left' },
+    agentName: 'Claude',
+    controller,
+    isClickSyncEnabled: false,
+  });
+  assert.equal(offResult, false);
+  assert.equal(commandRecorder.calls.length, 0);
+
+  const moveResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 5,
+    params: { type: 'mouseMoved', x: 120, y: 240 },
+    controller,
+    isClickSyncEnabled: true,
+  });
+  assert.equal(moveResult, false);
+  assert.equal(commandRecorder.calls.length, 0);
+
+  const childResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    childSessionId: 'child-1',
+    tabId: 5,
+    params: { type: 'mousePressed', x: 120, y: 240, button: 'left' },
+    controller,
+    isClickSyncEnabled: true,
+  });
+  assert.equal(childResult, false);
+  assert.equal(commandRecorder.calls.length, 0);
+
+  const onResult = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 5,
+    params: { type: 'mousePressed', x: 120, y: 240, button: 'left' },
+    agentName: 'Claude',
+    controller,
+    isClickSyncEnabled: true,
+  });
+  assert.equal(onResult, true);
+  assert.deepEqual(
+    commandRecorder.calls.map((c) => c.method),
+    ['Page.addScriptToEvaluateOnNewDocument', 'Runtime.evaluate'],
+  );
+  assert.equal(commandRecorder.calls[1].params.awaitPromise, true);
+  assert.match(commandRecorder.calls[1].params.expression, /"type":"move"/);
+  assert.match(commandRecorder.calls[1].params.expression, /"label":"Claude"/);
+});
+
+test('syncGhostCursorBeforeClick bounds wait by maxWaitMs so a stuck animation never blocks a click', async () => {
+  const controller = createGhostCursorController({
+    isEnabled: () => true,
+    isTabAttached: () => true,
+    sendCommand: (_tabId, method) => {
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+        return Promise.resolve({ identifier: 'script-1' });
+      }
+      return new Promise(() => {});
+    },
+  });
+
+  const startedAt = Date.now();
+  const result = await syncGhostCursorBeforeClick({
+    method: 'Input.dispatchMouseEvent',
+    tabId: 9,
+    params: { type: 'mousePressed', x: 400, y: 300, button: 'left' },
+    controller,
+    isClickSyncEnabled: true,
+    maxWaitMs: 35,
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(result, false);
+  assert.ok(elapsedMs < 250, `Expected bounded wait < 250ms, got ${elapsedMs}ms`);
 });

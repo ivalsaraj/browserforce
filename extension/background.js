@@ -2,7 +2,8 @@ import { buildBrowserforceTabGroupPlan, buildAgentTabGroupPlan } from './tab-gro
 import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
 import { hydrateAgentTabs, hydrateActivity, hydrateAgentTabNames, hydrateAgentTabGroupIds, canCloseTab } from './auto-manage-state.js';
-import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
+import { createGhostCursorController, handleGhostCursorInput, syncGhostCursorBeforeClick } from './ghost-cursor.js';
+import { createTabBadgeController, handleTabBadgeCommand } from './tab-badge.js';
 import { shouldReportTabUpdate, shouldReportTabRemoval } from './tab-update-policy.js';
 import { resolveOrphanedPause, isNonEmptyString } from './orphan-pause-policy.js';
 
@@ -58,6 +59,7 @@ const dedicatedWindowIds = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
 let isGhostCursorEnabled = false;
+let isGhostCursorClickSyncEnabled = false;
 
 const ghostCursorController = createGhostCursorController({
   isEnabled: () => isGhostCursorEnabled,
@@ -65,6 +67,13 @@ const ghostCursorController = createGhostCursorController({
   sendCommand: (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
   cursorImageUrl: GHOST_CURSOR_IMAGE_URL,
   log: (error) => console.warn('[bf] Ghost cursor error:', error?.message || error),
+});
+
+const tabBadgeController = createTabBadgeController({
+  isTabAttached: (tabId) => attachedTabs.has(tabId),
+  getTabUrl: (tabId) => attachedTabs.get(tabId)?.targetInfo?.url || '',
+  sendCommand: (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
+  log: (error) => console.warn('[bf] Tab badge error:', error?.message || error),
 });
 
 /** storage.session key for auto-manage state (survives SW restarts, dies with the browser) */
@@ -126,9 +135,10 @@ let restrictionExplained = false;
   // anything can attach tabs or serve listTabs.
   await hydrateAutoManageState();
 
-  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled']);
+  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled', 'ghostCursorClickSync']);
   currentRelayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
   isGhostCursorEnabled = !!stored.ghostCursorEnabled;
+  isGhostCursorClickSyncEnabled = !!stored.ghostCursorClickSync;
 
   // Register debugger listeners once (persists across reconnections)
   chrome.debugger.onEvent.addListener(onDebuggerEvent);
@@ -528,6 +538,7 @@ async function detachTab(tabId) {
   if (!attachedTabs.has(tabId)) return {};
 
   await ghostCursorController.disable(tabId);
+  await tabBadgeController.disable(tabId);
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -617,7 +628,10 @@ async function closeTab(params) {
     throw new Error(`Tab ${tabId} is owned by another agent`);
   }
 
-  if (attachedTabs.has(tabId)) await ghostCursorController.disable(tabId);
+  if (attachedTabs.has(tabId)) {
+    await ghostCursorController.disable(tabId);
+    await tabBadgeController.disable(tabId);
+  }
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -706,7 +720,7 @@ function buildRestrictionError(action, reason, settings, { lockedUrl } = {}) {
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
 
-async function cdpCommand({ tabId, method, params, childSessionId, agentName }) {
+async function cdpCommand({ tabId, method, params, childSessionId, agentName, passive }) {
   // Check restrictions before forwarding
   const blocked = await checkRestriction(method, params, tabId);
   if (blocked) throw new Error(blocked);
@@ -732,6 +746,23 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
     ? { tabId, sessionId: childSessionId }
     : { tabId };
 
+  if (isGhostCursorEnabled && isGhostCursorClickSyncEnabled) {
+    try {
+      await syncGhostCursorBeforeClick({
+        method,
+        childSessionId,
+        tabId,
+        params,
+        agentName,
+        controller: ghostCursorController,
+        isClickSyncEnabled: isGhostCursorEnabled && isGhostCursorClickSyncEnabled,
+        log: (error) => console.warn('[bf] Ghost cursor click-sync error:', error?.message || error),
+      });
+    } catch (error) {
+      console.warn('[bf] Ghost cursor click-sync adapter error:', error?.message || error);
+    }
+  }
+
   const result = await chrome.debugger.sendCommand(debuggee, method, params || {});
   try {
     handleGhostCursorInput({
@@ -745,6 +776,19 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
     });
   } catch (error) {
     console.warn('[bf] Ghost cursor input adapter error:', error?.message || error);
+  }
+  try {
+    handleTabBadgeCommand({
+      method,
+      childSessionId,
+      passive,
+      tabId,
+      controller: tabBadgeController,
+      isTabAttached: (id) => attachedTabs.has(id),
+      log: (error) => console.warn('[bf] Tab badge command error:', error?.message || error),
+    });
+  } catch (error) {
+    console.warn('[bf] Tab badge adapter error:', error?.message || error);
   }
   return result || {};
 }
@@ -760,6 +804,9 @@ function onDebuggerEvent(source, method, params) {
   }
   if (method === 'Target.detachedFromTarget' && isNonEmptyString(params?.sessionId)) {
     childSessions.delete(params.sessionId);
+  }
+  if (method === 'Page.frameNavigated' && !source.sessionId && !params?.frame?.parentId) {
+    tabBadgeController.markNavigated(source.tabId, { pageUrl: params?.frame?.url || '' });
   }
 
   const entry = attachedTabs.get(source.tabId);
@@ -822,6 +869,7 @@ function onDebuggerDetach(source, reason) {
         params: { tabId, reason },
       });
       void ghostCursorController.cleanup(tabId);
+      void tabBadgeController.cleanup(tabId);
       tabLastActivity.delete(tabId);
       agentCreatedTabs.delete(tabId);
       agentTabNames.delete(tabId);
@@ -900,7 +948,10 @@ function onTabUpdated(tabId, changeInfo) {
 
   if (isAttached) {
     const entry = attachedTabs.get(tabId);
-    if (changeInfo.url !== undefined) entry.targetInfo.url = changeInfo.url;
+    if (changeInfo.url !== undefined) {
+      entry.targetInfo.url = changeInfo.url;
+      tabBadgeController.markNavigated(tabId, { pageUrl: changeInfo.url });
+    }
     if (changeInfo.title !== undefined) entry.targetInfo.title = changeInfo.title;
   }
 
@@ -1015,6 +1066,10 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
         : ghostCursorController.disable(tabId)
     ));
     await Promise.allSettled(operations);
+  }
+
+  if (changes.ghostCursorClickSync) {
+    isGhostCursorClickSyncEnabled = !!changes.ghostCursorClickSync.newValue;
   }
 });
 

@@ -206,6 +206,8 @@ async function runBringToFront({ childSessionId, blocked = null } = {}) {
   const source = bg.slice(bg.indexOf('async function cdpCommand'), bg.indexOf('// ─── Debugger Event Listeners'));
   const command = runInNewContext(`${source}; cdpCommand`, {
     chrome, checkRestriction: async () => blocked, handleGhostCursorInput: () => {}, ghostCursorController: {}, console,
+    isGhostCursorEnabled: false, isGhostCursorClickSyncEnabled: false,
+    handleTabBadgeCommand: () => {}, tabBadgeController: {},
   });
   const result = await command({ tabId: 123, method: 'Page.bringToFront', childSessionId });
   return JSON.parse(JSON.stringify({ result, calls }));
