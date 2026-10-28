@@ -460,10 +460,12 @@ describe('Tool Definitions', () => {
 
     assert.ok(promptBlock.includes('getBrowserforceStatus()'), 'should use the relay status helper for attached-tab metadata');
     assert.ok(promptBlock.includes('getBrowserforcePageForTab()'), 'should use the page helper for attached-tab inspection');
-    assert.ok(promptBlock.includes('context.pages()'), 'should keep existing tab discovery visible');
+    assert.ok(promptBlock.includes('browserforce "tabs"'), 'should discover tabs with ownership visible');
+    assert.ok(promptBlock.includes('yours vs owned by another agent'), 'should show how ownership is distinguished');
+    assert.ok(promptBlock.includes("Open your own tab instead of reusing another agent's tab"), 'should prevent cross-agent tab reuse');
     assert.ok(promptBlock.includes('inspect/read/check'), 'should preserve inspect task guidance');
     assert.ok(promptBlock.includes('Use state.page'), 'should keep ongoing state.page guidance');
-    assert.ok(promptBlock.includes("intent:'open'"), 'should scope open intent to explicit navigation requests');
+    assert.ok(promptBlock.includes("intent:'open'"), 'should explain when to use open intent');
   });
 
   it('execute prompt moves long guidance behind help sections', () => {

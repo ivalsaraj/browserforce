@@ -4405,6 +4405,62 @@ describe('agent name on forwarded cdpCommand', () => {
   });
 });
 
+describe('tab owner metadata', () => {
+  let relay;
+  beforeEach(() => { relay = new RelayServer(); });
+
+  const connect = (label, agentName) => {
+    const handlers = {};
+    const ws = { readyState: WebSocket.OPEN, on(event, cb) { handlers[event] = cb; }, send() {} };
+    relay._onCdpConnect(ws, { url: `/cdp?label=${label}&agentName=${agentName || ''}`, headers: {} });
+    return { ws, id: ws._bfClientId, close() { ws.readyState = WebSocket.CLOSED; handlers.close(); } };
+  };
+  const list = async () => {
+    let body;
+    await relay._handleHttp({ url: '/json/list', headers: { host: '127.0.0.1' }, method: 'GET' }, {
+      setHeader() {}, end(text) { body = JSON.parse(text); },
+    });
+    return body;
+  };
+
+  it('exposes owner keys and latest names through the existing target list', async () => {
+    relay.targets.set('s1', { tabId: 1, targetId: 'T1', origin: 'agent-created', ownerKey: 'label:one', targetInfo: {} });
+    relay.targets.set('s2', { tabId: 2, targetId: 'T2', origin: 'relay-discovered', targetInfo: {} });
+    const first = connect('one', 'Claude');
+    first.close();
+    connect('one', 'Codex');
+    const rows = await list();
+    assert.equal(rows[0].ownerKey, 'label:one');
+    assert.equal(rows[0].agentName, 'Codex');
+    assert.equal('ownerKey' in rows[1], false);
+    assert.equal('agentName' in rows[1], false);
+  });
+
+  it('preserves owner keys learned from extension discovery', async () => {
+    const client = connect('one', 'Claude');
+    relay.ext = {};
+    relay._sendToExt = async () => ({ tabs: [{ tabId: 1, targetId: 'T1', url: 'https://a.test/', origin: 'agent-created', ownerKey: 'label:one' }] });
+    await relay._autoAttachAllTabs(client.ws);
+    assert.equal((await list())[0].ownerKey, 'label:one');
+  });
+
+  for (const name of ['Claude', '']) {
+    it(`includes createTab agentName only when present (${name || 'unnamed'})`, async () => {
+      const client = connect('one', name);
+      let createParams;
+      relay._getRestrictionsSafe = async () => ({ mode: 'auto', noNewTabs: false });
+      relay._sendToExt = async (_method, params) => {
+        createParams = params;
+        return { tabId: 1, targetId: 'T1', targetInfo: {} };
+      };
+      await relay._createTarget(client.ws, {}, client.id);
+      assert.equal('agentName' in createParams, !!name);
+      if (name) assert.equal(createParams.agentName, name);
+      assert.equal((await list())[0].ownerKey, 'label:one');
+    });
+  }
+});
+
 describe('emulation overrides owned by connected clients', () => {
   let relay;
   let forwarded;

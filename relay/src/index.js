@@ -340,6 +340,7 @@ class RelayServer {
     // the 15s MCP idle-disconnect/reset cycle reuses the same agent window
     // instead of spawning a new dedicated window per reconnect.
     this.agentWindowByAffinityKey = new Map();
+    this.agentNamesByOwnerKey = new Map();
     this.sessionCounter = 0;
     // tabId -> how many times a target has been registered for it. Chrome
     // REUSES tab ids, so `bf-target-<tabId>` alone let a reopened tab present a
@@ -506,6 +507,12 @@ class RelayServer {
         title: t.targetInfo?.title || '',
         url: t.targetInfo?.url || '',
         type: 'page',
+        ...(t.chromeTargetId ? { chromeTargetId: t.chromeTargetId } : {}),
+        ...(t.origin === 'agent-created' ? {
+          origin: t.origin,
+          ...(t.ownerKey ? { ownerKey: t.ownerKey } : {}),
+          ...(this.agentNamesByOwnerKey.has(t.ownerKey) ? { agentName: this.agentNamesByOwnerKey.get(t.ownerKey) } : {}),
+        } : {}),
         webSocketDebuggerUrl: `ws://127.0.0.1:${this.port}/cdp?token=${this.authToken}`,
       }));
       res.end(JSON.stringify(list));
@@ -1312,6 +1319,14 @@ class RelayServer {
     };
     this.clientMeta.set(ws, clientMeta);
     this.clientById.set(clientId, clientMeta);
+    if (clientMeta.agentName) {
+      const ownerKey = this._affinityKey(clientId);
+      this.agentNamesByOwnerKey.delete(ownerKey);
+      this.agentNamesByOwnerKey.set(ownerKey, clientMeta.agentName);
+      if (this.agentNamesByOwnerKey.size > MAX_AFFINITY_ENTRIES) {
+        this.agentNamesByOwnerKey.delete(this.agentNamesByOwnerKey.keys().next().value);
+      }
+    }
     log(`[relay] CDP client connected (${clientId})`);
     this.clients.add(ws);
 
@@ -1607,10 +1622,12 @@ class RelayServer {
         tabId,
         targetId: existing?.targetId || targetId,
         targetInfo,
+        chromeTargetId: existing?.chromeTargetId,
         windowId: integerWindowId(tab.windowId) ?? existing?.windowId,
         debuggerAttached: !!existing?.debuggerAttached,
         attachPromise: existing?.attachPromise || null,
         origin: existing?.origin || discoveredOrigin || 'relay-discovered',
+        ownerKey: tab.ownerKey || existing?.ownerKey,
         // Keep the real-activity clock across client-reconnect rediscovery,
         // or every fresh connect would reset /attached-tabs idleMs to blank.
         lastCommandAt: existing?.lastCommandAt,
@@ -1759,6 +1776,8 @@ class RelayServer {
       sessionId,
     };
     if (affinityKeyForOwner) createParams.ownerKey = affinityKeyForOwner;
+    const agentName = this._agentNameFor(clientId);
+    if (agentName) createParams.agentName = agentName;
     // Only a 'created' pin may steer a new tab: a 'discovered' pin can point at
     // the USER's window, and sending it would drop agent tabs there.
     const affinityKey = this._affinityKey(clientId);
@@ -1791,6 +1810,7 @@ class RelayServer {
       debuggerAttached: true, // createTab attaches debugger immediately
       attachPromise: null,
       origin: 'agent-created',
+      ownerKey: affinityKeyForOwner,
     };
     this.targets.set(sessionId, target);
     this.tabToSession.set(result.tabId, sessionId);

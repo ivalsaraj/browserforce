@@ -1,4 +1,5 @@
 import { matchPagesToTargets } from './tab-identity.js';
+import { PROCESS_CLIENT_LABEL, ownerKeyForLabel } from './client-label.js';
 
 // browser-session-runtime.js — shared browser/session runtime for the MCP server
 // and the CLI session daemon. Owns the persistent browser connection, userState,
@@ -59,6 +60,7 @@ export function createBrowserSessionRuntime(deps = {}) {
   const {
     connectBrowser = null,
     getRelayHttpUrl = () => '',
+    getOwnerKey = () => ownerKeyForLabel(PROCESS_CLIENT_LABEL),
     fetch: fetchImpl,
     idleDisconnectMs = 0,
     onConnected = () => {},
@@ -757,6 +759,11 @@ export function createBrowserSessionRuntime(deps = {}) {
       };
     }));
     const resolutionComplete = await resolveAmbiguousTargetIds(ctx, rows);
+    // Exact probes can attach a previously lazy tab and learn its Chrome id.
+    // Refresh metadata for those ids; never guess ownership from a duplicate URL.
+    const needsExactMetadata = rows.some((row) => row.targetId && !targets.some((target) => target?.id === row.targetId));
+    const ownershipTargets = needsExactMetadata ? (await fetchRelayTargets()).targets : targets;
+    for (const row of rows) Object.assign(row, tabOwnership(ownershipTargets, row.targetId));
     const rowTargetIds = new Set(rows.map((r) => r.targetId).filter(Boolean));
     const relayTargetIds = new Set(
       (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
@@ -794,6 +801,20 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
     adoptTargetIdsForClientSlots(rows);
     return rows;
+  }
+
+  function tabOwnership(targets, targetId) {
+    if (!targetId) return {};
+    const matches = targets.filter((target) => target?.id === targetId || target?.chromeTargetId === targetId);
+    if (matches.length !== 1) return {};
+    const target = matches[0];
+    const ownerKey = typeof target.ownerKey === 'string' && target.ownerKey ? target.ownerKey : null;
+    if (!ownerKey && target.origin !== 'agent-created') return {};
+    return {
+      ...(ownerKey ? { ownerKey } : {}),
+      ownership: ownerKey && ownerKey === getOwnerKey() ? 'yours' : 'other',
+      ...(typeof target.agentName === 'string' && target.agentName ? { agentName: target.agentName } : {}),
+    };
   }
 
   // Drop a name only when its tab is really gone. A stale `page` after a
@@ -979,7 +1000,7 @@ export function createBrowserSessionRuntime(deps = {}) {
       // Use resolveActivePage (not getActivePage) so the row marked active is
       // the tab a subsequent unnamed command would actually target.
       const active = resolveActivePage(getContext(), { clientId });
-      return identified.map(({ page, handle, title, url, targetId }, index) => ({
+      return identified.map(({ page, handle, title, url, targetId, ownerKey, ownership, agentName }, index) => ({
         handle,
         index,
         title,
@@ -987,6 +1008,7 @@ export function createBrowserSessionRuntime(deps = {}) {
         targetId,
         active: page === active,
         name: nameForPage(page, targetId),
+        ...(ownership ? { ownership, ...(ownerKey ? { ownerKey } : {}), ...(agentName ? { agentName } : {}) } : {}),
       }));
     } finally {
       endOperation();

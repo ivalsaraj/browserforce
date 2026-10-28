@@ -840,6 +840,19 @@ test('rows carry targetId so names and handles can key on it', async () => {
   assert.equal((await runtime.listTabRows())[0].targetId, 'T1');
 });
 
+test('ownership for duplicate URLs follows the exact Chrome target id', async () => {
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [
+      { id: 'T1', chromeTargetId: 'cdp-1', url: 'about:blank', ownerKey: 'label:one', agentName: 'Claude' },
+      { id: 'T2', chromeTargetId: 'cdp-0', url: 'about:blank', ownerKey: 'label:two', agentName: 'Codex' },
+    ],
+  });
+  const rows = await runtime.listTabRows();
+  assert.deepEqual(rows.map((row) => row.agentName), ['Codex', 'Claude']);
+});
+
 test('a managed backend never reads the real browser target list', async () => {
   // NOT "zero fetches": waitForInitialPageDiscovery probes /extension/status on
   // any backend whose getRelayHttpUrl is truthy, and sessiond wires that

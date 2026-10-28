@@ -12,7 +12,7 @@ Give AI agents controlled access to the browser you already use.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
-When you ask an agent to inspect an existing page, BrowserForce exposes open Chrome tabs through `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no suitable page exists and policy allows new tabs.
+When you ask an agent to inspect an existing page, BrowserForce lists open Chrome tabs with `browserforce tabs`, including agent ownership. Agents reuse user tabs or tabs marked `yours`; they open their own tab instead of reusing a tab owned by another agent, when policy allows new tabs.
 
 Emulation overrides such as a mobile viewport are cleared when their last owning
 agent disconnects. MCP remembers viewport sizes across its idle reconnects and
@@ -413,7 +413,7 @@ natural observe → act → observe loop:
 
 ```bash
 browserforce open https://example.com --as docs   # open a new tab (optionally named)
-browserforce tabs                             # list tabs: stable t<N> handles + names + active marker
+browserforce tabs                             # list tabs: stable t<N> handles + names + active marker + ownership
 browserforce use t2                           # switch the active tab (handle, name, or title/url text)
 browserforce snapshot                         # accessibility tree + @eN refs (shared session)
 browserforce click @e3                        # act on a ref from the snapshot
@@ -440,7 +440,9 @@ re-snapshot before the next ref interaction. Every command routes through the
 same guarded `runCode()` boundary as the MCP `exec` tool; add `--json` for a
 `{ success, data, error, warning }` envelope (`tabs --json` prints
 `{ tabs, total, omitted }`; each row is a superset of the old
-`index`/`title`/`url` shape). `tabs` lists the first 20 tabs — narrow with
+`index`/`title`/`url` shape). Agent-created tabs include ownership metadata and
+display `yours` or `owned by <name/short label>`; user rows stay unchanged.
+`tabs` lists the first 20 tabs — narrow with
 `--match <text>`, widen with `--limit <n>`, or list everything with `--all`.
 
 One-shot `-e` stays independent (state does not persist between `-e` calls) for

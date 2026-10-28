@@ -31,7 +31,7 @@ and snapshot refs) across CLI calls. The same command language powers the MCP
 `browserforce` tool:
 
 ```bash
-browserforce tabs                # List tabs: stable t<N> handles + names
+browserforce tabs                # List tabs: stable t<N> handles + names + ownership
 browserforce use t2              # Switch the active tab
 browserforce open <url> --as docs  # Open a new tab, optionally named
 browserforce snapshot            # Accessibility tree + @eN refs
@@ -86,6 +86,10 @@ browserforce snapshot --tab app            # read app without switching tabs
 browserforce click @e2 --tab app
 browserforce use docs                      # or switch the active tab
 ```
+
+Agent-created tabs show `yours` or `owned by <name/short label>`; user tabs have
+no ownership marker. Open your own tab for testing or navigation instead of
+reusing another agent's tab.
 
 Target tabs by stable handle (`t2`) or name — never by list position. Tab
 names are unique; pass `--replace` only when you intentionally want to move a
