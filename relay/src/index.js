@@ -22,6 +22,21 @@ const MAX_AFFINITY_ENTRIES = 50;
 const ORPHAN_PAUSE_GRACE_MS = 2000;
 const ORPHAN_RESUME_MAX_ATTEMPTS = 3;
 
+// Reset forms documented by CDP Emulation. User-agent overrides have no
+// documented reset, so they deliberately stay outside this ownership map.
+const EMULATION_OVERRIDE_RESETS = {
+  'Emulation.setDeviceMetricsOverride': { method: 'Emulation.clearDeviceMetricsOverride', params: {} },
+  'Emulation.setEmulatedMedia': { method: 'Emulation.setEmulatedMedia', params: {}, cleared: (p) => !p.media && !p.features?.length },
+  'Emulation.setTouchEmulationEnabled': { method: 'Emulation.setTouchEmulationEnabled', params: { enabled: false }, cleared: (p) => p.enabled === false },
+  'Emulation.setFocusEmulationEnabled': { method: 'Emulation.setFocusEmulationEnabled', params: { enabled: false }, cleared: (p) => p.enabled === false },
+  'Emulation.setGeolocationOverride': { method: 'Emulation.clearGeolocationOverride', params: {} },
+  'Emulation.setLocaleOverride': { method: 'Emulation.setLocaleOverride', params: {}, cleared: (p) => !p.locale },
+  'Emulation.setTimezoneOverride': { method: 'Emulation.setTimezoneOverride', params: { timezoneId: '' }, cleared: (p) => p.timezoneId === '' },
+  'Emulation.setDefaultBackgroundColorOverride': { method: 'Emulation.setDefaultBackgroundColorOverride', params: {}, cleared: (p) => p.color === undefined },
+  'Emulation.setScriptExecutionDisabled': { method: 'Emulation.setScriptExecutionDisabled', params: { value: false }, cleared: (p) => p.value === false },
+  'Emulation.setAutomationOverride': { method: 'Emulation.setAutomationOverride', params: { enabled: false }, cleared: (p) => p.enabled === false },
+};
+
 const BF_DIR = path.join(os.homedir(), '.browserforce');
 const TOKEN_FILE = path.join(BF_DIR, 'auth-token');
 const CDP_URL_FILE = path.join(BF_DIR, 'cdp-url');
@@ -317,6 +332,7 @@ class RelayServer {
     // Child targets Chrome holds paused until a debugger resumes them:
     // childSessionId -> { tabId, timer, engagedClients: Set<clientId>, attempts }
     this.pausedChildren = new Map();
+    this.emulationOverrides = new Map(); // tabId -> Map<setter, Set<clientId>>
     this.orphanPauseGraceMs = ORPHAN_PAUSE_GRACE_MS;
     // Agent window affinity: affinityKey -> windowId. Key is 'label:<explicit
     // label>' when the client passed ?label= (e.g. MCP's browserforce-mcp),
@@ -1029,6 +1045,7 @@ class RelayServer {
       });
     }
     this.targets.clear();
+    this.emulationOverrides.clear();
     this.tabToSession.clear();
     this.childSessions.clear();
     this.oopifTargets.clear();
@@ -1217,6 +1234,7 @@ class RelayServer {
   }
 
   _handleTabDetached({ tabId, reason }) {
+    this.emulationOverrides.delete(tabId);
     // Before the unknown-session return, so an undiscovered tab's paused
     // children cannot fire a stale resume later.
     this._forgetPausedChildren((entry) => entry.tabId === tabId);
@@ -1326,6 +1344,7 @@ class RelayServer {
         this.activeClient = null;
       }
       this._releasePausedChildrenOf(meta?.id);
+      this._releaseEmulationOverridesOf(meta?.id);
     });
 
     ws.on('error', (err) => {
@@ -1550,6 +1569,7 @@ class RelayServer {
         && !currentTabIds.has(target.tabId)
       ) {
         this.targets.delete(sessionId);
+        this.emulationOverrides.delete(target.tabId);
         this.tabToSession.delete(target.tabId);
         this._dropAliasSessions((_id, entry) => entry.primarySessionId === sessionId);
         this._broadcastCdp({
@@ -1825,6 +1845,7 @@ class RelayServer {
 
     this.targets.delete(sessionId);
     this.tabToSession.delete(tabId);
+    this.emulationOverrides.delete(tabId);
     this._dropAliasSessions((_id, entry) => entry.primarySessionId === sessionId);
 
     this._broadcastCdp({
@@ -1891,7 +1912,7 @@ class RelayServer {
           ...(payload.agentName ? { agentName: payload.agentName } : {}),
         },
       });
-      return this._sendToExt('cdpCommand', payload);
+      return this._forwardEmulationCommand(payload, clientId);
     }
 
     // Alias session: an explicit newCDPSession() re-attach to an already-attached
@@ -1942,7 +1963,7 @@ class RelayServer {
           ...(aliasPayload.agentName ? { agentName: aliasPayload.agentName } : {}),
         },
       });
-      return this._sendToExt('cdpCommand', aliasPayload);
+      return this._forwardEmulationCommand(aliasPayload, clientId);
     }
 
     // Child session (iframe / OOPIF)
@@ -2019,6 +2040,49 @@ class RelayServer {
     }
 
     throw new Error(`Session '${sessionId}' not found`);
+  }
+
+  async _forwardEmulationCommand(payload, clientId) {
+    const { tabId, method, params } = payload;
+    if (clientId && method.startsWith('Emulation.')) {
+      for (const [setter, reset] of Object.entries(EMULATION_OVERRIDE_RESETS)) {
+        if (method !== setter && method !== reset.method) continue;
+        const cleared = method === reset.method && (reset.cleared ? reset.cleared(params) : true);
+        let setters = this.emulationOverrides.get(tabId);
+        if (cleared) {
+          setters?.get(setter)?.delete(clientId);
+          if (setters?.get(setter)?.size === 0) setters.delete(setter);
+          if (setters?.size === 0) this.emulationOverrides.delete(tabId);
+        } else {
+          if (!setters) this.emulationOverrides.set(tabId, setters = new Map());
+          if (!setters.has(setter)) setters.set(setter, new Set());
+          setters.get(setter).add(clientId);
+        }
+      }
+    }
+    try {
+      return await this._sendToExt('cdpCommand', payload);
+    } finally {
+      // A disconnect can race the lazy attach or the setter's round-trip.
+      if (clientId && !this.clientById.has(clientId)) this._releaseEmulationOverridesOf(clientId);
+    }
+  }
+
+  _releaseEmulationOverridesOf(clientId) {
+    for (const [tabId, setters] of this.emulationOverrides) {
+      for (const [setter, holders] of setters) {
+        if (!holders.delete(clientId)) continue;
+        if ([...holders].some((id) => this.clientById.has(id))) continue;
+        setters.delete(setter);
+        const { method, params } = EMULATION_OVERRIDE_RESETS[setter];
+        const payload = { tabId, method, params, passive: true };
+        this._logCdp({ direction: 'to-extension', message: { ...payload, origin: 'relay-emulation-reset' } });
+        void this._sendToExt('cdpCommand', payload).catch((err) => {
+          logErr(`[relay] Emulation reset failed (tab ${tabId}, ${setter}):`, err.message);
+        });
+      }
+      if (setters.size === 0) this.emulationOverrides.delete(tabId);
+    }
   }
 
   // ─── Orphaned Debugger Pauses ───────────────────────────────────────────

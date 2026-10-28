@@ -764,6 +764,39 @@ function makeRelayFetch(getTargets, { fail = () => false } = {}) {
   };
 }
 
+for (const match of ['unique', 'exact', 'unmatched']) {
+  test(`idle reconnect restores viewport only to a ${match} target match`, async () => {
+    const clock = makeFakeClock();
+    const viewport = { width: 390, height: 844 };
+    const urls = match === 'unique' ? ['https://a.test/', 'https://b.test/'] : ['about:blank', 'about:blank'];
+    const pages = urls.map((url, i) => ({ ...makeTabPage({ url }), _targetId: `exact-${i}`, viewportSize: () => null }));
+    pages[0].viewportSize = () => viewport;
+    const applied = [];
+    let probeFails = false;
+    const runtime = createBrowserSessionRuntime({
+      connectBrowser: async () => makeFakeBrowser({ pages, cdpFail: () => probeFails, cdpTargetId: (i) => pages[i]._targetId }),
+      getRelayHttpUrl: () => 'http://relay.test',
+      fetch: makeRelayFetch(() => urls.map((url, i) => ({ id: `T${i}`, url, title: '' }))),
+      idleDisconnectMs: 15000,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      initialPageDiscoveryTimeoutMs: 1,
+    });
+    await runtime.listTabRows();
+    clock.fireAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.isConnected(), false);
+    probeFails = match === 'unmatched';
+    pages.splice(0, pages.length, ...urls.map((url, i) => ({
+      ...makeTabPage({ url }), _targetId: `exact-${i}`, viewportSize: () => null,
+      async setViewportSize(size) { applied.push({ index: i, size }); },
+    })).reverse());
+    await runtime.ensureBrowser();
+    assert.deepEqual(applied, match === 'unmatched' ? [] : [{ index: 0, size: viewport }]);
+    await runtime.reset();
+  });
+}
+
 /** A page whose title() never settles — the real relay behaviour on a lazily-attached tab. */
 function makeUntitleablePage(url) {
   return { ...makeTabPage({ url }), title: async () => new Promise(() => {}) };

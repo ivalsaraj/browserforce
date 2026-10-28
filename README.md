@@ -14,6 +14,11 @@ Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-
 
 When you ask an agent to inspect an existing page, BrowserForce exposes open Chrome tabs through `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no suitable page exists and policy allows new tabs.
 
+Emulation overrides such as a mobile viewport are cleared when their last owning
+agent disconnects. MCP remembers viewport sizes across its idle reconnects and
+restores them only on exactly identified tabs; during the idle gap and after the
+agent exits, Chrome returns to its normal desktop viewport.
+
 ## Why BrowserForce?
 
 

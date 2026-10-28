@@ -291,6 +291,22 @@ setting.
 **Known gap:** `Fetch` interception left behind by `page.route` after its owner
 disconnects is not handled yet.
 
+### Emulation Overrides Die With Their Agent
+
+- **Rule**: `EMULATION_OVERRIDE_RESETS` in `relay/src/index.js` is the single
+  setter-to-reset map. Track holders per tab/setter only when forwarding main
+  or alias commands to an attached debugger; synthetic init responses own
+  nothing. An explicit clear removes only its caller's holding.
+- **Rule**: On disconnect, reset an override only after its last connected
+  holder leaves. Resets are passive housekeeping, failures log without
+  throwing, and removing a target drops its override records.
+- **MCP idle reconnect**: `browser-session-runtime.js` saves non-null viewport
+  sizes by exact relay target identity before idle disconnect and re-applies
+  them to rematched pages before the next command. Never pair by position or
+  stale cached URLs. The user's desktop viewport returns during the idle gap
+  and after the agent exits; only viewport size is restored on reconnect.
+- **Limit**: User-agent overrides are excluded because CDP documents no reset.
+
 ### Ghost Cursor
 
 The optional ghost cursor is controlled by the local-storage key

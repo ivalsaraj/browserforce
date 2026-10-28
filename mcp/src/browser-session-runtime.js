@@ -167,6 +167,7 @@ export function createBrowserSessionRuntime(deps = {}) {
   // evidence — but only when the resolver actually ran (past
   // AMBIGUOUS_RESOLUTION_LIMIT it is skipped, and absence then says nothing).
   const exactlyResolvedTargetIds = new Set();
+  const viewportsByTargetId = new Map();
 
   /** Relay identity applies only to the real-Chrome backend. Null = MCP = real. */
   function relayBackendActive() {
@@ -247,6 +248,21 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   async function disconnectIdleBrowser() {
     if (!browser?.isConnected() || activeBrowserOperations > 0) return;
+    if (relayBackendActive()) {
+      const pages = getPages().filter((page) => isUsablePage(page) && page.viewportSize?.());
+      if (pages.length) {
+        const identified = await listIdentifiedPages();
+        // Identity discovery awaits I/O; a new command may have started meanwhile.
+        if (!browser?.isConnected() || activeBrowserOperations > 0) return;
+        viewportsByTargetId.clear();
+        for (const { page, targetId } of identified) {
+          const viewport = page.viewportSize?.();
+          if (targetId && viewport) viewportsByTargetId.set(targetId, { ...viewport });
+        }
+      } else {
+        viewportsByTargetId.clear();
+      }
+    }
     try {
       await browser.close();
     } catch {
@@ -330,11 +346,11 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   async function ensureBrowser() {
     clearIdleBrowserDisconnectTimer();
-    if (browser?.isConnected()) return;
     if (browserConnectPromise) {
       await browserConnectPromise;
       return;
     }
+    if (browser?.isConnected()) return;
 
     browserConnectPromise = (async () => {
       if (typeof connectBrowserFn !== 'function') {
@@ -365,6 +381,16 @@ export function createBrowserSessionRuntime(deps = {}) {
           }
         }
       } catch { /* context not ready yet — capture will attach lazily */ }
+      if (viewportsByTargetId.size && relayBackendActive()) {
+        const identified = await listIdentifiedPages({ browserReady: true });
+        for (const { page, targetId } of identified) {
+          const viewport = viewportsByTargetId.get(targetId);
+          if (viewport) {
+            await page.setViewportSize(viewport);
+            viewportsByTargetId.delete(targetId);
+          }
+        }
+      }
     })();
 
     try {
@@ -690,8 +716,8 @@ export function createBrowserSessionRuntime(deps = {}) {
    * why every tab in a real many-tab session listed as "(untitled)". The
    * bounded read stays as the fallback for backends with no relay.
    */
-  async function listIdentifiedPages() {
-    await ensureBrowser(); // callers may run before any connection exists
+  async function listIdentifiedPages({ browserReady = false } = {}) {
+    if (!browserReady) await ensureBrowser(); // reconnect restoration already owns the connect promise
     // Captured BEFORE any await and re-checked after: a listing that spans a
     // disconnect resolves old Page objects, and publishing them under the NEW
     // generation would let pageForTargetId hand out an orphan with the
@@ -1172,6 +1198,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     stableHandles = new WeakMap();
     handlesByTargetId.clear();
     exactlyResolvedTargetIds.clear();
+    viewportsByTargetId.clear();
     targetIdByPage = new WeakMap();
     lastRelayTargets = null;
     identityCache = { generation: -1, rows: [] };
