@@ -144,7 +144,7 @@ export function buildAgentTabGroupPlan({
         && agentTabGroupIds.get(tab.id) === tab.groupId && groupById.get(tab.groupId)?.windowId === windowId
       ));
       const namedTabId = [...tabsToAdd, ...agentTabs.keys()].find((id) => agentTabs.get(id) === owner && agentTabNames.has(id));
-      const title = agentTabNames.get(namedTabId) || (owner ? owner.slice(-OWNER_TITLE_SUFFIX_LENGTH) : 'BrowserForce');
+      const title = agentTabNames.get(namedTabId) || (owner ? `Agent ${owner.slice(-OWNER_TITLE_SUFFIX_LENGTH)}` : 'BrowserForce');
       let hash = 0;
       for (const char of owner || '') hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
       plans.push({ windowId, existingGroupId: member?.groupId ?? null, tabsToAdd, title, color: AGENT_GROUP_COLORS[hash % AGENT_GROUP_COLORS.length] });

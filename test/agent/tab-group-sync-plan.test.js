@@ -121,7 +121,7 @@ test('owner groups remain distinct when display names match', () => {
 
 test('group title falls back to the owner suffix or BrowserForce', () => {
   const plan = buildAgentTabGroupPlan({ ...agentInput, agentTabNames: new Map(), agentTabs: new Map([[2, 'label:abcd1234'], [3, null]]) });
-  assert.equal(plan[0].title, '1234');
+  assert.equal(plan[0].title, 'Agent 1234');
   assert.equal(plan[1].title, 'BrowserForce');
 });
 
