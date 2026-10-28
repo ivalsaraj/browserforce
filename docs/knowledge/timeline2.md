@@ -203,3 +203,7 @@
 - Added regressions for both paths; suspended-page timers remain subject to Chrome scheduling.
 
 - Round 2 upgrade regression: restore an older injected badge API before installing the expiry-aware version; tested original favicon survival across upgrade and expiry.
+
+## 2026-10-28 — Prepare npm 1.3.0
+
+- Package and bundled extension version set to 1.3.0 for merged PR #31: background agent tabs, ownership, cursor feedback, and dialog lifecycle fixes.
