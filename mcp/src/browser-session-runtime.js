@@ -1,4 +1,5 @@
 import { matchPagesToTargets } from './tab-identity.js';
+import { PROCESS_CLIENT_LABEL, ownerKeyForLabel } from './client-label.js';
 
 // browser-session-runtime.js — shared browser/session runtime for the MCP server
 // and the CLI session daemon. Owns the persistent browser connection, userState,
@@ -59,6 +60,7 @@ export function createBrowserSessionRuntime(deps = {}) {
   const {
     connectBrowser = null,
     getRelayHttpUrl = () => '',
+    getOwnerKey = () => ownerKeyForLabel(PROCESS_CLIENT_LABEL),
     fetch: fetchImpl,
     idleDisconnectMs = 0,
     onConnected = () => {},
@@ -167,6 +169,7 @@ export function createBrowserSessionRuntime(deps = {}) {
   // evidence — but only when the resolver actually ran (past
   // AMBIGUOUS_RESOLUTION_LIMIT it is skipped, and absence then says nothing).
   const exactlyResolvedTargetIds = new Set();
+  const viewportsByTargetId = new Map();
 
   /** Relay identity applies only to the real-Chrome backend. Null = MCP = real. */
   function relayBackendActive() {
@@ -247,6 +250,21 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   async function disconnectIdleBrowser() {
     if (!browser?.isConnected() || activeBrowserOperations > 0) return;
+    if (relayBackendActive()) {
+      const pages = getPages().filter((page) => isUsablePage(page) && page.viewportSize?.());
+      if (pages.length) {
+        const identified = await listIdentifiedPages();
+        // Identity discovery awaits I/O; a new command may have started meanwhile.
+        if (!browser?.isConnected() || activeBrowserOperations > 0) return;
+        viewportsByTargetId.clear();
+        for (const { page, targetId } of identified) {
+          const viewport = page.viewportSize?.();
+          if (targetId && viewport) viewportsByTargetId.set(targetId, { ...viewport });
+        }
+      } else {
+        viewportsByTargetId.clear();
+      }
+    }
     try {
       await browser.close();
     } catch {
@@ -330,11 +348,11 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   async function ensureBrowser() {
     clearIdleBrowserDisconnectTimer();
-    if (browser?.isConnected()) return;
     if (browserConnectPromise) {
       await browserConnectPromise;
       return;
     }
+    if (browser?.isConnected()) return;
 
     browserConnectPromise = (async () => {
       if (typeof connectBrowserFn !== 'function') {
@@ -365,6 +383,16 @@ export function createBrowserSessionRuntime(deps = {}) {
           }
         }
       } catch { /* context not ready yet — capture will attach lazily */ }
+      if (viewportsByTargetId.size && relayBackendActive()) {
+        const identified = await listIdentifiedPages({ browserReady: true });
+        for (const { page, targetId } of identified) {
+          const viewport = viewportsByTargetId.get(targetId);
+          if (viewport) {
+            await page.setViewportSize(viewport);
+            viewportsByTargetId.delete(targetId);
+          }
+        }
+      }
     })();
 
     try {
@@ -690,8 +718,8 @@ export function createBrowserSessionRuntime(deps = {}) {
    * why every tab in a real many-tab session listed as "(untitled)". The
    * bounded read stays as the fallback for backends with no relay.
    */
-  async function listIdentifiedPages() {
-    await ensureBrowser(); // callers may run before any connection exists
+  async function listIdentifiedPages({ browserReady = false } = {}) {
+    if (!browserReady) await ensureBrowser(); // reconnect restoration already owns the connect promise
     // Captured BEFORE any await and re-checked after: a listing that spans a
     // disconnect resolves old Page objects, and publishing them under the NEW
     // generation would let pageForTargetId hand out an orphan with the
@@ -731,6 +759,11 @@ export function createBrowserSessionRuntime(deps = {}) {
       };
     }));
     const resolutionComplete = await resolveAmbiguousTargetIds(ctx, rows);
+    // Exact probes can attach a previously lazy tab and learn its Chrome id.
+    // Refresh metadata for those ids; never guess ownership from a duplicate URL.
+    const needsExactMetadata = rows.some((row) => row.targetId && !targets.some((target) => target?.id === row.targetId));
+    const ownershipTargets = needsExactMetadata ? (await fetchRelayTargets()).targets : targets;
+    for (const row of rows) Object.assign(row, tabOwnership(ownershipTargets, row.targetId));
     const rowTargetIds = new Set(rows.map((r) => r.targetId).filter(Boolean));
     const relayTargetIds = new Set(
       (targets ?? []).map((t) => t?.id).filter((id) => typeof id === 'string' && id),
@@ -768,6 +801,20 @@ export function createBrowserSessionRuntime(deps = {}) {
     }
     adoptTargetIdsForClientSlots(rows);
     return rows;
+  }
+
+  function tabOwnership(targets, targetId) {
+    if (!targetId) return {};
+    const matches = targets.filter((target) => target?.id === targetId || target?.chromeTargetId === targetId);
+    if (matches.length !== 1) return {};
+    const target = matches[0];
+    const ownerKey = typeof target.ownerKey === 'string' && target.ownerKey ? target.ownerKey : null;
+    if (!ownerKey && target.origin !== 'agent-created') return {};
+    return {
+      ...(ownerKey ? { ownerKey } : {}),
+      ownership: ownerKey && ownerKey === getOwnerKey() ? 'yours' : 'other',
+      ...(typeof target.agentName === 'string' && target.agentName ? { agentName: target.agentName } : {}),
+    };
   }
 
   // Drop a name only when its tab is really gone. A stale `page` after a
@@ -953,7 +1000,7 @@ export function createBrowserSessionRuntime(deps = {}) {
       // Use resolveActivePage (not getActivePage) so the row marked active is
       // the tab a subsequent unnamed command would actually target.
       const active = resolveActivePage(getContext(), { clientId });
-      return identified.map(({ page, handle, title, url, targetId }, index) => ({
+      return identified.map(({ page, handle, title, url, targetId, ownerKey, ownership, agentName }, index) => ({
         handle,
         index,
         title,
@@ -961,6 +1008,7 @@ export function createBrowserSessionRuntime(deps = {}) {
         targetId,
         active: page === active,
         name: nameForPage(page, targetId),
+        ...(ownership ? { ownership, ...(ownerKey ? { ownerKey } : {}), ...(agentName ? { agentName } : {}) } : {}),
       }));
     } finally {
       endOperation();
@@ -1172,6 +1220,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     stableHandles = new WeakMap();
     handlesByTargetId.clear();
     exactlyResolvedTargetIds.clear();
+    viewportsByTargetId.clear();
     targetIdByPage = new WeakMap();
     lastRelayTargets = null;
     identityCache = { generation: -1, rows: [] };

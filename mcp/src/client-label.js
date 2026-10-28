@@ -24,6 +24,13 @@ export function withClientLabel(cdpUrl) {
   }
 }
 
+// Match the relay's explicit-label normalization, including custom labels.
+export function ownerKeyForLabel(label) {
+  if (typeof label !== 'string') return null;
+  const cleaned = label.trim().replace(/[^\w .:@/-]/g, '').slice(0, 80);
+  return cleaned ? `label:${cleaned}` : null;
+}
+
 // Display name shown on the ghost cursor so a user with several agents driving
 // one Chrome can tell which one is moving. Passed raw — the relay owns the
 // length and character policy (its sanitizeAgentName is the single authority).

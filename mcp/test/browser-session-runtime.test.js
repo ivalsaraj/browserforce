@@ -764,6 +764,39 @@ function makeRelayFetch(getTargets, { fail = () => false } = {}) {
   };
 }
 
+for (const match of ['unique', 'exact', 'unmatched']) {
+  test(`idle reconnect restores viewport only to a ${match} target match`, async () => {
+    const clock = makeFakeClock();
+    const viewport = { width: 390, height: 844 };
+    const urls = match === 'unique' ? ['https://a.test/', 'https://b.test/'] : ['about:blank', 'about:blank'];
+    const pages = urls.map((url, i) => ({ ...makeTabPage({ url }), _targetId: `exact-${i}`, viewportSize: () => null }));
+    pages[0].viewportSize = () => viewport;
+    const applied = [];
+    let probeFails = false;
+    const runtime = createBrowserSessionRuntime({
+      connectBrowser: async () => makeFakeBrowser({ pages, cdpFail: () => probeFails, cdpTargetId: (i) => pages[i]._targetId }),
+      getRelayHttpUrl: () => 'http://relay.test',
+      fetch: makeRelayFetch(() => urls.map((url, i) => ({ id: `T${i}`, url, title: '' }))),
+      idleDisconnectMs: 15000,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      initialPageDiscoveryTimeoutMs: 1,
+    });
+    await runtime.listTabRows();
+    clock.fireAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.isConnected(), false);
+    probeFails = match === 'unmatched';
+    pages.splice(0, pages.length, ...urls.map((url, i) => ({
+      ...makeTabPage({ url }), _targetId: `exact-${i}`, viewportSize: () => null,
+      async setViewportSize(size) { applied.push({ index: i, size }); },
+    })).reverse());
+    await runtime.ensureBrowser();
+    assert.deepEqual(applied, match === 'unmatched' ? [] : [{ index: 0, size: viewport }]);
+    await runtime.reset();
+  });
+}
+
 /** A page whose title() never settles — the real relay behaviour on a lazily-attached tab. */
 function makeUntitleablePage(url) {
   return { ...makeTabPage({ url }), title: async () => new Promise(() => {}) };
@@ -805,6 +838,19 @@ test('rows carry targetId so names and handles can key on it', async () => {
   const pages = [makeTabPage({ url: 'https://a.test/' })];
   const runtime = makeRelayRuntime({ pages, targets: () => [{ id: 'T1', url: 'https://a.test/', title: 'A' }] });
   assert.equal((await runtime.listTabRows())[0].targetId, 'T1');
+});
+
+test('ownership for duplicate URLs follows the exact Chrome target id', async () => {
+  const pages = [makeTabPage({ url: 'about:blank' }), makeTabPage({ url: 'about:blank' })];
+  const runtime = makeRelayRuntime({
+    pages,
+    targets: () => [
+      { id: 'T1', chromeTargetId: 'cdp-1', url: 'about:blank', ownerKey: 'label:one', agentName: 'Claude' },
+      { id: 'T2', chromeTargetId: 'cdp-0', url: 'about:blank', ownerKey: 'label:two', agentName: 'Codex' },
+    ],
+  });
+  const rows = await runtime.listTabRows();
+  assert.deepEqual(rows.map((row) => row.agentName), ['Codex', 'Claude']);
 });
 
 test('a managed backend never reads the real browser target list', async () => {

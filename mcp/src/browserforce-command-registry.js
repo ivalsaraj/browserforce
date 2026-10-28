@@ -811,7 +811,10 @@ function renderTabRowsText(rows, { total = rows?.length ?? 0, omitted = 0 } = {}
   const lines = rows.map((row) => {
     const marker = row.active ? '*' : ' ';
     const name = row.name ? ` (${row.name})` : '';
-    return `${marker} ${row.handle}${name} ${row.title || '(untitled)'}\n    ${row.url}`;
+    const shortLabel = row.ownerKey?.replace(/^label:(?:browserforce-mcp-)?/, '').slice(0, 24);
+    const ownership = row.ownership === 'yours' ? ' [yours]'
+      : row.ownership === 'other' ? ` [owned by ${row.agentName || shortLabel || 'unknown agent'}]` : '';
+    return `${marker} ${row.handle}${name} ${row.title || '(untitled)'}${ownership}\n    ${row.url}`;
   });
   // A capped list that cannot say it was capped is the same trap as a handle
   // that cannot say it went stale.

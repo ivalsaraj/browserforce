@@ -52,7 +52,7 @@ function fakePage({ url = 'about:blank', title = '' } = {}) {
   return page;
 }
 
-function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false } = {}) {
+function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false, ownerKey = null, ownership = () => ({}) } = {}) {
   const list = [...pages];
   // Relay target ids, allocated per PAGE (never by list index — every id would
   // shift when a tab closes) and read off the LIVE list, so pages opened during
@@ -61,7 +61,7 @@ function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false } = {
   let nextTargetId = 1;
   const targetsNow = () => list.map((pg) => {
     if (!idFor.has(pg)) idFor.set(pg, `T${nextTargetId++}`);
-    return { id: idFor.get(pg), url: pg.url(), title: pg._title ?? '' };
+    return { id: idFor.get(pg), url: pg.url(), title: pg._title ?? '', ...ownership(pg) };
   });
   const cdpSessions = [];
   const context = {
@@ -88,6 +88,7 @@ function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false } = {
     close: async () => {},
   };
   const runtime = createBrowserSessionRuntime({
+    getOwnerKey: () => ownerKey,
     connectBrowser: async () => browser,
     getRelayHttpUrl: () => 'http://relay.test',
     // Restrictions default to none unless the test injects some.
@@ -126,6 +127,33 @@ function tabRuntimeEnv({ pages = [], restrictions = null, execDeps = false } = {
   };
   return { runtime, run, pages: list, cdpSessions, __fireDisconnect };
 }
+
+describe('tabs ownership display', () => {
+  it('marks yours and another named agent without changing user-tab rows', async () => {
+    const mine = fakePage({ url: 'https://mine.test/', title: 'Mine' });
+    const other = fakePage({ url: 'https://other.test/', title: 'Other' });
+    const user = fakePage({ url: 'https://user.test/', title: 'User' });
+    const { run } = tabRuntimeEnv({
+      pages: [mine, other, user], ownerKey: 'label:mine',
+      ownership: (page) => page === mine ? { ownerKey: 'label:mine' }
+        : page === other ? { ownerKey: 'label:other', agentName: 'Claude' } : {},
+    });
+    const result = await run('tabs');
+    assert.match(result.text, /Mine \[yours\]/);
+    assert.match(result.text, /Other \[owned by Claude\]/);
+    assert.match(result.text, /User\n    https:\/\/user.test\//);
+    assert.equal('ownerKey' in result.data.tabs[2], false);
+  });
+
+  it('falls back to a short owner label when the agent has no name', async () => {
+    const page = fakePage({ url: 'https://other.test/', title: 'Other' });
+    const { run } = tabRuntimeEnv({
+      pages: [page], ownerKey: 'label:mine',
+      ownership: () => ({ ownerKey: 'label:browserforce-mcp-1a2b3c4d' }),
+    });
+    assert.match((await run('tabs')).text, /owned by 1a2b3c4d/);
+  });
+});
 
 // ─── --tab routing (per-run pinned pages) ─────────────────────────────────────
 

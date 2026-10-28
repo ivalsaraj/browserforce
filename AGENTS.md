@@ -70,7 +70,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 | `listTabs` | — | List all eligible browser tabs |
 | `attachTab` | `{ tabId, sessionId }` | Attach debugger to tab |
 | `detachTab` | `{ tabId }` | Detach debugger |
-| `createTab` | `{ url, sessionId, windowId?, ownerKey? }` | Create and attach new tab (`windowId` pins the agent's window; `ownerKey` records the owning agent) |
+| `createTab` | `{ url, sessionId, windowId?, ownerKey?, agentName? }` | Create and attach new tab (`windowId` pins the agent's window; `ownerKey` records the owning agent; `agentName` is an optional display-only name) |
 | `closeTab` | `{ tabId, ownerKey? }` | Close tab (refused when `ownerKey` names a different agent than the tab's owner) |
 | `cdpCommand` | `{ tabId, method, params, childSessionId?, passive?, agentName? }` | Forward CDP command (`passive` excludes init-storm commands from the idle clock; `agentName` is the display-only name of the driving agent, present only when that client named itself) |
 | `ping` | — | Keepalive (every 5s) |
@@ -228,6 +228,14 @@ This is **not** an isolation boundary: `_autoAttachAllTabs` loops the global
 target map and every CDP client can still see and drive every tab. Never
 document it as a sandbox.
 
+`/json/list` carries agent-created tabs' `origin`, optional `ownerKey`, and the
+latest display `agentName` seen for that owner. The shared `tabs` renderer marks
+them as `yours` or `owned by <name/short label>`; user-tab rows stay unchanged.
+MCP compares against its actual connection label (including the environment
+override). Open your own tab instead of reusing another agent's tab.
+Exact duplicate-URL probes can return Chrome ids; optional `chromeTargetId`
+correlates them to HTTP owner metadata.
+
 ### Durable Auto-Close (agent tab bookkeeping)
 
 Auto-close of agent-created tabs is **ON by default** (10 minutes idle,
@@ -290,6 +298,22 @@ setting.
 
 **Known gap:** `Fetch` interception left behind by `page.route` after its owner
 disconnects is not handled yet.
+
+### Emulation Overrides Die With Their Agent
+
+- **Rule**: `EMULATION_OVERRIDE_RESETS` in `relay/src/index.js` is the single
+  setter-to-reset map. Track holders per tab/setter only when forwarding main
+  or alias commands to an attached debugger; synthetic init responses own
+  nothing. An explicit clear removes only its caller's holding.
+- **Rule**: On disconnect, reset an override only after its last connected
+  holder leaves. Resets are passive housekeeping, failures log without
+  throwing, and removing a target drops its override records.
+- **MCP idle reconnect**: `browser-session-runtime.js` saves non-null viewport
+  sizes by exact relay target identity before idle disconnect and re-applies
+  them to rematched pages before the next command. Never pair by position or
+  stale cached URLs. The user's desktop viewport returns during the idle gap
+  and after the agent exits; only viewport size is restored on reconnect.
+- **Limit**: User-agent overrides are excluded because CDP documents no reset.
 
 ### Ghost Cursor
 
@@ -536,7 +560,8 @@ rewrites JS (`getByRole('button')` became `getByRole(button)` →
 - No new dependencies for client arbitration or standby behavior.
 - Tab ownership is metadata-only: agent-created tabs record an owning agent key, and an explicit `closeTab` from a different agent is refused. It is NOT a capability fence — every CDP client can still navigate any target, and auto-close remains per-tab idle time rather than per owner.
 - No extension protocol changes beyond the `ownerKey` field on
-  `createTab`/`closeTab` and **optional, additive, display-only fields on
+  `createTab`/`closeTab`, optional display-only `agentName` on `createTab`, and
+  **optional, additive, display-only fields on
   `cdpCommand`** that an older extension ignores (`passive`, `agentName`). No new
   message types, no required fields, no structural change — that is what this
   non-goal protects. A field that an old extension can ignore and a new

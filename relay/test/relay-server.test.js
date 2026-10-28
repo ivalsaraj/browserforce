@@ -11,9 +11,14 @@ const { createCdpLogger } = require('../src/cdp-log.js');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Find a free port to avoid collisions between tests */
+const testPorts = new Set();
+
+/** Avoid reusing a suite's port while its WebSockets are still closing. */
 function getRandomPort() {
-  return 19300 + Math.floor(Math.random() * 700);
+  let port;
+  do { port = crypto.randomInt(49152, 65536); } while (testPorts.has(port));
+  testPorts.add(port);
+  return port;
 }
 
 /** HTTP GET as a promise */
@@ -4397,6 +4402,199 @@ describe('agent name on forwarded cdpCommand', () => {
     const mouse = forwarded.filter((payload) => payload.method === 'Input.dispatchMouseEvent');
     assert.equal(mouse.length, 1, 'the in-flight command must still reach the extension');
     assert.equal(mouse[0].agentName, 'Claude');
+  });
+});
+
+describe('tab owner metadata', () => {
+  let relay;
+  beforeEach(() => { relay = new RelayServer(); });
+
+  const connect = (label, agentName) => {
+    const handlers = {};
+    const ws = { readyState: WebSocket.OPEN, on(event, cb) { handlers[event] = cb; }, send() {} };
+    relay._onCdpConnect(ws, { url: `/cdp?label=${label}&agentName=${agentName || ''}`, headers: {} });
+    return { ws, id: ws._bfClientId, close() { ws.readyState = WebSocket.CLOSED; handlers.close(); } };
+  };
+  const list = async () => {
+    let body;
+    await relay._handleHttp({ url: '/json/list', headers: { host: '127.0.0.1' }, method: 'GET' }, {
+      setHeader() {}, end(text) { body = JSON.parse(text); },
+    });
+    return body;
+  };
+
+  it('exposes owner keys and latest names through the existing target list', async () => {
+    relay.targets.set('s1', { tabId: 1, targetId: 'T1', origin: 'agent-created', ownerKey: 'label:one', targetInfo: {} });
+    relay.targets.set('s2', { tabId: 2, targetId: 'T2', origin: 'relay-discovered', targetInfo: {} });
+    const first = connect('one', 'Claude');
+    first.close();
+    connect('one', 'Codex');
+    const rows = await list();
+    assert.equal(rows[0].ownerKey, 'label:one');
+    assert.equal(rows[0].agentName, 'Codex');
+    assert.equal('ownerKey' in rows[1], false);
+    assert.equal('agentName' in rows[1], false);
+  });
+
+  it('preserves owner keys learned from extension discovery', async () => {
+    const client = connect('one', 'Claude');
+    relay.ext = {};
+    relay._sendToExt = async () => ({ tabs: [{ tabId: 1, targetId: 'T1', url: 'https://a.test/', origin: 'agent-created', ownerKey: 'label:one' }] });
+    await relay._autoAttachAllTabs(client.ws);
+    assert.equal((await list())[0].ownerKey, 'label:one');
+  });
+
+  for (const name of ['Claude', '']) {
+    it(`includes createTab agentName only when present (${name || 'unnamed'})`, async () => {
+      const client = connect('one', name);
+      let createParams;
+      relay._getRestrictionsSafe = async () => ({ mode: 'auto', noNewTabs: false });
+      relay._sendToExt = async (_method, params) => {
+        createParams = params;
+        return { tabId: 1, targetId: 'T1', targetInfo: {} };
+      };
+      await relay._createTarget(client.ws, {}, client.id);
+      assert.equal('agentName' in createParams, !!name);
+      if (name) assert.equal(createParams.agentName, name);
+      assert.equal((await list())[0].ownerKey, 'label:one');
+    });
+  }
+});
+
+describe('emulation overrides owned by connected clients', () => {
+  let relay;
+  let forwarded;
+  let failReset;
+
+  beforeEach(() => {
+    relay = new RelayServer();
+    forwarded = [];
+    failReset = false;
+    relay.targets.set('main', { tabId: 42, targetId: 'T42', debuggerAttached: true });
+    relay.tabToSession.set(42, 'main');
+    relay._sendToExt = async (method, params) => {
+      forwarded.push({ method, ...params });
+      if (failReset && params.method === 'Emulation.clearDeviceMetricsOverride') throw new Error('target gone');
+      return {};
+    };
+  });
+
+  const connect = () => {
+    const handlers = {};
+    const ws = { readyState: WebSocket.OPEN, on(event, cb) { handlers[event] = cb; }, send() {} };
+    relay._onCdpConnect(ws, { url: '/cdp', headers: {} });
+    return { id: ws._bfClientId, close() { ws.readyState = WebSocket.CLOSED; handlers.close(); } };
+  };
+  const setViewport = (client, sessionId = 'main') => relay._forwardToTab(sessionId,
+    'Emulation.setDeviceMetricsOverride', { width: 390, height: 844, mobile: false, deviceScaleFactor: 1 }, 1, client.id);
+  const resets = () => forwarded.filter((p) => p.method === 'Emulation.clearDeviceMetricsOverride');
+
+  it('resets a forwarded override when its client disconnects', async () => {
+    const client = connect();
+    await setViewport(client);
+    client.close();
+    assert.equal(resets().length, 1);
+    assert.equal(resets()[0].tabId, 42);
+  });
+
+  it('does not reset while another connected client holds the same setter', async () => {
+    const first = connect();
+    const second = connect();
+    await setViewport(first);
+    await setViewport(second);
+    first.close();
+    assert.equal(resets().length, 0);
+    second.close();
+    assert.equal(resets().length, 1);
+  });
+
+  it('records nothing for an unattached tab synthesized setter', async () => {
+    relay.targets.get('main').debuggerAttached = false;
+    const client = connect();
+    await setViewport(client);
+    client.close();
+    assert.equal(forwarded.length, 0);
+  });
+
+  it('sends disconnect resets passively', async () => {
+    const client = connect();
+    await setViewport(client);
+    client.close();
+    assert.equal(resets()[0]?.passive, true);
+  });
+
+  it('logs a reset failure without rejecting the close handler', async () => {
+    const client = connect();
+    await setViewport(client);
+    failReset = true;
+    assert.doesNotThrow(() => client.close());
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(resets().length, 1);
+  });
+
+  it('tracks alias-session setters on their primary tab', async () => {
+    const client = connect();
+    relay.aliasSessions.set('alias', { primarySessionId: 'main', clientId: client.id });
+    await setViewport(client, 'alias');
+    client.close();
+    assert.equal(resets().length, 1);
+  });
+
+  it('forgets a setter cleared explicitly by the same client', async () => {
+    const client = connect();
+    await setViewport(client);
+    await relay._forwardToTab('main', 'Emulation.clearDeviceMetricsOverride', {}, 2, client.id);
+    client.close();
+    assert.equal(resets().length, 1);
+  });
+
+  it('drops override state when its tab disappears', async () => {
+    const client = connect();
+    await setViewport(client);
+    relay._handleTabDetached({ tabId: 42, reason: 'target_closed' });
+    client.close();
+    assert.equal(resets().length, 0);
+  });
+
+  const overrides = [
+    ['setDeviceMetricsOverride', { width: 390, height: 844, mobile: false, deviceScaleFactor: 1 }, 'clearDeviceMetricsOverride', {}],
+    ['setEmulatedMedia', { media: 'print', features: [{ name: 'prefers-color-scheme', value: 'dark' }] }, 'setEmulatedMedia', {}],
+    ['setTouchEmulationEnabled', { enabled: true }, 'setTouchEmulationEnabled', { enabled: false }],
+    ['setFocusEmulationEnabled', { enabled: true }, 'setFocusEmulationEnabled', { enabled: false }],
+    ['setGeolocationOverride', { latitude: 10, longitude: 20, accuracy: 1 }, 'clearGeolocationOverride', {}],
+    ['setLocaleOverride', { locale: 'fr_FR' }, 'setLocaleOverride', {}],
+    ['setTimezoneOverride', { timezoneId: 'Europe/Paris' }, 'setTimezoneOverride', { timezoneId: '' }],
+    ['setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } }, 'setDefaultBackgroundColorOverride', {}],
+    ['setScriptExecutionDisabled', { value: true }, 'setScriptExecutionDisabled', { value: false }],
+    ['setAutomationOverride', { enabled: true }, 'setAutomationOverride', { enabled: false }],
+  ];
+  for (const [setter, params, reset, resetParams] of overrides) {
+    it(`uses the documented reset for ${setter}`, async () => {
+      const client = connect();
+      await relay._forwardToTab('main', `Emulation.${setter}`, params, 1, client.id);
+      client.close();
+      assert.deepEqual(forwarded.at(-1), { tabId: 42, method: `Emulation.${reset}`, params: resetParams, passive: true });
+    });
+
+    it(`forgets ${setter} after its explicit reset`, async () => {
+      const client = connect();
+      await relay._forwardToTab('main', `Emulation.${setter}`, params, 1, client.id);
+      await relay._forwardToTab('main', `Emulation.${reset}`, resetParams, 2, client.id);
+      const count = forwarded.length;
+      client.close();
+      assert.equal(forwarded.length, count);
+    });
+  }
+
+  it('does not let one client clear another client ownership record', async () => {
+    const first = connect();
+    const second = connect();
+    await setViewport(first);
+    await setViewport(second);
+    await relay._forwardToTab('main', 'Emulation.clearDeviceMetricsOverride', {}, 2, first.id);
+    first.close();
+    second.close();
+    assert.equal(resets().length, 2);
   });
 });
 

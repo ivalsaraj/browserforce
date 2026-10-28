@@ -2,12 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { withClientLabel, withAgentName, PROCESS_CLIENT_LABEL } from '../src/client-label.js';
+import { withClientLabel, withAgentName, ownerKeyForLabel, PROCESS_CLIENT_LABEL } from '../src/client-label.js';
 
 const readLabelFromSubprocess = (env) => execFileSync(process.execPath, [
   '--input-type=module', '-e',
   "import{PROCESS_CLIENT_LABEL}from'./mcp/src/client-label.js';process.stdout.write(PROCESS_CLIENT_LABEL)",
 ], { env: { ...process.env, ...env }, encoding: 'utf8' });
+
+test('owner keys use the relay normalization for explicit labels', () => {
+  assert.equal(ownerKeyForLabel(' team!@one '), 'label:team@one');
+  assert.equal(ownerKeyForLabel('x'.repeat(100)), `label:${'x'.repeat(80)}`);
+  assert.equal(ownerKeyForLabel('!!!'), null);
+  assert.equal(ownerKeyForLabel(null), null);
+});
 
 test('applies one stable label for the lifetime of the process', () => {
   const a = new URL(withClientLabel('ws://127.0.0.1:19222/cdp?token=t')).searchParams.get('label');
