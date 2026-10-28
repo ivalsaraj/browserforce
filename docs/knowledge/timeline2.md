@@ -127,3 +127,18 @@
   web-accessible resources to `about:blank`/`about:srcdoc`/opaque-origin
   documents, where the new-document script also runs. The cursor now skips
   subframes and uses an inline SVG on those origins.
+
+## 2026-10-28 — Agent popups stay in the background; JS dialogs reported
+
+- Popups (`window.open`, `target=_blank`) whose opener is an agent-created tab,
+  or an attached tab with a real command in the last 5s, are adopted via
+  `tabs.onCreated` + `openerTabId`: moved into the opener's window, the user's
+  previous tab re-selected, grouped with the opener, owner/name inherited, made
+  auto-closable. Relay keeps the opener mapping so Playwright still fires
+  `popup`. Chrome creates the tab first, so a brief flash or Space switch can
+  still happen. No new permission.
+- Dialogs: one shared per-page handler records `{type,message,defaultValue,url,at}`,
+  accepts alert/beforeunload, dismisses confirm/prompt by default, and appends a
+  notice to the next result. `armDialog({accept, promptText})` pre-arms one
+  response for the current run; `getDialogs()` returns bounded history. With no
+  `/cdp` client connected the relay leaves dialogs open for the user.
