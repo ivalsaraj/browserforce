@@ -38,13 +38,13 @@ test('falls back when the requested window is a non-integer', () => {
   }
 });
 
-test('carries an undefined current window when Chrome reports none and no valid request', () => {
+test('creates a window only when no normal window exists and no valid request', () => {
   const plan = resolveCreateWindowPlan({
     requestedWindowId: undefined,
     isRequestedWindowValid: false,
     currentWindowId: undefined,
   });
-  assert.deepEqual(plan, { action: 'current-window', windowId: undefined });
+  assert.deepEqual(plan, { action: 'new-window' });
 });
 
 test('spawns a new dedicated window when enabled and no valid window is requested', () => {

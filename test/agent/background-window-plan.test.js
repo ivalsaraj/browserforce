@@ -6,7 +6,7 @@ const bg = fs.readFileSync('extension/background.js', 'utf8');
 
 test('createTab imports and uses the plan resolver', () => {
   assert.match(bg, /import \{ resolveCreateWindowPlan \} from '\.\/window-affinity\.js'/);
-  assert.match(bg, /resolveCreateTabWindowPlan\(params, resolveDedicatedWindow\(settings\)\)/);
+  assert.match(bg, /resolveCreateTabWindowPlan\(params, dedicatedWindowEnabled\)/);
 });
 
 test('createTab reads the dedicatedWindow setting from storage', () => {
@@ -69,7 +69,7 @@ test('agent setting defaults come from the shared resolvers, never `|| 0`', () =
 
 test('agent-created tabs are tracked with their owning agent', () => {
   assert.match(bg, /const agentCreatedTabs = new Map\(\)/);
-  assert.match(bg, /attachTab\(tab\.id, params\.sessionId, \{ origin: 'agent-created', ownerKey \}\)/);
+  assert.match(bg, /attachTab\(tab\.id, params\.sessionId, \{ origin: 'agent-created', ownerKey, agentName: params\.agentName \}\)/);
   // No post-attach resurrection: onTabRemoved may have cleared it mid-await.
   assert.doesNotMatch(bg, /agentCreatedTabs\.set\(tab\.id, ownerKey\)/);
 });
@@ -91,7 +91,7 @@ test('persisted auto-manage state stays rollback-readable', () => {
 });
 
 test('background delegates hydration and the close fence to the pure helpers', () => {
-  assert.match(bg, /import \{ hydrateAgentTabs, hydrateActivity, canCloseTab \} from '\.\/auto-manage-state\.js'/);
+  assert.match(bg, /import \{ hydrateAgentTabs, hydrateActivity, hydrateAgentTabNames, hydrateAgentTabGroupIds, canCloseTab \} from '\.\/auto-manage-state\.js'/);
   assert.match(bg, /hydrateAgentTabs\(saved, openTabIds\)/);
   assert.match(bg, /hydrateActivity\(saved, openTabIds\)/);
   assert.match(bg, /canCloseTab\(\{ owner: agentCreatedTabs\.get\(tabId\), requester \}\)/);
@@ -113,4 +113,84 @@ test('closing an unattached tab is reported to the relay before the attached gat
   const body = bg.slice(bg.indexOf('function onTabRemoved'), bg.indexOf('function onTabUpdated'));
   assert.ok(body.indexOf("method: 'tabDetached'") < body.indexOf('if (!isAttached) return;'),
     'tabDetached must be sent for every tab, not only attached ones');
+});
+
+
+test('shared-window creates stay background regardless of visibility preference', () => {
+  const create = bg.slice(bg.indexOf('async function createTab'), bg.indexOf('async function closeTab'));
+  assert.match(create, /active: dedicatedWindowEnabled/);
+  assert.doesNotMatch(create, /parallelVisibilityMode/);
+  assert.match(bg, /getLastFocused\(\{ windowTypes: \['normal'\] \}\)/);
+  assert.match(bg, /win\.type === 'normal'/);
+});
+
+async function runCreateWithWindows({ windows, requestedWindowId, settings = {}, dedicatedIds = [] }) {
+  const { runInNewContext } = await import('node:vm');
+  const { resolveCreateWindowPlan } = await import('../../extension/window-affinity.js');
+  const { resolveDedicatedWindow } = await import('../../extension/agent-defaults.js');
+  const calls = [];
+  const chrome = {
+    storage: { local: { get: (_keys, callback) => callback({ dedicatedWindow: false, ...settings }) } },
+    windows: {
+      get: async (id) => windows.find((win) => win.id === id),
+      getLastFocused: async (options) => {
+        assert.deepEqual(JSON.parse(JSON.stringify(options)), { windowTypes: ['normal'] });
+        const win = windows.find((candidate) => candidate.type === 'normal');
+        if (!win) throw new Error('No normal windows');
+        return win;
+      },
+      create: async (options) => {
+        calls.push(['window', JSON.parse(JSON.stringify(options))]);
+        return { id: 99, tabs: [{ id: 123, windowId: 99 }] };
+      },
+    },
+    tabs: { create: async (options) => {
+      calls.push(['tab', JSON.parse(JSON.stringify(options))]);
+      return { id: 123, windowId: options.windowId };
+    } },
+  };
+  const source = bg.slice(bg.indexOf('async function getCurrentWindowId'), bg.indexOf('async function listTabs'))
+    + bg.slice(bg.indexOf('async function createTab'), bg.indexOf('async function closeTab'));
+  const create = runInNewContext(`${source}; createTab`, {
+    chrome, resolveCreateWindowPlan, resolveDedicatedWindow,
+    dedicatedWindowIds: new Set(dedicatedIds),
+    sleep: async () => {}, persistAutoManageState: async () => {}, queueSyncTabGroup: async () => {},
+    attachTab: async (tabId) => ({ tabId }),
+  });
+  await create({ windowId: requestedWindowId, url: 'https://example.com', ownerKey: 'label:test' });
+  return calls;
+}
+
+test('creates a background tab in the last-focused normal window without opening a window', async () => {
+  for (const parallelVisibilityMode of ['foreground-tab', 'rotate-visible']) {
+    assert.deepEqual(await runCreateWithWindows({ windows: [{ id: 10, type: 'normal' }], settings: { parallelVisibilityMode } }),
+      [['tab', { url: 'https://example.com', active: false, windowId: 10 }]]);
+  }
+});
+
+test('uses a valid pin rather than the last-focused normal window', async () => {
+  const calls = await runCreateWithWindows({ windows: [{ id: 10, type: 'normal' }, { id: 20, type: 'normal' }], requestedWindowId: 20 });
+  assert.equal(calls[0][1].windowId, 20);
+});
+
+test('a closed or non-normal pinned window falls back to the normal window', async () => {
+  for (const requestedWindowId of [20, 30]) {
+    const calls = await runCreateWithWindows({ windows: [{ id: 20, type: 'popup' }, { id: 10, type: 'normal' }], requestedWindowId });
+    assert.deepEqual(calls, [['tab', { url: 'https://example.com', active: false, windowId: 10 }]]);
+  }
+});
+
+test('creates a background window only when no normal window exists', async () => {
+  const calls = await runCreateWithWindows({ windows: [{ id: 20, type: 'popup' }] });
+  assert.deepEqual(calls, [['window', { url: 'https://example.com', focused: false, type: 'normal' }]]);
+});
+
+test('explicit dedicated mode retains Chrome default size and background window creation', async () => {
+  const calls = await runCreateWithWindows({ windows: [{ id: 10, type: 'normal' }], settings: { dedicatedWindow: true } });
+  assert.deepEqual(calls, [['window', { url: 'https://example.com', focused: false, type: 'normal' }]]);
+});
+
+test('explicit dedicated mode keeps new tabs active in its established window', async () => {
+  const calls = await runCreateWithWindows({ windows: [{ id: 10, type: 'normal' }], requestedWindowId: 10, dedicatedIds: [10], settings: { dedicatedWindow: true } });
+  assert.deepEqual(calls, [['tab', { url: 'https://example.com', active: true, windowId: 10 }]]);
 });

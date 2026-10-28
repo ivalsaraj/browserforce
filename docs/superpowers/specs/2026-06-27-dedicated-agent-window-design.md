@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-27
 **Author:** Valsaraj
-**Status:** Approved (design); spec under review
+**Status:** Historical design; current behavior is documented in AGENTS.md. Shared-window tabs now open in the background in per-agent groups; the dedicated-window option remains available.
 
 ## Problem
 
@@ -31,8 +31,7 @@ the user's current focus or their manually attached tabs.
   agent-created tabs join it. Tabs the user **manually attaches** stay where they
   are in the user's windows.
 - **Focus:** The dedicated window opens in the **background**
-  (`chrome.windows.create({ focused: false })`). It never steals the user's
-  focus.
+  (`chrome.windows.create({ focused: false })`). On macOS full screen, Chrome can still create a new Space and switch to it.
 - **Default:** Setting is **OFF**. Current behavior is preserved exactly when off.
 - **Per session:** Each new agent session / CDP client gets its **own fresh**
   dedicated window (no cross-session window reuse — simpler, isolates concurrent
@@ -147,7 +146,7 @@ affinity (existing `sentPinned` re-pin path).
 - **Manual mode / `noNewTabs`:** tab creation is already blocked, so the feature
   is a clean no-op there. No conflict.
 - **`browserforce` tab-group sync (`syncTabGroup`):** still runs; inside the
-  dedicated window it simply groups the agent's tabs. Harmless, no change needed.
+  dedicated window agent-created tabs now use per-agent groups, separate from user-attached tabs.
 
 ## Testing
 

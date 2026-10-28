@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hydrateAgentTabs, hydrateActivity, canCloseTab } from '../../extension/auto-manage-state.js';
+import { hydrateAgentTabs, hydrateActivity, hydrateAgentTabNames, hydrateAgentTabGroupIds, canCloseTab } from '../../extension/auto-manage-state.js';
 
 test('hydrates legacy state written before ownership existed', () => {
   const out = hydrateAgentTabs({ agentCreatedTabs: [1, 2] }, new Set([1, 2]));
@@ -63,4 +63,20 @@ test('auto-close has no identity and is never fenced', () => {
 
 test('unowned tabs stay closable by anyone', () => {
   assert.equal(canCloseTab({ owner: null, requester: 'label:b' }), true);
+});
+
+
+test('hydrates agent names and assigned group ids only for surviving agent tabs', () => {
+  const saved = { agentCreatedTabs: [1, 2], agentTabNames: [[1, 'Codex'], [2, 'Claude'], [3, 'User']], agentTabGroupIds: [[1, 50], [2, 60], [3, 70]] };
+  const agentTabs = hydrateAgentTabs(saved, new Set([1, 3]));
+  assert.deepEqual([...hydrateAgentTabNames(saved, agentTabs)], [[1, 'Codex']]);
+  assert.deepEqual([...hydrateAgentTabGroupIds(saved, agentTabs)], [[1, 50]]);
+});
+
+test('malformed display metadata never aborts agent hydration', () => {
+  const agentTabs = new Map([[1, 'a']]);
+  for (const field of [undefined, null, 'bad', [null, [1], [1, 2, 3], [1, {}]]]) {
+    assert.deepEqual([...hydrateAgentTabNames({ agentTabNames: field }, agentTabs)], []);
+    assert.deepEqual([...hydrateAgentTabGroupIds({ agentTabGroupIds: field }, agentTabs)], []);
+  }
 });
