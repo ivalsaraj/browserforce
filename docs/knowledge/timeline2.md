@@ -161,3 +161,17 @@
   `browserforce-cli-<name>` for one-shot calls and sessiond (owner check uses the
   same label). Unnamed one-shot calls stay unlabeled; MCP keeps its random label.
 - Skill now opens with "Name yourself first": one name, ≤24 chars, every call.
+
+## 2026-10-28 — JavaScript dialogs belong to the run driving the page
+
+- Symptom: `No dialog is showing` / an agent's confirm vanished. The relay
+  broadcasts every dialog to every CDP client, and any client's handler (or
+  Playwright's no-listener auto-dismiss) answered dialogs on other agents' pages.
+- `dialogs.js` now handles and records a dialog only while a run drives that
+  page (active/pinned page, page it created, armed, or sent commands to). Other
+  pages keep a no-op listener so Playwright does not auto-dismiss; previously
+  driven pages hold up to 100 pending dialogs for the next run on them.
+  `armDialog` accepts an explicit `page`.
+- Live: two sessiond clients on real Chrome; B's 6s run left A's confirm open,
+  A's next run dismissed it with one notice. Known limit: older/foreign
+  Playwright clients without the listener still auto-dismiss.
