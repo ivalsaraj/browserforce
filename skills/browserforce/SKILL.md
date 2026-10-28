@@ -242,8 +242,8 @@ This is the user's REAL browser. Be respectful:
 
 ### Popup placement
 
-Agent-created tabs and attached tabs driven in the last five seconds keep their
-popups in the opener's window and group, with inherited ownership and auto-close.
+Tabs you drove in the last five seconds keep their popups in the opener's window
+and group, with inherited ownership and auto-close.
 User-only popups stay untouched. Wait for the actual popup before the action:
 
 ```js

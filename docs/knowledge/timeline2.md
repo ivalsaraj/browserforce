@@ -186,3 +186,12 @@
   `hidden` attribute, so the row never hid.
 - Fix: helper + handlers in `extension/popup.js`, `.checkbox-row[hidden]` rule,
   and a vm test that runs popup.js and toggles the controls.
+
+## 2026-10-28 — Cmd-T on an agent tab no longer gets captured
+
+- Symptom: on an agent tab, Cmd-T opened a new tab but focus stayed on the agent
+  tab and the new tab joined the agent's group.
+- Cause: Chrome sets `openerTabId` for Cmd-T; popup adoption trusted any
+  agent-created opener with no time bound, then restored the previous selection.
+- Fix: `isAgentPopupCandidate()` requires a real agent command on the opener in
+  the last 5s for every opener, and excludes Chrome's New Tab page.

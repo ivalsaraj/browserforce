@@ -177,10 +177,15 @@ Agent-created tabs are pinned to the Chrome **window** the agent created them in
 
 ### Agent Popups Stay in the Background
 
-- `tabs.onCreated` + `openerTabId` adopts popups from agent-created tabs, or
-  attached tabs with a real (non-passive) command in the last five seconds.
-  Attachment/init alone never qualifies. The short window covers delayed click
-  popups without treating a user-attached tab as permanently agent-owned.
+- `tabs.onCreated` + `openerTabId` adopts a popup only when its opener is
+  attached and had a real (non-passive) command in the last five seconds
+  (`isAgentPopupCandidate`), agent-created openers included. Attachment/init
+  alone never qualifies, and Chrome's New Tab page never does.
+- **Symptom:** Cmd-T on an agent tab opened a tab that lost focus to the agent
+  tab and joined its group. **Cause:** Chrome sets `openerTabId` for Cmd-T too,
+  and agent-created openers used to qualify forever. **Wrong fix:** checking
+  only the URL; a user clicking a `target=_blank` link on an idle agent tab has
+  the same shape. Recent agent activity is the only signal.
 - Move the new popup tab into its opener's window, restore the previous selected
   tab before attaching the debugger, and join the opener's current group. Inherit
   the opener's owner/name (a user-attached opener has no owner); checkpoint agent

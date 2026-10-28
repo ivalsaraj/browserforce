@@ -1,5 +1,5 @@
 import { buildBrowserforceTabGroupPlan, buildAgentTabGroupPlan } from './tab-group-sync-plan.js';
-import { resolveAgentPopupPlan, AGENT_POPUP_ACTIVITY_MS } from './agent-popup-policy.js';
+import { resolveAgentPopupPlan, isAgentPopupCandidate } from './agent-popup-policy.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
 import { hydrateAgentTabs, hydrateActivity, hydrateAgentTabNames, hydrateAgentTabGroupIds, canCloseTab } from './auto-manage-state.js';
@@ -928,11 +928,11 @@ function synthesizeTargetId(tabId) {
 }
 
 async function onTabCreated(tab) {
-  if (!Number.isInteger(tab.openerTabId)) return;
-  const recent = lastRealCommandByTab.get(tab.openerTabId);
-  const ageMs = recent ? Date.now() - recent.at : Infinity;
-  if (!agentCreatedTabs.has(tab.openerTabId)
-    && !(attachedTabs.has(tab.openerTabId) && ageMs >= 0 && ageMs <= AGENT_POPUP_ACTIVITY_MS)) return;
+  if (!isAgentPopupCandidate({
+    tab,
+    isAttached: attachedTabs.has(tab.openerTabId),
+    lastRealCommandAt: lastRealCommandByTab.get(tab.openerTabId)?.at,
+  })) return;
   pendingAgentPopups.add(tab.id);
   try {
     const opener = await chrome.tabs.get(tab.openerTabId);
@@ -940,7 +940,6 @@ async function onTabCreated(tab) {
     const recent = lastRealCommandByTab.get(opener.id);
     const plan = resolveAgentPopupPlan({
       tab, opener,
-      isAgentCreated: agentCreatedTabs.has(opener.id),
       isAttached: attachedTabs.has(opener.id),
       lastRealCommandAt: recent?.at,
       ownerKey: agentCreatedTabs.get(opener.id),

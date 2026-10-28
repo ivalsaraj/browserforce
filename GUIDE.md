@@ -77,7 +77,7 @@ Current behavior lock:
 
 `page.bringToFront()` never focuses a window. It selects the tab only inside a separate agent window; in a window you share with agents it does nothing, so your selected tab never changes.
 
-Popups from agent-created tabs (or attached tabs driven by a real command in the last five seconds) are moved into the opener's window as background tabs, inherit its owner and current group, and enter auto-close bookkeeping. User-only popups stay unchanged. Playwright still receives `page.on('popup')` and context `page` events. No extra permissions are needed. Chrome creates popups before the extension event: brief tab/window flicker and a macOS Space jump can still occur. Popups without an `openerTabId` cannot be attributed and stay unchanged.
+Popups from tabs the agent drove with a real command in the last five seconds are moved into the opener's window as background tabs, inherit its owner and current group, and enter auto-close bookkeeping. Tabs you open yourself (Cmd-T, or links on an agent tab it is not driving) stay where Chrome put them. User-only popups stay unchanged. Playwright still receives `page.on('popup')` and context `page` events. No extra permissions are needed. Chrome creates popups before the extension event: brief tab/window flicker and a macOS Space jump can still occur. Popups without an `openerTabId` cannot be attributed and stay unchanged.
 
 MCP reads these preferences once per session and caches them. If you change popup settings mid-session, call `reset` so new execute calls pick up updated values.
 
