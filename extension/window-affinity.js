@@ -9,10 +9,8 @@
 //   { action: 'use-window', windowId }     → open a tab in this existing window
 //                                            (under dedicated mode, only when
 //                                             the agent opened that window)
-//   { action: 'new-window' }               → create a fresh dedicated window
+//   { action: 'new-window' }               → dedicated mode or no normal window
 //   { action: 'current-window', windowId } → open a tab in the current window
-//                                            (windowId may be undefined when
-//                                             Chrome reports no current window)
 //
 // When the requested (relay-pinned) window is gone and dedicated mode is on, we
 // deliberately return 'new-window' rather than dropping the agent's tab into the
@@ -32,7 +30,7 @@ export function resolveCreateWindowPlan({
   if (canReuse && (dedicatedWindowEnabled !== true || isRequestedWindowDedicated === true)) {
     return { action: 'use-window', windowId: requestedWindowId };
   }
-  if (dedicatedWindowEnabled === true) {
+  if (dedicatedWindowEnabled === true || !Number.isInteger(currentWindowId)) {
     return { action: 'new-window' };
   }
   return { action: 'current-window', windowId: currentWindowId };

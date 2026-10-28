@@ -938,8 +938,9 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | ----------------------- | ------------------------------------------------------------------------ |
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
-| **Parallel visibility** | `foreground-tab` keeps new tabs visible inside the agent's dedicated window |
-| **Tab grouping**        | Attached tabs stay grouped as `browserforce` inside their own Chrome window |
+| **Separate window**    | Off by default; opens a dedicated window when explicitly enabled. In full screen this can create a new macOS Space. |
+| **Parallel visibility** | Retained preference; no effect on tab placement |
+| **Tab grouping**        | Agent-created tabs use per-agent named groups; user-attached tabs use `browserforce` |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
@@ -947,13 +948,15 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Auto-close**          | Automatically close agent-created tabs after 5-60 minutes — **on by default (10 min)** |
 | **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
 
-`parallelVisibilityMode` is currently enforced as `foreground-tab` (tabs visible within the agent's window). If `rotate-visible` is selected, BrowserForce normalizes to `foreground-tab` in this release.
+`parallelVisibilityMode` is retained for compatibility and currently has no effect. Both values create background tabs in shared windows and active tabs inside a dedicated window. Relay and MCP continue to normalize the reported value to `foreground-tab`.
 
 ### Execution Strategy Preferences
 
-- **Visible parallel (`foreground-tab`)**: New agent tabs open visibly in the agent's own dedicated window and stay there, leaving your working window untouched.
+- **Parallel mode**: With the separate-window setting off, new agent tabs open in the background of the pinned or last-focused normal Chrome window. A new window is created only if no normal window exists. Each agent has a named tab group per window; dragging a tab out leaves it out. Existing tabs are never moved between windows.
 - **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
-- **Rotate-visible demo mode (`rotate-visible`)**: Temporarily normalized to `foreground-tab` while the visibility lock is enforced.
+- **Visibility preference (`foreground-tab` / `rotate-visible`)**: Neither value overrides background placement or rotates tabs.
+
+`page.bringToFront()` activates the tab inside its own window without focusing that window.
 
 MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new exec calls.
 

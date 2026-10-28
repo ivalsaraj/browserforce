@@ -45,7 +45,7 @@ test('auto mode uses bottom note instead of dotted popup border', () => {
 
 test('popup exposes a dedicated-window toggle wired to storage', () => {
   assert.match(html, /id="bf-dedicated-window"/);
-  assert.match(html, /Open agent tabs in a dedicated window/);
+  assert.match(html, /Open agent tabs in a separate window/);
   assert.match(popupJs, /'dedicatedWindow'/);
   assert.match(popupJs, /dedicatedWindowCb/);
   assert.match(popupJs, /chrome\.storage\.local\.set\(\{\s*dedicatedWindow:/);
@@ -57,4 +57,10 @@ test('popup exposes a default-off ghost-cursor toggle wired to storage', () => {
   assert.match(popupJs, /'ghostCursorEnabled'/);
   assert.match(popupJs, /ghostCursorCb\.checked\s*=\s*!!s\.ghostCursorEnabled/);
   assert.match(popupJs, /chrome\.storage\.local\.set\(\{\s*ghostCursorEnabled:/);
+});
+
+
+test('dedicated window copy explains full-screen Spaces and defaults off', () => {
+  assert.match(html, /new Space.*full.screen/i);
+  assert.match(popupJs, /dedicatedWindowCb\.checked = s\.dedicatedWindow === true/);
 });

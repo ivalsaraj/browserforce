@@ -49,3 +49,17 @@ export function canCloseTab({ owner, requester }) {
   if (!owner || !requester) return true;
   return owner === requester;
 }
+
+export function hydrateAgentTabNames(saved, agentTabs) {
+  return hydrateAgentMetadata(saved?.agentTabNames, agentTabs, (name) => typeof name === 'string' && name.length > 0);
+}
+
+export function hydrateAgentTabGroupIds(saved, agentTabs) {
+  return hydrateAgentMetadata(saved?.agentTabGroupIds, agentTabs, (groupId) => Number.isInteger(groupId) && groupId >= 0);
+}
+
+function hydrateAgentMetadata(entries, agentTabs, isValid) {
+  return new Map((Array.isArray(entries) ? entries : []).filter((pair) => (
+    Array.isArray(pair) && pair.length === 2 && agentTabs.has(pair[0]) && isValid(pair[1])
+  )));
+}
