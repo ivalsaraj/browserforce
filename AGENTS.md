@@ -173,6 +173,8 @@ Agent-created tabs are pinned to the Chrome **window** the agent created them in
 
 **Per-agent tab groups:** Newly created tabs are grouped once per owner key per window, titled with optional `createTab.agentName` (fallback: last four owner-key characters, else `BrowserForce`) and a deterministic owner color. `agentTabNames` and assigned `agentTabGroupIds` persist alongside membership/owners. Only the create path submits new ids to the pure `buildAgentTabGroupPlan`; later syncs never regroup old tabs, so user drag/ungroup actions survive reconnects and worker restarts. Group identity comes from an assigned group still containing that owner's tabs, never a matching title. User-attached tabs keep the separate `browserforce` group; agent-created tabs and their groups are excluded from that reconciliation.
 
+**Focus requests:** Top-level `Page.bringToFront` is intercepted after restriction checks and answered with `chrome.tabs.update(tabId, { active: true })` plus `{}`. Never forward it to the debugger or focus a Chrome window: that can switch the user's macOS Space. Child-session commands are forwarded unchanged.
+
 ### Tab Identity Survives Reconnect
 
 Handles (`t<N>`) and names are keyed by **relay target id**, not by Playwright

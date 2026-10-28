@@ -194,3 +194,34 @@ test('explicit dedicated mode keeps new tabs active in its established window', 
   const calls = await runCreateWithWindows({ windows: [{ id: 10, type: 'normal' }], requestedWindowId: 10, dedicatedIds: [10], settings: { dedicatedWindow: true } });
   assert.deepEqual(calls, [['tab', { url: 'https://example.com', active: true, windowId: 10 }]]);
 });
+
+async function runBringToFront({ childSessionId, blocked = null } = {}) {
+  const { runInNewContext } = await import('node:vm');
+  const calls = [];
+  const chrome = {
+    tabs: { update: async (...args) => { calls.push(['activate', ...args]); } },
+    windows: { update: async () => { throw new Error('Must not focus a window'); } },
+    debugger: { sendCommand: async (...args) => { calls.push(['cdp', ...args]); return { forwarded: true }; } },
+  };
+  const source = bg.slice(bg.indexOf('async function cdpCommand'), bg.indexOf('// ─── Debugger Event Listeners'));
+  const command = runInNewContext(`${source}; cdpCommand`, {
+    chrome, checkRestriction: async () => blocked, handleGhostCursorInput: () => {}, ghostCursorController: {}, console,
+  });
+  const result = await command({ tabId: 123, method: 'Page.bringToFront', childSessionId });
+  return JSON.parse(JSON.stringify({ result, calls }));
+}
+
+test('top-level bringToFront activates only the tab and returns an empty result', async () => {
+  assert.deepEqual(await runBringToFront(), { result: {}, calls: [['activate', 123, { active: true }]] });
+});
+
+test('child-session bringToFront is forwarded without activating the tab', async () => {
+  assert.deepEqual(await runBringToFront({ childSessionId: 'child-1' }), {
+    result: { forwarded: true },
+    calls: [['cdp', { tabId: 123, sessionId: 'child-1' }, 'Page.bringToFront', {}]],
+  });
+});
+
+test('bringToFront still respects command restrictions', async () => {
+  await assert.rejects(runBringToFront({ blocked: 'BLOCKED by restriction' }), /BLOCKED by restriction/);
+});

@@ -949,6 +949,8 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 - **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
 - **Visibility preference (`foreground-tab` / `rotate-visible`)**: Neither value overrides background placement or rotates tabs.
 
+`page.bringToFront()` activates the tab inside its own window without focusing that window.
+
 MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new exec calls.
 
 

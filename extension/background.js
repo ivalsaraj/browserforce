@@ -711,6 +711,12 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
   const blocked = await checkRestriction(method, params, tabId);
   if (blocked) throw new Error(blocked);
 
+  if (method === 'Page.bringToFront' && !childSessionId) {
+    // CDP also focuses the window (and its macOS Space); tab activation does not.
+    await chrome.tabs.update(tabId, { active: true });
+    return {};
+  }
+
   // Special handling: Runtime.enable needs the disable-then-enable trick
   // to force Chrome to re-emit executionContextCreated events
   if (method === 'Runtime.enable' && !childSessionId) {
