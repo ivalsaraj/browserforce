@@ -1293,3 +1293,5 @@ that gap are not guaranteed to be recorded or replayed on reconnect.
 API reference: [Playwright dialogs](https://playwright.dev/docs/dialogs) and
 [Dialog](https://playwright.dev/docs/api/class-dialog), checked against the
 lockfile's Playwright 1.60.0.
+
+Queued dialogs already resolved by another client are silently discarded when Chrome reports `No dialog is showing`; other handling failures remain visible. The driven-tab favicon has a page-side 15-second expiry renewed by agent activity, so it can restore after unexpected debugger loss. Suspended pages may delay that timer.

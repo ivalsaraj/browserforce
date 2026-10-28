@@ -172,7 +172,11 @@ function createFakePageDom({ initialIcons = [] } = {}) {
     }
   }
 
+  const timers = new Map();
+  let nextTimer = 0;
   const context = vm.createContext({
+    setTimeout: (fn) => { timers.set(++nextTimer, fn); return nextTimer; },
+    clearTimeout: (id) => timers.delete(id),
     document: doc,
     MutationObserver: FakeMutationObserver,
   });
@@ -183,6 +187,7 @@ function createFakePageDom({ initialIcons = [] } = {}) {
     doc,
     context,
     api: context[TAB_BADGE_API_KEY],
+    timers,
     observers,
     getIconLinks() {
       return doc.head.children.filter((el) => el.tagName === 'LINK');
@@ -536,7 +541,8 @@ test('controller composes, injects, re-applies after navigation, and restores on
     controller,
   }), true);
   await controller.recordCommand(3, { method: 'Runtime.evaluate' });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].params.expression, /touch/);
   assert.equal(calls[0].method, 'Runtime.evaluate');
   assert.match(calls[0].params.expression, /apply\("data:image\/png;base64,https%3A%2F%2Fapp\.example%2Fhome"\)/);
 
@@ -544,13 +550,13 @@ test('controller composes, injects, re-applies after navigation, and restores on
   currentUrl = 'https://app.example/settings';
   controller.markNavigated(3, { pageUrl: currentUrl });
   await controller.recordCommand(3, { method: 'DOM.getDocument' });
-  assert.equal(calls.length, 2);
-  assert.match(calls[1].params.expression, /apply\("data:image\/png;base64,https%3A%2F%2Fapp\.example%2Fsettings"\)/);
+  assert.equal(calls.length, 3);
+  assert.match(calls[2].params.expression, /apply\("data:image\/png;base64,https%3A%2F%2Fapp\.example%2Fsettings"\)/);
 
   // Disable restores original icon before debugger detach
   await controller.disable(3);
-  assert.equal(calls.length, 3);
-  assert.equal(calls[2].params.expression, buildTabBadgeRestoreExpression());
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].params.expression, buildTabBadgeRestoreExpression());
   assert.equal(controller.isDriven(3), false);
   assert.equal(buildTabBadgeApplyExpression('data:image/png;base64,x').includes('.apply('), true);
 });
@@ -563,4 +569,31 @@ test('background and package.json wire tab-badge lifecycle and test suite', () =
   assert.match(backgroundSource, /tabBadgeController\.markNavigated/);
   assert.match(packageJson.scripts.test, /test\/agent\/tab-badge\.test\.js/);
   assert.match(packageJson.scripts['test:agent'], /test\/agent\/tab-badge\.test\.js/);
+});
+
+test('page-side expiry restores the favicon without the debugger and renews on activity', () => {
+  const page = createFakePageDom({ initialIcons: [{ rel: 'icon', href: '/original.ico' }] });
+  page.api.apply('data:image/png;base64,BADGE');
+  const first = [...page.timers.keys()][0];
+  page.api.touch();
+  assert.equal(page.timers.has(first), false);
+  assert.equal(page.timers.size, 1);
+  [...page.timers.values()][0]();
+  assert.equal(page.api.getState().active, false);
+  assert.equal(page.getIconLinks()[0].getAttribute('href'), '/original.ico');
+  assert.equal(page.timers.size, 0);
+});
+
+test('an existing badge API without expiry is restored before upgrade', () => {
+  const page = createFakePageDom({ initialIcons: [{ rel: 'icon', href: '/original.ico' }] });
+  page.api.apply('data:image/png;base64,OLD');
+  const oldApi = page.api;
+  delete oldApi.touch;
+  const upgraded = vm.runInContext(TAB_BADGE_SOURCE, page.context);
+  assert.notEqual(upgraded, oldApi);
+  assert.equal(page.getIconLinks()[0].getAttribute('href'), '/original.ico');
+  upgraded.apply('data:image/png;base64,NEW');
+  [...page.timers.values()][0]();
+  assert.equal(page.getIconLinks()[0].getAttribute('href'), '/original.ico');
+  assert.equal(upgraded.getState().active, false);
 });

@@ -772,3 +772,10 @@ Run with: `node --test relay/test/relay-server.test.js` and `node --test mcp/tes
 6. **Test writeCdpUrl**: Never call `relay.start()` in tests without `{ writeCdpUrl: false }` — it overwrites the production cdp-url file.
 
 7. **No fixed chat session IDs**: BrowserForce Agent chat must always use explicit user-selected/generated session IDs and persisted session history. Never bind side-panel chat to a single hardcoded ID.
+
+### Review regression guards
+
+- Unexpected debugger detach clears the badge controller but cannot send a DOM restore. Keep the page-side badge expiry, renewed by real commands via `touch()`, so favicon restoration survives detach; suspended pages can delay timers.
+- A previously driven idle client can queue a dialog another client handles. Suppress only the queued-dialog `No dialog is showing` response, removing its provisional record; genuine failures and current-run dialogs still report errors.
+
+- Badge API reuse requires `touch`; restore an older API before replacement so its original favicon is not mistaken for the badge during upgrade.

@@ -443,7 +443,9 @@ export const TAB_BADGE_SOURCE = `(() => {
   const API_KEY = ${JSON.stringify(TAB_BADGE_API_KEY)};
   const existingApi = globalThis[API_KEY];
   if (existingApi && typeof existingApi.apply === 'function' && typeof existingApi.restore === 'function') {
-    return existingApi;
+    if (typeof existingApi.touch === 'function') return existingApi;
+    // Restore saved originals before replacing a pre-expiry API in an open page.
+    existingApi.restore();
   }
 
   const state = {
@@ -453,6 +455,7 @@ export const TAB_BADGE_SOURCE = `(() => {
     hadOriginalIcons: false,
     originalIcons: [],
     observer: null,
+    expiryTimer: null,
   };
 
   function isIconRel(relValue) {
@@ -621,6 +624,13 @@ export const TAB_BADGE_SOURCE = `(() => {
     state.observer = null;
   }
 
+  function touch() {
+    if (!state.active) return false;
+    clearTimeout(state.expiryTimer);
+    state.expiryTimer = setTimeout(restore, ${TAB_BADGE_IDLE_MS});
+    return true;
+  }
+
   function apply(badgeDataUrl) {
     if (typeof badgeDataUrl !== 'string' || !badgeDataUrl) return false;
     const root = getHeadRoot();
@@ -636,10 +646,13 @@ export const TAB_BADGE_SOURCE = `(() => {
     state.badgeDataUrl = badgeDataUrl;
     assertBadgeDom();
     ensureObserver();
+    touch();
     return true;
   }
 
   function restore() {
+    clearTimeout(state.expiryTimer);
+    state.expiryTimer = null;
     disconnectObserver();
     const wasActive = state.active;
     state.active = false;
@@ -698,7 +711,7 @@ export const TAB_BADGE_SOURCE = `(() => {
     };
   }
 
-  const api = { apply, restore, getState };
+  const api = { apply, restore, getState, touch };
   globalThis[API_KEY] = api;
   return api;
 })()`;
@@ -805,7 +818,16 @@ export function createTabBadgeController({
   function recordCommand(tabId, { method = '', pageUrl = '' } = {}) {
     if (!isTabAttached(tabId)) return Promise.resolve(false);
     const effectiveUrl = pageUrl || getTabUrl(tabId) || '';
-    stateMachine.recordCommand(tabId, { method, pageUrl: effectiveUrl });
+    const result = stateMachine.recordCommand(tabId, { method, pageUrl: effectiveUrl });
+    if (!result.applied) {
+      return enqueue(tabId, async () => {
+        if (!isTabAttached(tabId)) return false;
+        await sendCommand(tabId, 'Runtime.evaluate', {
+          expression: `globalThis.${TAB_BADGE_API_KEY}?.touch?.()`,
+        });
+        return true;
+      });
+    }
     return queues.get(tabId) || Promise.resolve(true);
   }
 

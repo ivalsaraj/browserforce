@@ -362,3 +362,37 @@ test('the open command owns the page while navigating', async () => {
   await runtime.openNewPage({ url: 'https://created.test' });
   assert.deepEqual(f.actions, [['dismiss']]);
 });
+
+test('previously driven idle client discards a dialog another client already handled', async () => {
+  const f = fixture();
+  const idle = createDialogState();
+  idle.setupPage(f.page);
+  await idle.withRun(new AbortController().signal, { page: f.page }, () => {});
+  let handled = false;
+  const dialog = {
+    type: () => 'confirm', message: () => 'Continue?', defaultValue: () => '',
+    accept: async () => { handled = true; },
+    dismiss: async () => { if (handled) throw new Error('Protocol error (Page.handleJavaScriptDialog): No dialog is showing'); handled = true; },
+  };
+  const owner = createDialogState();
+  owner.setupPage(f.page);
+  const signal = new AbortController().signal;
+  await owner.withRun(signal, { page: f.page }, async () => {
+    owner.armDialog(f.page, { accept: true }, signal);
+    await Promise.all(f.page.listeners('dialog').map((listener) => listener(dialog)));
+  });
+  assert.equal(handled, true);
+  await idle.withRun(new AbortController().signal, { page: f.page }, () => {});
+  assert.deepEqual(idle.getDialogs(), []);
+  assert.deepEqual(idle.takeNotices(), []);
+});
+
+test('queued dialogs still report genuine handling failures', async () => {
+  const f = fixture();
+  const state = createDialogState();
+  state.setupPage(f.page);
+  await state.withRun(new AbortController().signal, { page: f.page }, () => {});
+  await f.fire('confirm', 'Continue?', { fail: true });
+  await state.withRun(new AbortController().signal, { page: f.page }, () => {});
+  assert.equal(state.takeNotices()[0].error, 'page closed');
+});

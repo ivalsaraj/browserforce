@@ -195,3 +195,11 @@
   agent-created opener with no time bound, then restored the previous selection.
 - Fix: `isAgentPopupCandidate()` requires a real agent command on the opener in
   the last 5s for every opener, and excludes Chrome's New Tab page.
+
+## 2026-10-28 — Review fixes for detached badges and stale dialogs
+
+- Added page-side favicon expiry renewed by real activity, preserving restoration after debugger loss.
+- Queued dialogs already resolved by another client no longer emit false failure notices.
+- Added regressions for both paths; suspended-page timers remain subject to Chrome scheduling.
+
+- Round 2 upgrade regression: restore an older injected badge API before installing the expiry-aware version; tested original favicon survival across upgrade and expiry.

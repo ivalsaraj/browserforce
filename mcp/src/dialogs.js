@@ -51,6 +51,12 @@ export function createDialogState() {
       else await dialog.dismiss();
       record.action = shouldAccept ? 'accepted' : 'dismissed';
     } catch (error) {
+      // Another CDP client may have resolved a dialog queued while this run was idle.
+      if (!useArm && /No dialog is showing/.test(error.message || '')) {
+        const index = records.indexOf(record);
+        if (index !== -1) records.splice(index, 1);
+        return;
+      }
       record.action = 'failed';
       record.error = error.message || String(error);
     }
