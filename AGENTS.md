@@ -362,12 +362,13 @@ rotation, stretch, and visibility:
   to the click point and waiting for `waitForArrival()` bounded by
   `CLICK_SYNC_MAX_WAIT_MS` (`600ms`) so a stuck animation never blocks a click.
   When OFF (or absent), the cursor remains purely post-command cosmetic.
-- **Reduced motion & subframe/blank-page safety**: `prefers-reduced-motion: reduce`
-  jumps directly to the target and disables wiggle. Subframes (`window.top !== window`)
-  never mount a cursor, and non-web-accessible documents (`about:`, `data:`, opaque
-  `'null'` origin) use an inline SVG fallback instead of requesting
-  `chrome-extension://<id>/assets/ghost-cursor.png` (which `<all_urls>` in
-  `web_accessible_resources` denies).
+- **Artwork & hotspot**: inline 24px SVG, black fill and white outline, static
+  two-radius blue glow. The up-pointing art rests at -44 degrees and transforms
+  around its tip `(12, 1.6)`; translate the box by `(-12, -1.6)` so rotation and
+  scaling cannot displace the click point. Keep the chip outside the arrow.
+- **Reduced motion & frames**: reduced motion jumps to the target and disables
+  wiggle. Subframes never mount a cursor. Inline art needs no asset URL or
+  origin-specific fallback.
 
 **Agent label.** A client that connects with `?agentName=` (from
 `BROWSERFORCE_AGENT_NAME`, via `agentCdpUrl()` in `mcp/src/client-label.js`) gets

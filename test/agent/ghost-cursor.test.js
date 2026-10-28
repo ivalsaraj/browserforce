@@ -17,7 +17,9 @@ import {
   WIGGLE_RAMP_IN_MS,
   APPEAR_INITIAL_SCALE,
   APPEAR_INITIAL_BLUR_PX,
-  CURSOR_GLOW_COLOR,
+  CURSOR_GLOW_FILTER,
+  CURSOR_ARROW_PATH,
+  computeCursorTransform,
   stepSpring,
   evaluateBezierPoint,
   evaluateBezierTangent,
@@ -133,6 +135,7 @@ function createFakeRendererRuntime(
     documentElement: hasRoot ? documentElement : null,
     body: hasRoot ? documentElement : null,
     createElement: (tagName) => new FakeElement(tagName),
+    createElementNS: (_ns, tagName) => new FakeElement(tagName),
     getElementById: (id) => findById(documentElement, id),
     addEventListener: (type, handler) => { listeners.push({ type, handler }); },
   };
@@ -243,39 +246,36 @@ function createFakeRendererRuntime(
   };
 }
 
-test('packages the PNG and resolves its extension URL in the injected renderer', () => {
-  const imageUrl = 'chrome-extension://test-extension/assets/ghost-cursor.png';
-  const source = buildGhostCursorSource(imageUrl);
-  const runtime = createFakeRendererRuntime(source);
-  const inner = runtime.document.getElementById('__browserforce_ghost_cursor__').firstElementChild;
-
-  assert.ok(source.includes(imageUrl));
-  assert.ok(!source.includes('__browserforce_ghost_cursor_image_url__'));
-  assert.equal(inner.style.backgroundImage, `url("${imageUrl}")`);
-  assert.deepEqual(manifest.web_accessible_resources, [{
-    resources: ['assets/ghost-cursor.png'],
-    matches: ['<all_urls>'],
-  }]);
+test('renders the approved inline SVG without loading an extension asset', () => {
+  const runtime = createFakeRendererRuntime(buildGhostCursorSource());
+  const inner = runtime.inner();
+  const svg = inner.firstElementChild;
+  assert.equal(inner.style.width, '24px');
+  assert.equal(inner.style.height, '24px');
+  assert.equal(inner.style.transformOrigin, '12px 1.6px');
+  assert.equal(inner.style.backgroundImage, '');
+  assert.equal(svg.attributes.get('viewBox'), '0 0 24 24');
+  assert.equal(svg.firstElementChild.attributes.get('d'), CURSOR_ARROW_PATH);
+  assert.equal(svg.style.filter, CURSOR_GLOW_FILTER);
+  assert.ok(!GHOST_CURSOR_SOURCE.includes('chrome-extension://'));
 });
 
-test('guards against chrome-extension:// asset load errors on about:blank and subframes', () => {
-  const imageUrl = 'chrome-extension://test-extension/assets/ghost-cursor.png';
-  const source = buildGhostCursorSource(imageUrl);
+test('keeps the tip exactly on the target under rotation and scaling', () => {
+  for (const angle of [-180, -44, 0, 90, 180]) {
+    const pose = computeCursorTransform(100, 200, angle, 0.65, 0.4);
+    assert.equal(pose.translateX + 12, 100);
+    assert.equal(pose.translateY + 1.6, 200);
+    assert.equal(pose.transformOrigin, '12px 1.6px');
+  }
+});
 
-  // Subframes must not mount a ghost cursor element at all.
-  const subframeRuntime = createFakeRendererRuntime(source, { isSubframe: true });
-  assert.equal(subframeRuntime.document.getElementById('__browserforce_ghost_cursor__'), null);
-
-  // about:blank and opaque origins do not match <all_urls> in web_accessible_resources;
-  // renderer falls back to an inline data: SVG URL instead of triggering Chrome's denial log.
-  const blankRuntime = createFakeRendererRuntime(source, {
-    location: { protocol: 'about:', href: 'about:blank' },
-    origin: 'null',
+test('mounts inline artwork on blank pages and skips subframes', () => {
+  const subframe = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { isSubframe: true });
+  assert.equal(subframe.inner(), null);
+  const blank = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, {
+    location: { protocol: 'about:', href: 'about:blank' }, origin: 'null',
   });
-  const blankInner = blankRuntime.inner();
-  assert.ok(blankInner);
-  assert.match(blankInner.style.backgroundImage, /^url\("data:image\/svg\+xml;utf8,/);
-  assert.ok(!blankInner.style.backgroundImage.includes('chrome-extension://'));
+  assert.equal(blank.inner().firstElementChild.tagName, 'SVG');
 });
 
 // ─── Pure Physics & Motion Unit Tests ────────────────────────────────────────
@@ -415,7 +415,7 @@ test('computeVisibilityEffect combines fade, 40% scale, and 5px->0 blur', () => 
 test('renderer bends smoothly when retargeted mid-move, resolves arrival promise, wiggles when idle, and respects reduced motion', async () => {
   const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
   const inner = runtime.inner();
-  assert.ok(inner.style.filter.includes(CURSOR_GLOW_COLOR));
+  assert.ok(inner.firstElementChild.style.filter === CURSOR_GLOW_FILTER);
 
   // Initial placement
   await runtime.dispatch({ type: 'move', x: 100, y: 100, button: 'none' });
@@ -648,23 +648,23 @@ test('renderer source mounts, animates, fades, wakes, navigates, and disables', 
   assert.ok(api);
   assert.ok(outer);
   api.applyMouseAction({ type: 'move', x: 10, y: 20, button: 'none' });
-  assert.match(outer.style.transform, /translate3d\(10px, 20px, 0\)/);
+  assert.match(outer.style.transform, /translate3d\(-2px, 18.4px, 0\)/);
 
   api.applyMouseAction({ type: 'move', x: 310, y: 420, button: 'none' });
-  assert.match(outer.style.transform, /translate3d\(310px, 420px, 0\)/);
+  assert.match(outer.style.transform, /translate3d\(298px, 418.4px, 0\)/);
 
   api.applyMouseAction({ type: 'down', x: 310, y: 420, button: 'left' });
-  assert.equal(inner.style.transform, 'scale(0.95)');
+  assert.equal(inner.style.transform, 'rotate(-44deg) scale(0.95, 0.95)');
   assert.equal(inner.style.opacity, '1');
   api.applyMouseAction({ type: 'up', x: 310, y: 420, button: 'left' });
-  assert.equal(inner.style.transform, 'scale(1)');
+  assert.equal(inner.style.transform, 'rotate(-44deg) scale(1, 1)');
 
   runtime.runNextTimer();
   assert.equal(inner.style.opacity, '0');
   assert.match(inner.style.filter, /blur\(5px\)/);
   api.applyMouseAction({ type: 'move', x: 500, y: 520, button: 'none' });
   assert.equal(inner.style.opacity, '1');
-  assert.match(outer.style.transform, /500px/);
+  assert.match(outer.style.transform, /488px/);
 
   const navigatedRuntime = createFakeRendererRuntime();
   assert.ok(navigatedRuntime.document.getElementById('__browserforce_ghost_cursor__'));
@@ -686,7 +686,6 @@ test('extension wiring keeps cursor updates cosmetic and settings default-off', 
   assert.match(background, /ghostCursorClickSync/);
   assert.match(background, /handleGhostCursorInput/);
   assert.match(background, /ghostCursorController/);
-  assert.match(background, /chrome\.runtime\.getURL\(['"]assets\/ghost-cursor\.png['"]\)/);
   assert.match(ghostCursorModule, /Page\.addScriptToEvaluateOnNewDocument/);
   assert.match(ghostCursorModule, /Page\.removeScriptToEvaluateOnNewDocument/);
   assert.match(packageJson.scripts.test, /test\/agent\/ghost-cursor\.test\.js/);
@@ -831,7 +830,7 @@ test('scales only the arrow on press, never the chip', () => {
   const runtime = createFakeRendererRuntime();
   runtime.dispatch({ type: 'down', x: 40, y: 90, button: 'left', label: 'Claude' });
 
-  assert.equal(runtime.inner().style.transform, 'scale(0.95)');
+  assert.equal(runtime.inner().style.transform, 'rotate(-44deg) scale(0.95, 0.95)');
   assert.equal(runtime.chip().style.transform, undefined);
 });
 

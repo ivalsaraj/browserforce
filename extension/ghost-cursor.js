@@ -1,6 +1,5 @@
 const CURSOR_ID = '__browserforce_ghost_cursor__';
 const CURSOR_API_KEY = '__browserforceGhostCursor';
-const CURSOR_IMAGE_URL_MARKER = '__browserforce_ghost_cursor_image_url__';
 const VALID_BUTTONS = new Set(['left', 'right', 'middle']);
 const ACTION_TYPES = new Map([
   ['mouseMoved', 'move'],
@@ -14,6 +13,21 @@ const DISABLE_EXPRESSION = `globalThis.${CURSOR_API_KEY}?.disable?.()`;
 // ─── Physics & Motion Tuning Constants ───────────────────────────────────────
 // Exported for deterministic unit testing and shared verbatim with the
 // injected page renderer so test math and runtime math cannot drift.
+
+export const CURSOR_SIZE_PX = 24;
+export const CURSOR_TIP_X_PX = 12;
+export const CURSOR_TIP_Y_PX = 1.6;
+export const CURSOR_ARROW_PATH = 'M12.82 3.42 L18.53 16.03 Q19.60 18.40 17.26 17.26 L13.44 15.40 Q12.00 14.70 10.56 15.40 L6.74 17.26 Q4.40 18.40 5.47 16.03 L11.18 3.42 Q12.00 1.60 12.82 3.42 Z';
+export const CURSOR_GLOW_FILTER = 'drop-shadow(0 0 6px rgba(51,156,255,.9)) drop-shadow(0 0 15px rgba(51,156,255,.48))';
+
+export function computeCursorTransform(x, y, rotationDeg, scaleX = 1, scaleY = 1) {
+  return {
+    translateX: x - CURSOR_TIP_X_PX,
+    translateY: y - CURSOR_TIP_Y_PX,
+    transformOrigin: CURSOR_TIP_X_PX + 'px ' + CURSOR_TIP_Y_PX + 'px',
+    transform: 'rotate(' + rotationDeg + 'deg) scale(' + scaleX + ', ' + scaleY + ')',
+  };
+}
 
 export const FIXED_TIMESTEP_MS = 1000 / 120;
 export const FIXED_TIMESTEP_SEC = 1 / 120;
@@ -422,26 +436,23 @@ export function computeVisibilityEffect(
 export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   const CURSOR_ID = '__browserforce_ghost_cursor__';
   const CURSOR_API_KEY = '__browserforceGhostCursor';
-  const CURSOR_IMAGE_URL = ${JSON.stringify(CURSOR_IMAGE_URL_MARKER)};
-  const FALLBACK_CURSOR_DATA_URL = 'data:image/svg+xml;utf8,' + encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">'
-    + '<path d="M2 1.5L18.5 10.2L11.2 12.1L8.5 19.5L2 1.5Z" fill="#111" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/>'
-    + '</svg>'
-  );
   const PRESS_EASING = 'cubic-bezier(0.23, 1, 0.32, 1)';
   const PRESS_DURATION_MS = 140;
   const IDLE_HIDE_DELAY_MS = 5000;
   const IDLE_FADE_OUT_MS = 600;
-  const CURSOR_SIZE_PX = 22;
+  const CURSOR_SIZE_PX = ${CURSOR_SIZE_PX};
+  const CURSOR_TIP_X_PX = ${CURSOR_TIP_X_PX};
+  const CURSOR_TIP_Y_PX = ${CURSOR_TIP_Y_PX};
+  const CURSOR_ARROW_PATH = ${JSON.stringify(CURSOR_ARROW_PATH)};
+  const CURSOR_GLOW_FILTER = ${JSON.stringify(CURSOR_GLOW_FILTER)};
+  ${computeCursorTransform.toString()}
   const CURSOR_Z_INDEX = 2147483647;
-  const MINIMAL_HOTSPOT_X_PX = 0;
-  const MINIMAL_HOTSPOT_Y_PX = 0;
   const CHIP_ID = '__browserforce_ghost_cursor_label__';
   const AGENT_ID = '__browserforce_ghost_cursor_agent__';
   const CHIP_PREFIX_TEXT = 'BrowserForce \u00B7';
   const CHIP_PREFIX_GAP_PX = 4;
-  const CHIP_OFFSET_X_PX = CURSOR_SIZE_PX - 4;
-  const CHIP_OFFSET_Y_PX = CURSOR_SIZE_PX + 2;
+  const CHIP_OFFSET_X_PX = CURSOR_TIP_X_PX + 18;
+  const CHIP_OFFSET_Y_PX = CURSOR_TIP_Y_PX + 20;
   // Sized so the relay's 24-character limit survives intact instead of being
   // ellipsized. Measured in Chrome, not estimated: the worst allowed name
   // ('W' x 24) renders a 357px chip at this font, so the cap clears it with
@@ -502,38 +513,13 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   ${computeWiggleAngleDeg.toString()}
   ${computeVisibilityEffect.toString()}
 
-  // Page.addScriptToEvaluateOnNewDocument runs in every frame of the page,
-  // including about:blank and sandboxed iframes where <all_urls> web_accessible_resources
-  // loads are denied by Chrome. Only top-level mouse events drive the cursor, so
-  // subframes must never mount a cursor element.
+  // New-document scripts run in every frame; only top-level input owns a cursor.
   function isSubframe() {
     try {
       return Boolean(window.top && window.top !== window);
     } catch {
       return true;
     }
-  }
-
-  // Chrome's <all_urls> pattern in web_accessible_resources only matches http:,
-  // https:, ws:, wss:, ftp:, file:, and chrome-extension:. On about:blank, data:,
-  // blob:, or opaque ('null') origins, requesting chrome-extension://<id>/assets/ghost-cursor.png
-  // logs "Denying load of chrome-extension://<id>/assets/ghost-cursor.png".
-  function resolveSafeCursorImageUrl() {
-    if (!CURSOR_IMAGE_URL) return '';
-    if (!CURSOR_IMAGE_URL.startsWith('chrome-extension://')) return CURSOR_IMAGE_URL;
-    const loc = window.location;
-    if (!loc) return CURSOR_IMAGE_URL;
-    const protocol = loc.protocol || '';
-    if (
-      protocol === 'about:' ||
-      protocol === 'data:' ||
-      protocol === 'blob:' ||
-      protocol === 'javascript:' ||
-      (typeof window.origin === 'string' && window.origin === 'null')
-    ) {
-      return FALLBACK_CURSOR_DATA_URL;
-    }
-    return CURSOR_IMAGE_URL;
   }
 
   function isReducedMotionPreferred() {
@@ -617,42 +603,49 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     });
   }
 
-  function buildFilterString(blurPx) {
-    const baseFilter = 'drop-shadow(0 0 6px ' + CURSOR_GLOW_COLOR + ') drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4))';
-    if (blurPx > 0.05) {
-      return 'blur(' + Number(blurPx.toFixed(2)) + 'px) ' + baseFilter;
-    }
-    return baseFilter;
-  }
-
   function applyTranslate() {
     if (!runtime.outerElement) return;
-    const tx = Number((runtime.x - MINIMAL_HOTSPOT_X_PX).toFixed(2));
-    const ty = Number((runtime.y - MINIMAL_HOTSPOT_Y_PX).toFixed(2));
-    runtime.outerElement.style.transform = 'translate3d(' + tx + 'px, ' + ty + 'px, 0)';
+    const pose = computeCursorTransform(runtime.x, runtime.y, RESTING_TILT_DEG + runtime.rotation);
+    runtime.outerElement.style.transform = 'translate3d(' + pose.translateX + 'px, ' + pose.translateY + 'px, 0)';
   }
 
   function applyInnerTransformAndFilter() {
     if (!runtime.innerElement) return;
     const visEffect = computeVisibilityEffect(runtime.visibility);
-    const effectiveScaleX = runtime.pressScale * runtime.scaleX * visEffect.scale;
-    const effectiveScaleY = runtime.pressScale * runtime.scaleY * visEffect.scale;
-    const rot = runtime.rotation;
-
-    const isDefaultPose =
-      Math.abs(rot) < 0.05 &&
-      Math.abs(effectiveScaleX - effectiveScaleY) < 0.005 &&
-      Math.abs(visEffect.scale - 1) < 0.005;
-
-    if (isDefaultPose) {
-      runtime.innerElement.style.transform = 'scale(' + runtime.pressScale + ')';
-    } else {
-      runtime.innerElement.style.transform =
-        'rotate(' + Number(rot.toFixed(2)) + 'deg) '
-        + 'scale(' + Number(effectiveScaleX.toFixed(3)) + ', ' + Number(effectiveScaleY.toFixed(3)) + ')';
-    }
+    const pose = computeCursorTransform(runtime.x, runtime.y, RESTING_TILT_DEG + runtime.rotation,
+      runtime.pressScale * runtime.scaleX * visEffect.scale,
+      runtime.pressScale * runtime.scaleY * visEffect.scale);
+    runtime.innerElement.style.transform = pose.transform;
     runtime.blurPx = visEffect.blurPx;
-    runtime.innerElement.style.filter = buildFilterString(visEffect.blurPx);
+    runtime.innerElement.style.filter = 'blur(' + visEffect.blurPx + 'px)';
+  }
+
+  function configureCursorArt(inner) {
+    applyOverlayReset(inner);
+    inner.style.display = 'block';
+    inner.style.width = CURSOR_SIZE_PX + 'px';
+    inner.style.height = CURSOR_SIZE_PX + 'px';
+    inner.style.transformOrigin = computeCursorTransform(0, 0, 0).transformOrigin;
+    inner.style.backgroundImage = '';
+    let svg = inner.firstElementChild;
+    if (!svg || svg.tagName.toLowerCase() !== 'svg') {
+      const namespace = 'http://www.w3.org/2000/svg';
+      svg = document.createElementNS(namespace, 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('width', String(CURSOR_SIZE_PX));
+      svg.setAttribute('height', String(CURSOR_SIZE_PX));
+      const path = document.createElementNS(namespace, 'path');
+      for (const [key, value] of Object.entries({ d: CURSOR_ARROW_PATH, fill: '#000', stroke: '#fff',
+        'stroke-width': '1.5', 'stroke-linejoin': 'round', 'paint-order': 'stroke fill' })) {
+        path.setAttribute(key, value);
+      }
+      inner.appendChild(svg);
+      svg.appendChild(path);
+    }
+    applyOverlayReset(svg);
+    svg.style.display = 'block';
+    svg.style.overflow = 'visible';
+    svg.style.filter = CURSOR_GLOW_FILTER;
   }
 
   // Page CSS reaches these elements — they are bare divs and spans in the page's
@@ -769,17 +762,8 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     outer.style.willChange = 'transform';
 
     const inner = document.createElement('div');
-    inner.style.width = CURSOR_SIZE_PX + 'px';
-    inner.style.height = CURSOR_SIZE_PX + 'px';
-    inner.style.transformOrigin = MINIMAL_HOTSPOT_X_PX + 'px ' + MINIMAL_HOTSPOT_Y_PX + 'px';
-    inner.style.backgroundColor = 'transparent';
-    inner.style.backgroundRepeat = 'no-repeat';
-    inner.style.backgroundSize = 'contain';
-    inner.style.filter = buildFilterString(0);
+    configureCursorArt(inner);
     inner.style.opacity = '1';
-
-    const resolvedUrl = resolveSafeCursorImageUrl();
-    inner.style.backgroundImage = resolvedUrl ? 'url("' + resolvedUrl + '")' : '';
     outer.appendChild(inner);
 
     runtime.outerElement = outer;
@@ -793,15 +777,7 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
     if (existing) {
       runtime.outerElement = existing;
       runtime.innerElement = existing.firstElementChild || null;
-      if (runtime.innerElement) {
-        const resolvedUrl = resolveSafeCursorImageUrl();
-        if (resolvedUrl) {
-          runtime.innerElement.style.backgroundImage = 'url("' + resolvedUrl + '")';
-        }
-        if (!runtime.innerElement.style.filter) {
-          runtime.innerElement.style.filter = buildFilterString(runtime.blurPx);
-        }
-      }
+      if (runtime.innerElement) configureCursorArt(runtime.innerElement);
       bindChipElements();
       syncLabel();
       return existing;
@@ -1207,12 +1183,8 @@ export const GHOST_CURSOR_SOURCE = String.raw`(() => {
   enable();
 })();`;
 
-export function buildGhostCursorSource(cursorImageUrl = '') {
-  const safeImageUrl = typeof cursorImageUrl === 'string' ? cursorImageUrl : '';
-  return GHOST_CURSOR_SOURCE.replace(
-    JSON.stringify(CURSOR_IMAGE_URL_MARKER),
-    JSON.stringify(safeImageUrl),
-  );
+export function buildGhostCursorSource() {
+  return GHOST_CURSOR_SOURCE;
 }
 
 export function buildGhostCursorAction({ type, params, agentName } = {}) {
@@ -1262,11 +1234,10 @@ export function createGhostCursorController({
   isEnabled,
   isTabAttached,
   sendCommand,
-  cursorImageUrl = '',
   log = () => {},
 }) {
   const stateByTab = new Map();
-  const cursorSource = buildGhostCursorSource(cursorImageUrl);
+  const cursorSource = buildGhostCursorSource();
 
   function getState(tabId) {
     let state = stateByTab.get(tabId);
