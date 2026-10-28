@@ -326,7 +326,7 @@ disconnects is not handled yet.
 The optional ghost cursor is controlled by the local-storage key
 `ghostCursorEnabled` and defaults to disabled. `extension/ghost-cursor.js` owns the
 physics-driven renderer, pure animation helpers (`stepSpring`, `selectBezierArc`,
-`isArcInsideViewport`, `hasCursorArrived`, `computeWiggleAmplitude`,
+`generateBezierCandidates`, `scoreBezierPath`, `isArcInsideViewport`, `hasCursorArrived`,
 `computeWiggleAngleDeg`, `computeSpeedNarrowing`, `computeVisibilityEffect`),
 action mapping, and per-tab serialized queue; `extension/background.js` owns live
 setting state and debugger lifecycle. Only successful top-level
@@ -336,31 +336,41 @@ must complete the renderer teardown and registered-script removal before normal
 debugger detach; post-detach cleanup only invalidates queued work and must not send
 new debugger commands.
 
-**Physics & motion.** The renderer steps damped springs at a fixed timestep
-(`FIXED_TIMESTEP_MS = 1000 / 120`) per `requestAnimationFrame` for position,
-rotation, stretch, and visibility:
-- **Curved long moves (`> 196px`)**: `selectBezierArc` evaluates up to 20 candidate
-  cubic Bézier arcs varying bend side and magnitude, keeping the first whose path
-  stays `>= 20px` inside the viewport (`VIEWPORT_MARGIN_PX`). The arrow rotates to
-  follow the path tangent and settles back to its resting pointer tilt (`-44°`).
-  Shorter moves complete faster; retargeting mid-move preserves `(x, y, vx, vy)` so
-  the trajectory bends smoothly with no jump.
-- **Short moves (`<= 196px`)**: straight line with subtle mid-move squash-and-stretch
-  and tilt peaking at `progress = 0.5`.
-- **Motion blur & glow**: speed-dependent width narrowing down to `65%`
-  (`MIN_NARROWING_SCALE_X`), soft `#339cff` glow around the arrow, and synchronized
-  appear/disappear transitions (fade + scale from `40%` + `5px → 0px` blur).
-- **Arrival & idle thinking wiggle**: arrival is reached within `0.85px`
-  (`ARRIVAL_DISTANCE_THRESHOLD_PX`) at near-zero velocity and resolves
-  `waitForArrival()`. While idle after arrival, a gentle `±12.5°` rock (`0.66s`
-  period) ramps in over `1.4s` and stops on the next move.
+**Physics & motion.** All channels use response/damping-fraction springs with
+mass 1 and semi-implicit Euler at `1/240s`. Each frame advances real elapsed time,
+carrying fractional steps; catch-up caps at 1 second and resynchronizes.
+- **Channels**: position `.19s/.90`, rotation `.12s/.90`, short tilt `.055s/.82`,
+  squash `.12s/.86`, stretch `.20s/.85`, visibility `.42s/.86`, short progress
+  `.19s/.94`, long progress `pathResponse/.90`. Snap only when velocity and force
+  are at most `.06` and error is at most 1 percent.
+- **Long moves (`>196px`)**: score 20 candidates (two single cubics with handle
+  scales `1/.65`, plus 18 two-segment arcs). Departure and arrival handles align
+  with the resting tip direction. Sample 24 points per segment and choose the
+  lowest score staying 20px inside the viewport, or lowest overall if none fit.
+  Scoring includes length, excess travel, turning, opposition, and an arc penalty.
+  Curviness clamps excess length/chord plus total turning/(2pi) into `[0,1]`.
+  The path response combines length, curviness and opposition; a progress spring
+  drives the path and tight position springs follow it. Rotation follows tangent
+  plus 90 degrees through the shortest angle from the start of travel.
+  Retargeting preserves live position and velocity.
+- **Short moves (`<=196px`)**: straight scoots, base rotation at rest, a separate
+  directional tilt spring (up to 70 degrees), and a `.15` sine-envelope squash
+  along the move axis. Width narrows with speed/5500 down to 65 percent.
+- **Arrival**: progress at least `.999`, progress speed below `.01`, distance at
+  most `.85px`, and each position velocity at most `12px/s`. Snap to the exact
+  hotspot and resolve `waitForArrival()`.
+- **Wiggle**: one 1.41s sine-windowed burst on first appearance and each arrival,
+  with amplitude 12.5 degrees and period .66s; never loop while idle.
+- **Visibility**: first input while invisible snaps to its position before the
+  visibility spring fades/scales/blurs in. Opacity is `v`, scale `.4+.6v`, blur
+  `5*(1-v)px`. Fade out after 5 seconds idle. Stop animation frames once settled.
 - **Optional click sync (`ghostCursorClickSync`, default `false`)**: exposed in the
   popup under the ghost-cursor toggle (only shown/enabled when the ghost cursor is
   on). When ON and the ghost cursor is enabled, `cdpCommand` awaits
   `syncGhostCursorBeforeClick()` before forwarding a top-level
   `Input.dispatchMouseEvent` of type `mousePressed` to Chrome, moving the cursor
   to the click point and waiting for `waitForArrival()` bounded by
-  `CLICK_SYNC_MAX_WAIT_MS` (`600ms`) so a stuck animation never blocks a click.
+  `CLICK_SYNC_MAX_WAIT_MS` (`1500ms`) so a stuck animation never blocks a click.
   When OFF (or absent), the cursor remains purely post-command cosmetic.
 - **Artwork & hotspot**: inline 24px SVG, black fill and white outline, static
   two-radius blue glow. The up-pointing art rests at -44 degrees and transforms

@@ -14,7 +14,14 @@ import {
   ARRIVAL_DISTANCE_THRESHOLD_PX,
   WIGGLE_MAX_AMPLITUDE_DEG,
   WIGGLE_PERIOD_MS,
-  WIGGLE_RAMP_IN_MS,
+  WIGGLE_DURATION_MS,
+  SPRING_CHANNELS,
+  computeSpringParameters,
+  generateBezierCandidates,
+  scoreBezierPath,
+  computePathResponse,
+  computeFollowResponse,
+  computeDirectionOpposition,
   APPEAR_INITIAL_SCALE,
   APPEAR_INITIAL_BLUR_PX,
   CURSOR_GLOW_FILTER,
@@ -25,12 +32,11 @@ import {
   evaluateBezierTangent,
   isArcInsideViewport,
   selectBezierArc,
-  computeMoveDurationMs,
   computeTargetRotationDeg,
   computeSpeedNarrowing,
-  computeShortMoveStretch,
+  computeShortMoveTilt,
+  computeShortMoveSquash,
   hasCursorArrived,
-  computeWiggleAmplitude,
   computeWiggleAngleDeg,
   computeVisibilityEffect,
   CLICK_SYNC_MAX_WAIT_MS,
@@ -48,7 +54,6 @@ const ghostCursorModule = fs.readFileSync(new URL('../../extension/ghost-cursor.
 const popupHtml = fs.readFileSync(new URL('../../extension/popup.html', import.meta.url), 'utf8');
 const popupJs = fs.readFileSync(new URL('../../extension/popup.js', import.meta.url), 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-const manifest = JSON.parse(fs.readFileSync(new URL('../../extension/manifest.json', import.meta.url), 'utf8'));
 
 function createCommandRecorder({ shouldReject = false, onCommand } = {}) {
   const calls = [];
@@ -280,196 +285,255 @@ test('mounts inline artwork on blank pages and skips subframes', () => {
 
 // ─── Pure Physics & Motion Unit Tests ────────────────────────────────────────
 
-test('stepSpring integrates with fixed-timestep sub-steps and converges to target', () => {
-  let stateA = { value: 0, velocity: 0 };
-  for (let i = 0; i < 60; i += 1) {
-    stateA = stepSpring(stateA, 100, { dtMs: FIXED_TIMESTEP_MS });
+test('spring channels use measured response and damping fractions at 240 Hz', () => {
+  assert.equal(FIXED_TIMESTEP_MS, 1000 / 240);
+  assert.deepEqual(SPRING_CHANNELS, {
+    position: { response: 0.19, dampingFraction: 0.90 },
+    rotation: { response: 0.12, dampingFraction: 0.90 },
+    tilt: { response: 0.055, dampingFraction: 0.82 },
+    squash: { response: 0.12, dampingFraction: 0.86 },
+    stretch: { response: 0.20, dampingFraction: 0.85 },
+    visibility: { response: 0.42, dampingFraction: 0.86 },
+    shortProgress: { response: 0.19, dampingFraction: 0.94 },
+    longProgress: { dampingFraction: 0.90 },
+  });
+  const { stiffness, damping } = computeSpringParameters(0.19, 0.9);
+  assert.equal(stiffness, (2 * Math.PI / 0.19) ** 2);
+  assert.equal(damping, 2 * Math.sqrt(stiffness) * 0.9);
+});
+
+test('spring integrates semi-implicit Euler and settles a 100px move within 0.4 seconds', () => {
+  const dt = 1 / 240;
+  const { stiffness } = computeSpringParameters(0.19, 0.9);
+  const first = stepSpring({ value: 0, velocity: 0 }, 100);
+  assert.equal(first.velocity, stiffness * 100 * dt);
+  assert.equal(first.value, first.velocity * dt);
+  let state = { value: 0, velocity: 0 };
+  for (let i = 0; i < 96; i += 1) state = stepSpring(state, 100);
+  assert.ok(Math.abs(state.value - 100) < 0.01);
+  assert.ok(Math.abs(state.velocity) < 0.06);
+  assert.deepEqual(stepSpring({ value: 100.000001, velocity: 0.000001 }, 100), { value: 100, velocity: 0 });
+});
+
+test('spring caps catch-up at one second', () => {
+  assert.deepEqual(stepSpring({ value: 0, velocity: 0 }, 100, { dtMs: 10000 }),
+    stepSpring({ value: 0, velocity: 0 }, 100, { dtMs: 1000 }));
+});
+
+test('generates 20 paths with tip-first departure and arrival handles', () => {
+  const start = { x: 400, y: 400 };
+  const end = { x: 1000, y: 600 };
+  const candidates = generateBezierCandidates(start, end);
+  assert.equal(candidates.length, BEZIER_CANDIDATE_COUNT);
+  assert.equal(candidates.filter((path) => path.segments).length, 18);
+  const distance = Math.hypot(600, 200);
+  assert.ok(Math.abs(Math.hypot(candidates[0].p1.x - start.x, candidates[0].p1.y - start.y) - 0.42 * distance) < 1e-9);
+  assert.ok(Math.abs(Math.hypot(candidates[0].p2.x - end.x, candidates[0].p2.y - end.y) - 0.15 * distance) < 1e-9);
+  for (const path of candidates) {
+    assert.deepEqual(evaluateBezierPoint(path, 0), start);
+    assert.deepEqual(evaluateBezierPoint(path, 1), end);
+    assert.ok(Math.abs(evaluateBezierTangent(path, 0).angleDeg - (-134)) < 1e-9);
+    assert.ok(Math.abs(evaluateBezierTangent(path, 1).angleDeg - (-134)) < 1e-9);
   }
-  assert.ok(Math.abs(stateA.value - 100) < 0.5);
-  assert.ok(Math.abs(stateA.velocity) < 5);
-
-  // Fixed-timestep invariance: one 2*dt step matches two 1*dt steps exactly.
-  const oneDouble = stepSpring({ value: 10, velocity: 25 }, 200, { dtMs: FIXED_TIMESTEP_MS * 2 });
-  const firstHalf = stepSpring({ value: 10, velocity: 25 }, 200, { dtMs: FIXED_TIMESTEP_MS });
-  const secondHalf = stepSpring(firstHalf, 200, { dtMs: FIXED_TIMESTEP_MS });
-  assert.ok(Math.abs(oneDouble.value - secondHalf.value) < 1e-9);
-  assert.ok(Math.abs(oneDouble.velocity - secondHalf.velocity) < 1e-9);
 });
 
-test('selectBezierArc uses straight lines for short moves and curved viewport-safe arcs for long moves', () => {
-  const viewport = { width: 1280, height: 800 };
-
-  // Short move (<= 196px): straight line
-  const shortArc = selectBezierArc({ x: 100, y: 100 }, { x: 220, y: 180 }, viewport);
-  assert.equal(shortArc.isCurved, false);
-  const midShort = evaluateBezierPoint(shortArc, 0.5);
-  assert.ok(Math.abs(midShort.x - 160) < 1e-6);
-  assert.ok(Math.abs(midShort.y - 140) < 1e-6);
-
-  // Long move (> 196px) near top viewport edge: chooses a candidate arc that stays >= 20px inside viewport
-  const edgeStart = { x: 80, y: 24 };
-  const edgeEnd = { x: 700, y: 24 };
-  const longArc = selectBezierArc(edgeStart, edgeEnd, viewport);
-  assert.ok(longArc.distance > LONG_MOVE_DISTANCE_THRESHOLD_PX);
-  assert.equal(longArc.isCurved, true);
-  assert.ok(longArc.candidateIndex >= 0 && longArc.candidateIndex < BEZIER_CANDIDATE_COUNT);
-  assert.equal(isArcInsideViewport(longArc, viewport, VIEWPORT_MARGIN_PX), true);
-  const midLong = evaluateBezierPoint(longArc, 0.5);
-  // Must curve downward into the viewport, not upward past y=20px
-  assert.ok(midLong.y > edgeStart.y + 20);
-
-  // Shorter distance -> faster duration
-  assert.ok(computeMoveDurationMs(120) < computeMoveDurationMs(400));
+test('scores paths with measured length and turning weights', () => {
+  for (const candidate of generateBezierCandidates({ x: 300, y: 300 }, { x: 900, y: 500 })) {
+    const stats = scoreBezierPath(candidate);
+    assert.equal(stats.score, stats.length + 320 * stats.excess + 140 * stats.angleSquared +
+      180 * stats.maxTurn + 18 * stats.totalTurn + 90 * stats.opposition + (candidate.segments ? 45 : 0));
+    assert.ok(stats.curviness >= 0 && stats.curviness <= 1);
+  }
 });
 
-test('computeTargetRotationDeg follows path tangent on long arcs and peaks mid-move on short moves', () => {
-  const tangent = evaluateBezierTangent(
-    selectBezierArc({ x: 100, y: 200 }, { x: 600, y: 450 }, { width: 1280, height: 800 }),
-    0.5,
-  );
-  const midArcRotation = computeTargetRotationDeg({
-    isCurved: true,
-    tangentAngleDeg: tangent.angleDeg,
-    progress: 0.5,
-    restingTiltDeg: RESTING_TILT_DEG,
-  });
-  const endArcRotation = computeTargetRotationDeg({
-    isCurved: true,
-    tangentAngleDeg: tangent.angleDeg,
-    progress: 1,
-    restingTiltDeg: RESTING_TILT_DEG,
-  });
-  assert.ok(Math.abs(midArcRotation) > 5);
-  assert.ok(Math.abs(endArcRotation) < 1e-6);
-
-  // Short move peaks at progress = 0.5 and settles to 0 at endpoints
-  const shortStart = computeTargetRotationDeg({ isCurved: false, progress: 0 });
-  const shortMid = computeTargetRotationDeg({ isCurved: false, progress: 0.5 });
-  const shortEnd = computeTargetRotationDeg({ isCurved: false, progress: 1 });
-  assert.equal(shortStart, 0);
-  assert.ok(Math.abs(shortMid) > 5);
-  assert.ok(Math.abs(shortEnd) < 1e-6);
+test('selects the lowest scoring safe path or the lowest overall if no path fits', () => {
+  const start = { x: 400, y: 400 };
+  const end = { x: 1000, y: 600 };
+  for (const viewport of [{ width: 1400, height: 900 }, { width: 40, height: 40 }]) {
+    const candidates = generateBezierCandidates(start, end);
+    const safe = candidates.filter((path) => isArcInsideViewport(path, viewport, VIEWPORT_MARGIN_PX));
+    const pool = safe.length ? safe : candidates;
+    const best = Math.min(...pool.map((path) => scoreBezierPath(path).score));
+    const selected = selectBezierArc(start, end, viewport);
+    assert.equal(selected.score, best);
+    assert.equal(isArcInsideViewport(selected, viewport), safe.length > 0);
+  }
 });
 
-test('computeSpeedNarrowing and computeShortMoveStretch deform width and squash-stretch', () => {
+test('splits short and long modes at exactly 196px', () => {
+  const start = { x: 300, y: 300 };
+  assert.equal(selectBezierArc(start, { x: 300 + LONG_MOVE_DISTANCE_THRESHOLD_PX, y: 300 }).isCurved, false);
+  assert.equal(selectBezierArc(start, { x: 497, y: 300 }).isCurved, true);
+  const straight = selectBezierArc(start, { x: 400, y: 350 });
+  assert.deepEqual(evaluateBezierPoint(straight, 0.5), { x: 350, y: 325 });
+});
+
+test('computes opposition and the measured per-path response', () => {
+  const radians = -134 * Math.PI / 180;
+  const resting = { x: Math.cos(radians), y: Math.sin(radians) };
+  assert.ok(computeDirectionOpposition({ x: 0, y: 0 }, resting) < 1e-9);
+  assert.equal(computeDirectionOpposition(resting, { x: 0, y: 0 }), 1);
+  assert.equal(computePathResponse(180, 0, 0), 0.42 * 0.7);
+  assert.equal(computePathResponse(940, 1, 1), (0.42 + 0.22 + 0.12 + 0.28) * 0.7);
+  assert.equal(computePathResponse(560, 0.5, 0.25), (0.42 + 0.22 * 0.5 + 0.12 * 0.5 + 0.28 * 0.25) * 0.7);
+});
+
+test('long-path position response follows tightly with measured clamps', () => {
+  assert.equal(computeFollowResponse(0.12), 0.035);
+  assert.equal(computeFollowResponse(0.5), 0.09);
+  assert.equal(computeFollowResponse(2.2), 0.12);
+});
+
+test('tangent rotation starts immediately and takes the shortest angular route', () => {
+  assert.equal(computeTargetRotationDeg({ isCurved: true, tangentAngleDeg: 0, currentRotationDeg: 80 }), 90);
+  assert.equal(computeTargetRotationDeg({ isCurved: true, tangentAngleDeg: 100, currentRotationDeg: -175 }), -170);
+  assert.equal(computeTargetRotationDeg({ isCurved: true, tangentAngleDeg: 0, arrived: true }), RESTING_TILT_DEG);
+  assert.equal(computeTargetRotationDeg({ isCurved: false }), RESTING_TILT_DEG);
+});
+
+test('stretch narrows at speed divided by 5500 and never below 65 percent', () => {
   assert.equal(computeSpeedNarrowing(0), 1);
-  assert.ok(computeSpeedNarrowing(1200) < 1 && computeSpeedNarrowing(1200) > MIN_NARROWING_SCALE_X);
-  assert.equal(computeSpeedNarrowing(5000), MIN_NARROWING_SCALE_X);
-
-  const stretchStart = computeShortMoveStretch(0);
-  const stretchMid = computeShortMoveStretch(0.5);
-  const stretchEnd = computeShortMoveStretch(1);
-  assert.equal(stretchStart.scaleX, 1);
-  assert.equal(stretchStart.scaleY, 1);
-  assert.ok(stretchMid.scaleY > 1);
-  assert.ok(stretchMid.scaleX < 1);
-  assert.ok(Math.abs(stretchEnd.scaleY - 1) < 1e-6);
+  assert.equal(computeSpeedNarrowing(1100), 0.8);
+  assert.equal(computeSpeedNarrowing(5500), MIN_NARROWING_SCALE_X);
 });
 
-test('hasCursorArrived enforces <= 0.85px distance and near-zero velocity', () => {
-  assert.equal(
-    hasCursorArrived({ x: 100.5, y: 200.5, vx: 1, vy: 1 }, { x: 100, y: 200 }),
-    true,
-  );
-  assert.equal(
-    hasCursorArrived(
-      { x: 100 + ARRIVAL_DISTANCE_THRESHOLD_PX + 0.2, y: 200, vx: 0, vy: 0 },
-      { x: 100, y: 200 },
-    ),
-    false,
-  );
-  assert.equal(
-    hasCursorArrived({ x: 100, y: 200, vx: 40, vy: 0 }, { x: 100, y: 200 }),
-    false,
-  );
+test('short tilt and move-axis squash peak at mid-progress', () => {
+  assert.equal(computeShortMoveTilt(0, 1, 0), 0);
+  assert.equal(computeShortMoveTilt(0.5, 1, 0), 0.75 * 70);
+  assert.equal(computeShortMoveTilt(0.5, 0, 1), -0.62 * 70);
+  assert.equal(computeShortMoveSquash(0), 1);
+  assert.equal(computeShortMoveSquash(0.5), 0.85);
+  assert.equal(computeShortMoveSquash(1), 1);
 });
 
-test('computeWiggleAmplitude and computeWiggleAngleDeg ramp to 12.5deg over 1.4s with 0.66s period', () => {
-  assert.equal(computeWiggleAmplitude(0), 0);
-  const halfRamp = computeWiggleAmplitude(WIGGLE_RAMP_IN_MS / 2);
-  assert.ok(halfRamp > 0 && halfRamp < WIGGLE_MAX_AMPLITUDE_DEG);
-  assert.equal(computeWiggleAmplitude(WIGGLE_RAMP_IN_MS), WIGGLE_MAX_AMPLITUDE_DEG);
-  assert.equal(computeWiggleAmplitude(WIGGLE_RAMP_IN_MS + 1000), WIGGLE_MAX_AMPLITUDE_DEG);
-
-  // Quarter period after ramp completes hits peak +12.5 deg; three-quarter period hits -12.5 deg
-  const cycleBase = WIGGLE_RAMP_IN_MS * 10; // exact multiple of 660ms? Let's use 10 * WIGGLE_PERIOD_MS (> 1400ms)
-  const fullCycleAtRamp = WIGGLE_PERIOD_MS * 3;
-  const quarterPeak = computeWiggleAngleDeg(fullCycleAtRamp + WIGGLE_PERIOD_MS * 0.25);
-  const threeQuarterPeak = computeWiggleAngleDeg(fullCycleAtRamp + WIGGLE_PERIOD_MS * 0.75);
-  assert.ok(Math.abs(quarterPeak - WIGGLE_MAX_AMPLITUDE_DEG) < 1e-6);
-  assert.ok(Math.abs(threeQuarterPeak + WIGGLE_MAX_AMPLITUDE_DEG) < 1e-6);
+test('arrival gates progress, progress velocity, position and each position velocity', () => {
+  const target = { x: 100, y: 200 };
+  const state = { x: 100.5, y: 200.5, vx: 12, vy: -12, progress: 0.999, progressVelocity: 0.009 };
+  assert.equal(hasCursorArrived(state, target), true);
+  for (const change of [{ x: 101 }, { vx: 12.01 }, { vy: -12.01 }, { progress: 0.9989 }, { progressVelocity: 0.01 }]) {
+    assert.equal(hasCursorArrived({ ...state, ...change }, target), false);
+  }
 });
 
-test('computeVisibilityEffect combines fade, 40% scale, and 5px->0 blur', () => {
-  const hidden = computeVisibilityEffect(0);
-  assert.equal(hidden.opacity, 0);
-  assert.equal(hidden.scale, APPEAR_INITIAL_SCALE);
-  assert.equal(hidden.blurPx, APPEAR_INITIAL_BLUR_PX);
-
-  const visible = computeVisibilityEffect(1);
-  assert.equal(visible.opacity, 1);
-  assert.equal(visible.scale, 1);
-  assert.equal(visible.blurPx, 0);
+test('wiggle is a single 1.41 second sine-windowed burst', () => {
+  assert.equal(computeWiggleAngleDeg(0), 0);
+  assert.equal(computeWiggleAngleDeg(WIGGLE_DURATION_MS), 0);
+  assert.equal(computeWiggleAngleDeg(WIGGLE_DURATION_MS + 1000), 0);
+  const t = 330 / 2;
+  assert.equal(computeWiggleAngleDeg(t), WIGGLE_MAX_AMPLITUDE_DEG * Math.sin(Math.PI * t / 1410) * Math.sin(2 * Math.PI * t / WIGGLE_PERIOD_MS));
 });
 
-test('renderer bends smoothly when retargeted mid-move, resolves arrival promise, wiggles when idle, and respects reduced motion', async () => {
+test('visibility maps spring value to opacity, scale and blur together', () => {
+  assert.deepEqual(computeVisibilityEffect(0), { opacity: 0, scale: APPEAR_INITIAL_SCALE, blurPx: APPEAR_INITIAL_BLUR_PX });
+  assert.deepEqual(computeVisibilityEffect(0.5), { opacity: 0.5, scale: 0.7, blurPx: 2.5 });
+  assert.deepEqual(computeVisibilityEffect(1), { opacity: 1, scale: 1, blurPx: 0 });
+});
+
+test('renderer preserves position and velocity when retargeted and resolves arrival', async () => {
   const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
-  const inner = runtime.inner();
-  assert.ok(inner.firstElementChild.style.filter === CURSOR_GLOW_FILTER);
-
-  // Initial placement
-  await runtime.dispatch({ type: 'move', x: 100, y: 100, button: 'none' });
-  assert.equal(runtime.state().arrived, true);
-
-  // Start a long move (> 196px)
-  let arrivedResolved = false;
-  const movePromise = runtime.dispatch({ type: 'move', x: 500, y: 400, button: 'none' }).then((res) => {
-    arrivedResolved = res.arrived;
-    return res;
-  });
-  assert.equal(runtime.state().arrived, false);
-  assert.equal(runtime.state().isLongMove, true);
-
-  // Step a few frames into the move
+  await runtime.dispatch({ type: 'move', x: 400, y: 400 });
+  runtime.stepRaf();
+  let resolved = false;
+  const arrival = runtime.dispatch({ type: 'move', x: 900, y: 600 }).then(() => { resolved = true; });
   for (let i = 0; i < 12; i += 1) runtime.stepRaf();
-  const midMoveState = runtime.state();
-  assert.ok(midMoveState.x > 100 && midMoveState.x < 500);
-  assert.ok(Math.hypot(midMoveState.vx, midMoveState.vy) > 10);
-
-  // Retarget mid-move: position and velocity must not jump
-  runtime.dispatch({ type: 'move', x: 260, y: 520, button: 'none' });
-  const retargetedState = runtime.state();
-  assert.equal(retargetedState.x, midMoveState.x);
-  assert.equal(retargetedState.y, midMoveState.y);
-  assert.equal(retargetedState.vx, midMoveState.vx);
-  assert.equal(retargetedState.vy, midMoveState.vy);
-
-  // Step until arrival at the new target
-  const result = runtime.stepUntilArrived();
+  const mid = runtime.state();
+  assert.equal(mid.isLongMove, true);
+  runtime.dispatch({ type: 'move', x: 250, y: 500 });
+  const retarget = runtime.state();
+  for (const key of ['x', 'y', 'vx', 'vy']) assert.equal(retarget[key], mid[key]);
+  const result = runtime.stepUntilArrived(480);
   assert.equal(result.arrived, true);
-  await movePromise;
-  assert.equal(arrivedResolved, true);
-  assert.ok(Math.hypot(runtime.state().x - 260, runtime.state().y - 520) <= ARRIVAL_DISTANCE_THRESHOLD_PX);
+  await arrival;
+  assert.equal(resolved, true);
+  assert.equal(runtime.state().x, 250);
+  assert.equal(runtime.state().y, 500);
+  for (let i = 0; i < 200; i += 1) runtime.stepRaf(10);
+  assert.equal(runtime.state().idleWiggleMs, WIGGLE_DURATION_MS);
+  assert.ok(Math.abs(runtime.state().rotation - RESTING_TILT_DEG) < 1e-6);
+});
 
-  // Step further while idle: thinking wiggle ramps in and rocks rotation; stops on next move
-  for (let i = 0; i < 30; i += 1) runtime.stepRaf(20);
-  assert.ok(runtime.state().idleWiggleMs > 0);
-  assert.ok(Math.abs(runtime.state().rotation) > 0.1);
-  runtime.dispatch({ type: 'move', x: 300, y: 530, button: 'none' });
-  assert.equal(runtime.state().idleWiggleMs, 0);
+test('renderer first appearance and idle wake snap before spring visibility', async () => {
+  const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
+  assert.equal(runtime.inner().style.opacity, '0');
+  await runtime.dispatch({ type: 'move', x: 400, y: 300, label: 'Codex' });
+  assert.equal(runtime.state().x, 400);
+  assert.equal(runtime.state().visibility, 0);
+  runtime.stepRaf(100);
+  assert.ok(runtime.state().visibility > 0 && runtime.state().visibility < 1);
+  assert.equal(runtime.chip().style.opacity, runtime.inner().style.opacity);
+  for (let i = 0; i < 150; i += 1) runtime.stepRaf(10);
+  runtime.runNextTimer();
+  assert.equal(runtime.state().targetVisibility, 0);
+  assert.equal(runtime.state().visibility, 1);
+  for (let i = 0; i < 150; i += 1) runtime.stepRaf(10);
+  assert.equal(runtime.state().visibility, 0);
+  await runtime.dispatch({ type: 'move', x: 900, y: 500, label: 'Codex' });
+  assert.equal(runtime.state().x, 900);
+  assert.equal(runtime.state().y, 500);
+  assert.equal(runtime.state().visibility, 0);
+});
 
-  // Reduced motion jumps straight to target and skips wiggle
-  const reducedRuntime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, {
-    withRaf: true,
-    reducedMotion: true,
-  });
-  await reducedRuntime.dispatch({ type: 'move', x: 50, y: 60, button: 'none' });
-  await reducedRuntime.dispatch({ type: 'move', x: 600, y: 500, button: 'none' });
-  assert.equal(reducedRuntime.state().x, 600);
-  assert.equal(reducedRuntime.state().y, 500);
-  assert.equal(reducedRuntime.state().arrived, true);
-  reducedRuntime.stepRaf(200);
-  assert.equal(reducedRuntime.state().rotation, 0);
+test('reduced motion jumps with no tilt, stretch or wiggle', async () => {
+  const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true, reducedMotion: true });
+  await runtime.dispatch({ type: 'move', x: 50, y: 60 });
+  await runtime.dispatch({ type: 'move', x: 600, y: 500 });
+  assert.equal(runtime.state().x, 600);
+  assert.equal(runtime.state().y, 500);
+  assert.equal(runtime.state().rotation, RESTING_TILT_DEG);
+  assert.equal(runtime.state().tilt, 0);
+  assert.equal(runtime.state().squash, 1);
+  assert.equal(runtime.state().scaleX, 1);
+  assert.equal(runtime.state().visibility, 1);
+  assert.equal(computeWiggleAngleDeg(runtime.state().idleWiggleMs), 0);
+});
+
+test('renderer advances the same trajectory at 60 and 120 Hz', async () => {
+  const slow = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
+  const fast = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
+  for (const runtime of [slow, fast]) {
+    await runtime.dispatch({ type: 'move', x: 400, y: 400 });
+    runtime.stepRaf();
+    runtime.dispatch({ type: 'move', x: 900, y: 600 });
+  }
+  for (let i = 0; i < 15; i += 1) slow.stepRaf(1000 / 60);
+  for (let i = 0; i < 30; i += 1) fast.stepRaf(1000 / 120);
+  for (const key of ['x', 'y', 'vx', 'vy', 'rotation', 'progress', 'visibility']) {
+    assert.ok(Math.abs(slow.state()[key] - fast.state()[key]) < 1e-8, key);
+  }
+});
+
+test('short renderer moves stay straight with spring tilt and axis squash', async () => {
+  const runtime = createFakeRendererRuntime(GHOST_CURSOR_SOURCE, { withRaf: true });
+  await runtime.dispatch({ type: 'move', x: 300, y: 300 });
+  runtime.stepRaf();
+  runtime.dispatch({ type: 'move', x: 400, y: 350 });
+  for (let i = 0; i < 20; i += 1) runtime.stepRaf();
+  const state = runtime.state();
+  assert.equal(state.isLongMove, false);
+  assert.ok(Math.abs((state.x - 300) - 2 * (state.y - 300)) < 1e-8);
+  assert.equal(state.rotation, RESTING_TILT_DEG);
+  assert.ok(state.tilt > 0);
+  assert.ok(state.squash < 1);
+  assert.ok(runtime.inner().style.transform.startsWith('rotate(26.565'));
+});
+
+test('click sync uses the approved 1500ms named bound', () => {
+  assert.equal(CLICK_SYNC_MAX_WAIT_MS, 1500);
+  assert.match(buildGhostCursorSyncExpression({ type: 'move', x: 1, y: 2 }), /1500/);
+});
+
+test('seeded candidate sweeps are deterministic with finite scores and exact endpoints', () => {
+  let seed = 0x28c0ffee;
+  const random = () => { seed = (1664525 * seed + 1013904223) >>> 0; return seed / 2 ** 32; };
+  for (let i = 0; i < 40; i += 1) {
+    const start = { x: random() * 1280, y: random() * 800 };
+    const end = { x: random() * 1280, y: random() * 800 };
+    const first = selectBezierArc(start, end);
+    assert.deepEqual(first, selectBezierArc(start, end));
+    assert.deepEqual(evaluateBezierPoint(first, 0), start);
+    assert.deepEqual(evaluateBezierPoint(first, 1), end);
+    assert.ok(Number.isFinite(scoreBezierPath(first).score));
+  }
 });
 
 test('maps supported CDP mouse events into cursor actions', () => {
