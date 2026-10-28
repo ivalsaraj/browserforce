@@ -24,9 +24,9 @@ export function resolveAutoCloseMinutes(settings) {
 }
 
 /**
- * Agent tabs belong in the agent's own window, so this is ON unless the user
- * explicitly turned it off.
+ * Separate windows are opt-in: Chrome can open a new macOS full-screen Space
+ * even with focused:false, interrupting the user's work.
  */
 export function resolveDedicatedWindow(settings) {
-  return settings?.dedicatedWindow !== false;
+  return settings?.dedicatedWindow === true;
 }

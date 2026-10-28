@@ -931,6 +931,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | ----------------------- | ------------------------------------------------------------------------ |
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
+| **Separate window**    | Off by default; opens a dedicated window when explicitly enabled. In full screen this can create a new macOS Space. |
 | **Parallel visibility** | Retained preference; no effect on tab placement |
 | **Tab grouping**        | Agent-created tabs use per-agent named groups; user-attached tabs use `browserforce` |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |

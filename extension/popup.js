@@ -74,7 +74,7 @@ chrome.storage.local.get(SETTINGS_KEYS, (s) => {
   lockUrlCb.checked = !!s.lockUrl;
   noNewTabsCb.checked = !!s.noNewTabs;
   readOnlyCb.checked = !!s.readOnly;
-  dedicatedWindowCb.checked = s.dedicatedWindow !== false;
+  dedicatedWindowCb.checked = s.dedicatedWindow === true;
   ghostCursorCb.checked = !!s.ghostCursorEnabled;
   instructionsEl.value = s.userInstructions || '';
   setAutoModeState(s.mode || 'auto');

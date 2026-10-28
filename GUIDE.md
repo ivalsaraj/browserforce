@@ -70,7 +70,7 @@ Current behavior lock:
 
 - With separate windows off, agent-created tabs open in the background of the valid pinned or last-focused normal window; a window is created only when none exists.
 - Agent-created tabs use a named group per owner per window. User-attached tabs keep the `browserforce` group. Existing tabs never move between windows, and tabs dragged out of an agent group stay out.
-- A dedicated background window is created per agent process by default (`dedicatedWindow`, on unless turned off).
+- Separate windows are opt-in (`dedicatedWindow === true`, default off). They open with `focused: false` and Chrome's default size, but can still create a new macOS Space in full screen.
 - `parallelVisibilityMode` is retained but has no behavior effect: shared-window tabs are always background; dedicated-mode tabs stay active inside their window. Relay/MCP still report `foreground-tab`.
 
 MCP reads these preferences once per session and caches them. If you change popup settings mid-session, call `reset` so new execute calls pick up updated values.
