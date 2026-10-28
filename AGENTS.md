@@ -548,6 +548,26 @@ Exposed BrowserForce helpers and the persistent `state` object are wrapped by `g
 - **Limitation (sync CPU loop after `await`)**: `vm.runInContext(..., { timeout })` bounds only the **synchronous window up to the first `await`** (so `while (true) {}` is interrupted). A CPU-bound synchronous loop scheduled **after** an `await` (e.g. `await Promise.resolve(); while (true) {}`) runs as a microtask the vm `timeout` does not bound and can block the event loop so the outer abort timer never fires. Interrupting that requires worker/isolate execution, a deliberate Non-Goal. Do **not** "fix" it with `vm.createContext(..., { microtaskMode: 'afterEvaluate' })`: that breaks host-promise awaits (every real `await page.*()` would never resume and would time out).
 - **Location**: `mcp/src/exec-engine.js` — `runCode()`, `createRunController()`, `createRunTimers()`, `guardObject()`, `shouldGuardObject()`, `abortableDelay()`.
 
+### JS Dialogs
+
+- The shared runtime installs one dialog handler on every existing/new page;
+  `buildExecContext` also installs it for one-shot CLI exec. `dialogs.js` records
+  the last 100 dialogs (type, message, defaultValue, url, at, action/error).
+  Accept alert/beforeunload; dismiss confirm/prompt unless pre-armed.
+- `armDialog({ accept, promptText? })` targets the exec's active/pinned page and
+  overrides its next confirm/prompt only. `runCode` supplies the abort signal;
+  clear unused arms on completion/error/timeout. Never persist an armed accept
+  into another run or expose the unguarded state controller to snippets.
+- Append pending notices once, including on command errors and non-exec commands.
+  Text renderers unwrap `{ _bf_type: 'dialog_result', result, dialogs }`; preserve
+  binary/image content. CLI JSON keeps that envelope. Dialog records/notices
+  survive idle reconnects, while reset clears them.
+- With no `/cdp` client, leave `Page.javascriptDialogOpening` alone. A human may
+  be using the attached tab; the relay must neither accept nor dismiss for them.
+  Dialogs created during the idle gap are not guaranteed to replay on reconnect.
+- Playwright API baseline: 1.60.0 (lockfile); see its official dialogs guide and
+  Dialog API. Use the helper instead of competing Playwright dialog listeners.
+
 ## Accessibility Snapshot Engine
 
 - **Rule**: The snapshot tree comes from `mcp/src/aria-snapshot-engine.js` (CDP `Accessibility.getFullAXTree` + `DOM.getFlattenedDocument`, cross-referenced by `backendNodeId`). There is **no DOM-walker fallback** — an empty AX tree throws a descriptive error after one retry. `mcp/src/snapshot.js` keeps only shared constants/helpers + `createSmartDiff`/`parseSearchPattern`.

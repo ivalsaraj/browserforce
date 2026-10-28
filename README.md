@@ -1247,3 +1247,33 @@ For practical debugging and operations flows, see [Actionable Use Cases](docs/US
 > **Need advanced operator playbooks?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for controlled-tab workflows, parallel swarm patterns, and production diagnostics.
 
 </details>
+
+### JavaScript dialogs
+
+While connected, BrowserForce records JavaScript dialogs and reports them with
+the next exec/browserforce result. Alerts and beforeunload dialogs are accepted;
+confirms and prompts are dismissed by default. Accept a confirmation or supply
+prompt text by arming a response before the action in the **same exec**:
+
+```js
+armDialog({ accept: true, promptText: 'answer' });
+await page.getByRole('button', { name: 'Continue' }).click();
+return getDialogs();
+```
+
+The response applies to the next confirm/prompt on the chosen page only and
+expires when that exec finishes, fails, or times out. Use this helper instead of
+adding another Playwright dialog listener. `getDialogs()` returns the last 100
+session records (`type`, `message`, `defaultValue`, `url`, `at`, `action`, and
+`error` on failure). Records survive idle reconnects; reset clears them. Text
+output appends each notice once. CLI JSON wraps affected results as
+`{ _bf_type: 'dialog_result', result, dialogs }`; one-shot binary output puts
+notices on stderr. MCP help includes a `dialogs` section.
+
+When MCP idle-disconnects after 15 seconds, a new dialog stays open for the user.
+The relay never handles dialogs without a CDP client, and dialogs opened during
+that gap are not guaranteed to be recorded or replayed on reconnect.
+
+API reference: [Playwright dialogs](https://playwright.dev/docs/dialogs) and
+[Dialog](https://playwright.dev/docs/api/class-dialog), checked against the
+lockfile's Playwright 1.60.0.

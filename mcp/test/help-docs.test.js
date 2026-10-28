@@ -115,3 +115,13 @@ test('the subagents section never claims a separate daemon isolates tab access',
   assert.doesNotMatch(text, /cannot (see|touch|reach) (your|other)/i);
   assert.match(text, /not a sandbox|every .*client can/i, 'the non-isolation must be stated outright');
 });
+
+test('dialogs help teaches safe defaults, same-exec arming, and the disconnected limit', () => {
+  assert.ok(HELP_SECTION_NAMES.includes('dialogs'));
+  const text = getHelpSection('dialogs');
+  assert.match(text, /armDialog\(\{ accept: true/);
+  assert.match(text, /same exec/);
+  assert.match(text, /confirm.*prompt.*dismiss/i);
+  assert.match(text, /disconnected.*left open/i);
+  assert.match(text, /getDialogs/);
+});

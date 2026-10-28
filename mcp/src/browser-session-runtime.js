@@ -1,3 +1,4 @@
+import { createDialogState, installDialogState } from './dialogs.js';
 import { matchPagesToTargets } from './tab-identity.js';
 import { PROCESS_CLIENT_LABEL, ownerKeyForLabel } from './client-label.js';
 
@@ -102,6 +103,7 @@ export function createBrowserSessionRuntime(deps = {}) {
 
   // ─── Console Log Capture ───────────────────────────────────────────────────
   const consoleLogs = new Map();
+  const dialogState = createDialogState();
   const pagesWithListeners = new WeakSet();
   let contextListenerAttached = false;
 
@@ -375,6 +377,7 @@ export function createBrowserSessionRuntime(deps = {}) {
       try {
         const ctx = browser.contexts()[0];
         if (ctx && !contextListenerAttached) {
+          installDialogState(ctx, dialogState);
           ctx.on('page', (page) => setupConsoleCapture(page));
           contextListenerAttached = true;
           await waitForInitialPageDiscovery(ctx);
@@ -1215,6 +1218,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     browser = null;
     browserConnectPromise = null;
     userState = {};
+    dialogState.reset();
     cachedAgentPreferences = null;
     cachedBrowserforceRestrictions = null;
     contextListenerAttached = false;
@@ -1238,6 +1242,7 @@ export function createBrowserSessionRuntime(deps = {}) {
     get userState() { return userState; },
     get browser() { return browser; },
     get consoleLogs() { return consoleLogs; },
+    takeDialogNotices: dialogState.takeNotices,
     get activeBrowserOperations() { return activeBrowserOperations; },
     isConnected() { return !!browser?.isConnected?.(); },
     hasPendingIdleDisconnect() { return idleBrowserDisconnectTimer !== null; },
