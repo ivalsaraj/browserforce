@@ -223,7 +223,7 @@ function registerExecTool(skillAppendix = '') {
         }, pluginRuntime.helpers, agentPreferences, browserforceRestrictions, pluginRuntime.skillRuntime);
         try {
           const result = await runCode(code, execCtx, timeout);
-          const formatted = formatResult(result);
+          const formatted = formatResult(result, { multiContent: true });
           const content = Array.isArray(formatted) ? [...formatted] : [formatted];
           const iifeHint = fireAndForgetIifeHint(code, result);
           if (iifeHint) content.push({ type: 'text', text: `[HINT: ${iifeHint}]` });

@@ -175,6 +175,24 @@ Agent-created tabs are pinned to the Chrome **window** the agent created them in
 
 **Focus requests:** Top-level `Page.bringToFront` is intercepted after restriction checks and answered with `{}`. It selects the tab (`chrome.tabs.update(tabId, { active: true })`) only inside a window the extension opened as a dedicated agent window; in a window shared with the user it is a no-op, because selecting the agent's tab there replaces the tab the user is looking at (the takeover that originally motivated the dedicated window). Background tabs stay fully drivable because the debugger is attached. Never forward it to the debugger or focus a Chrome window: that can switch the user's macOS Space. Child-session commands are forwarded unchanged.
 
+### Agent Popups Stay in the Background
+
+- `tabs.onCreated` + `openerTabId` adopts popups from agent-created tabs, or
+  attached tabs with a real (non-passive) command in the last five seconds.
+  Attachment/init alone never qualifies. The short window covers delayed click
+  popups without treating a user-attached tab as permanently agent-owned.
+- Move the new popup tab into its opener's window, restore the previous selected
+  tab before attaching the debugger, and join the opener's current group. Inherit
+  the opener's owner/name (a user-attached opener has no owner); checkpoint agent
+  membership/activity for auto-close. Never move the opener or user-only popups.
+- Reuse `manualTabAttached` with `origin: 'agent-created'` to announce the real
+  popup immediately. Preserve/remap Chrome's `targetInfo.openerId` to the relay
+  target id, or Playwright sees a page but never emits `page.on('popup')`.
+- No new permissions. Chrome creates the tab/window before this event, so a brief
+  selection/window flash or macOS Space jump remains possible. Do not promise
+  zero flicker or focus windows to compensate. Missing `openerTabId` cannot be
+  attributed safely and is left alone.
+
 ### Tab Identity Survives Reconnect
 
 Handles (`t<N>`) and names are keyed by **relay target id**, not by Playwright
@@ -529,6 +547,26 @@ Exposed BrowserForce helpers and the persistent `state` object are wrapped by `g
 - **Limitation (raw top-level handles)**: Top-level `page` and `context` are intentionally left **raw** (not guarded) because they are identity-sensitive Playwright handles — a proxy breaks `context.pages().includes(page)` and private-field getters. The fence therefore covers run-scoped timers, guarded BrowserForce helpers, the guarded `state`, and guarded stored/returned handles (`state.page`, helper-returned handles). A snippet that resumes after awaiting a **raw top-level `page`/`context`** operation can still issue one further Chrome command by design; the guarantee is scoped to BrowserForce-controlled continuations, not to rolling back an already-issued CDP command. Guard `page`/`context` only if a browser-level repro requires it, and add identity/regression tests first (the Task 7 repro uses a guarded stored handle, so it does not).
 - **Limitation (sync CPU loop after `await`)**: `vm.runInContext(..., { timeout })` bounds only the **synchronous window up to the first `await`** (so `while (true) {}` is interrupted). A CPU-bound synchronous loop scheduled **after** an `await` (e.g. `await Promise.resolve(); while (true) {}`) runs as a microtask the vm `timeout` does not bound and can block the event loop so the outer abort timer never fires. Interrupting that requires worker/isolate execution, a deliberate Non-Goal. Do **not** "fix" it with `vm.createContext(..., { microtaskMode: 'afterEvaluate' })`: that breaks host-promise awaits (every real `await page.*()` would never resume and would time out).
 - **Location**: `mcp/src/exec-engine.js` — `runCode()`, `createRunController()`, `createRunTimers()`, `guardObject()`, `shouldGuardObject()`, `abortableDelay()`.
+
+### JS Dialogs
+
+- The shared runtime installs one dialog handler on every existing/new page;
+  `buildExecContext` also installs it for one-shot CLI exec. `dialogs.js` records
+  the last 100 dialogs (type, message, defaultValue, url, at, action/error).
+  Accept alert/beforeunload; dismiss confirm/prompt unless pre-armed.
+- `armDialog({ accept, promptText? })` targets the exec's active/pinned page and
+  overrides its next confirm/prompt only. `runCode` supplies the abort signal;
+  clear unused arms on completion/error/timeout. Never persist an armed accept
+  into another run or expose the unguarded state controller to snippets.
+- Append pending notices once, including on command errors and non-exec commands.
+  Text renderers unwrap `{ _bf_type: 'dialog_result', result, dialogs }`; preserve
+  binary/image content. CLI JSON keeps that envelope. Dialog records/notices
+  survive idle reconnects, while reset clears them.
+- With no `/cdp` client, leave `Page.javascriptDialogOpening` alone. A human may
+  be using the attached tab; the relay must neither accept nor dismiss for them.
+  Dialogs created during the idle gap are not guaranteed to replay on reconnect.
+- Playwright API baseline: 1.60.0 (lockfile); see its official dialogs guide and
+  Dialog API. Use the helper instead of competing Playwright dialog listeners.
 
 ## Accessibility Snapshot Engine
 

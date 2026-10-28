@@ -1,3 +1,5 @@
+import { withDialogNotices, formatDialogNotices } from './dialogs.js';
+
 // browserforce-command-registry.js — shared command surface for BrowserForce.
 //
 // One command language, three transports: the MCP `browserforce` tool, the CLI
@@ -683,7 +685,8 @@ export async function executeBrowserforceVerb({ verb, body = {}, runtime, timeou
   }
   const effectiveTimeout = resolveTimeout(timeout ?? body?.timeout);
   try {
-    return await executor({ body, runtime, timeout: effectiveTimeout, clientId });
+    const data = await executor({ body, runtime, timeout: effectiveTimeout, clientId });
+    return withDialogNotices(data, runtime.takeDialogNotices?.());
   } catch (err) {
     // Every runtime tab-state error reaches an agent with its code and its
     // suggestion. Executors that map their own errors return a
@@ -848,6 +851,9 @@ function describeTabRow(row) {
 
 /** Render a command's structured result as agent-facing text. */
 export function renderBrowserforceCommandText(verb, data) {
+  if (data?._bf_type === 'dialog_result') {
+    return `${renderBrowserforceCommandText(verb, data.result)}\n${formatDialogNotices(data.dialogs)}`;
+  }
   if (typeof data === 'string') return data;
   switch (verb) {
     case 'tabs':
@@ -883,7 +889,8 @@ export async function executeBrowserforceCommand({ command, runtime, timeout, cl
   const { verb } = parsed;
 
   if (verb === 'help') {
-    return { data: COMMAND_HELP_TEXT, warning: null, text: COMMAND_HELP_TEXT };
+    const data = withDialogNotices(COMMAND_HELP_TEXT, runtime.takeDialogNotices?.());
+    return { data, warning: null, text: renderBrowserforceCommandText(verb, data) };
   }
 
   const body = commandToBody(parsed);

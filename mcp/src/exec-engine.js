@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import vm from 'node:vm';
+import { installDialogState, withDialogNotices, formatDialogNotices } from './dialogs.js';
 import {
   createSmartDiff, parseSearchPattern,
 } from './snapshot.js';
@@ -456,6 +457,7 @@ export function buildExecContext(
   // and is never written back to state — concurrent runs against other tabs
   // keep their own targets.
   const { consoleLogs, setupConsoleCapture, pinnedPage = null } = consoleHelpers;
+  const dialogState = installDialogState(ctx);
   const lastSnapshots = userState.__lastSnapshots || (userState.__lastSnapshots = new WeakMap());
   // ref → { locator, frameChain } (engine-built; frameChain pierces OOPIF/same-origin frames)
   const lastRefToLocator = userState.__lastRefToLocator || (userState.__lastRefToLocator = new WeakMap());
@@ -880,6 +882,8 @@ export function buildExecContext(
     'waitForPageLoad',
     'getLogs',
     'clearLogs',
+    'armDialog',
+    'getDialogs',
     'getCDPSession',
     'getBrowserforceStatus',
     'getBrowserforcePageForTab',
@@ -929,6 +933,8 @@ export function buildExecContext(
     getBrowserforceStatus, getBrowserforcePageForTab,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,
+    armDialog: (options, signal) => dialogState.armDialog(activePage(), options, signal),
+    getDialogs: dialogState.getDialogs,
     console: execConsole,
     getExecConsoleLogs,
     clearExecConsoleLogs,
@@ -1131,6 +1137,12 @@ const RAW_CONTEXT_BUILTINS = new Set([
 
 export async function runCode(code, execCtx, timeoutMs) {
   const run = createRunController(timeoutMs);
+  const dialogState = execCtx.context ? installDialogState(execCtx.context) : null;
+  const reportError = (error) => {
+    const notices = dialogState?.takeNotices() || [];
+    if (notices.length) error.message += `\n${formatDialogNotices(notices)}`;
+    return error;
+  };
   const runTimers = createRunTimers(run);
   const seen = new WeakMap();
 
@@ -1164,6 +1176,12 @@ export async function runCode(code, execCtx, timeoutMs) {
     );
   }
 
+  if (typeof execCtx.armDialog === 'function') {
+    guardedExecCtx.armDialog = guardAsyncFunction(
+      (options) => execCtx.armDialog(options, run.signal), run, seen,
+    );
+  }
+
   // Run-scoped timers + cancellation handle override any same-named entries.
   guardedExecCtx.setTimeout = runTimers.setTimeout;
   guardedExecCtx.clearTimeout = runTimers.clearTimeout;
@@ -1180,7 +1198,7 @@ export async function runCode(code, execCtx, timeoutMs) {
     });
   } catch (err) {
     run.abort();
-    throw normalizeRunError(err, timeoutMs);
+    throw reportError(normalizeRunError(err, timeoutMs));
   }
 
   let result;
@@ -1200,14 +1218,29 @@ export async function runCode(code, execCtx, timeoutMs) {
         }, timeoutMs);
       }),
     ]);
+  } catch (error) {
+    throw reportError(error);
   } finally {
     if (timeoutId) globalThis.clearTimeout(timeoutId);
     if (!isComplete) run.abort();
+    dialogState?.releaseRun(run.signal);
   }
-  return result;
+  return withDialogNotices(result, dialogState?.takeNotices());
 }
 
-export function formatResult(result) {
+export function formatResult(result, { multiContent = false } = {}) {
+  if (result?._bf_type === 'dialog_result') {
+    const formatted = formatResult(result.result, { multiContent });
+    const text = formatDialogNotices(result.dialogs);
+    if (formatted.type === 'text') return { ...formatted, text: `${formatted.text}\n${text}` };
+    if (!multiContent && formatted.type === 'image') {
+      // One-shot CLI writes binary stdout; keep notices on stderr there.
+      process.stderr.write(`${text}\n`);
+      return formatted;
+    }
+    const content = Array.isArray(formatted) ? formatted : [formatted];
+    return [...content, { type: 'text', text }];
+  }
   if (result === undefined || result === null) {
     return { type: 'text', text: String(result) };
   }

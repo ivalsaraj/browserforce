@@ -82,6 +82,21 @@ browserforce "click @e2 --tab app"
 - Use screenshots only when the user requested visuals or layout evidence.
 - Before screenshots of SPAs, wait for load plus a short visual settle or a page-specific ready signal so captures are high signal and low noise.`,
   },
+  dialogs: {
+    title: 'JavaScript Dialogs',
+    summary: 'Dialog records, safe defaults, and one-shot responses before an action.',
+    text: `# JavaScript Dialogs
+
+- While connected, BrowserForce records JavaScript dialogs and appends a short notice to the next exec/browserforce result. alert and beforeunload are accepted; confirm and prompt are dismissed by default.
+- To accept the next confirm/prompt on the active page, arm it BEFORE the triggering action in the same exec:
+  armDialog({ accept: true });
+  await page.getByRole('button', { name: 'Delete' }).click();
+- For a prompt: armDialog({ accept: true, promptText: 'answer' }); then trigger it in the same exec. The response is page-scoped, consumed once, and cleared on completion, error, or timeout. It never carries into a later exec. alert/beforeunload always accept and do not consume a confirm/prompt arm.
+- Use getDialogs() for the last 100 session records: type, message, defaultValue, url, at, action, and error when handling failed. Notices are delivered once; records remain available across idle reconnects. Reset clears them.
+- Prefer armDialog over adding your own dialog listeners; two handlers can race to handle the same dialog.
+- While MCP is idle-disconnected (15 seconds), dialogs are left open for the user. The relay does not auto-handle or record them without a CDP client. Reconnect and inspect the page; do not assume a dialog created during the gap was handled or recorded.
+- CLI JSON results with notices use { _bf_type: 'dialog_result', result, dialogs }; text output appends the notice. One-shot binary output keeps notices on stderr.`,
+  },
   logs: {
     title: 'Logs And Debugging',
     summary: 'Combine page structure, console logs, and focused evaluation.',
@@ -225,6 +240,7 @@ export const HELP_SECTION_NAMES = Object.freeze([
   'navigation',
   'snapshot',
   'logs',
+  'dialogs',
   'cdp',
   'plugins',
   'errors',

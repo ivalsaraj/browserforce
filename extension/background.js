@@ -1,4 +1,5 @@
 import { buildBrowserforceTabGroupPlan, buildAgentTabGroupPlan } from './tab-group-sync-plan.js';
+import { resolveAgentPopupPlan, AGENT_POPUP_ACTIVITY_MS } from './agent-popup-policy.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
 import { hydrateAgentTabs, hydrateActivity, hydrateAgentTabNames, hydrateAgentTabGroupIds, canCloseTab } from './auto-manage-state.js';
@@ -54,6 +55,10 @@ const tabLastActivity = new Map();
 const agentCreatedTabs = new Map();
 const agentTabNames = new Map();
 const agentTabGroupIds = new Map();
+const lastRealCommandByTab = new Map();
+const pendingAgentPopups = new Set();
+const activeTabByWindow = new Map();
+const previousActiveTabByWindow = new Map();
 /** Windows this extension opened AS dedicated agent windows (windowId set) */
 const dedicatedWindowIds = new Set();
 /** Auto-detach check interval handle */
@@ -145,7 +150,17 @@ let restrictionExplained = false;
   chrome.debugger.onDetach.addListener(onDebuggerDetach);
 
   // Tab lifecycle
+  for (const tab of await chrome.tabs.query({ active: true })) activeTabByWindow.set(tab.windowId, tab.id);
+  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    if (pendingAgentPopups.has(tabId)) return;
+    const previous = activeTabByWindow.get(windowId);
+    if (previous !== tabId) previousActiveTabByWindow.set(windowId, previous);
+    activeTabByWindow.set(windowId, tabId);
+  });
+  chrome.tabs.onCreated.addListener(onTabCreated);
   chrome.windows.onRemoved.addListener((windowId) => {
+    activeTabByWindow.delete(windowId);
+    previousActiveTabByWindow.delete(windowId);
     if (dedicatedWindowIds.delete(windowId)) persistAutoManageState();
   });
   chrome.tabs.onRemoved.addListener(onTabRemoved);
@@ -346,6 +361,7 @@ async function executeCommand(msg) {
     case 'cdpCommand':
       // Passive = relay-tagged init-storm command; must not reset the idle clock.
       if (!msg.params.passive) tabLastActivity.set(msg.params.tabId, Date.now());
+      if (!msg.params.passive) lastRealCommandByTab.set(msg.params.tabId, { at: Date.now(), agentName: msg.params.agentName });
       return cdpCommand(msg.params);
     case 'getRestrictions':
       return new Promise((resolve) => {
@@ -913,7 +929,67 @@ function synthesizeTargetId(tabId) {
   return generation === 1 ? `tab-${tabId}` : `tab-${tabId}-${generation}`;
 }
 
+async function onTabCreated(tab) {
+  if (!Number.isInteger(tab.openerTabId)) return;
+  const recent = lastRealCommandByTab.get(tab.openerTabId);
+  const ageMs = recent ? Date.now() - recent.at : Infinity;
+  if (!agentCreatedTabs.has(tab.openerTabId)
+    && !(attachedTabs.has(tab.openerTabId) && ageMs >= 0 && ageMs <= AGENT_POPUP_ACTIVITY_MS)) return;
+  pendingAgentPopups.add(tab.id);
+  try {
+    const opener = await chrome.tabs.get(tab.openerTabId);
+    const activeId = activeTabByWindow.get(opener.windowId);
+    const recent = lastRealCommandByTab.get(opener.id);
+    const plan = resolveAgentPopupPlan({
+      tab, opener,
+      isAgentCreated: agentCreatedTabs.has(opener.id),
+      isAttached: attachedTabs.has(opener.id),
+      lastRealCommandAt: recent?.at,
+      ownerKey: agentCreatedTabs.get(opener.id),
+      agentName: agentTabNames.get(opener.id) || recent?.agentName,
+      selectedTabId: activeId === tab.id ? previousActiveTabByWindow.get(opener.windowId) : activeId,
+    });
+    if (!plan) return;
+    // Membership precedes awaits so nested popups inherit it and failures still auto-close.
+    agentCreatedTabs.set(tab.id, plan.ownerKey);
+    if (plan.agentName) agentTabNames.set(tab.id, plan.agentName);
+    tabLastActivity.set(tab.id, Date.now());
+    const checkpoint = persistAutoManageState();
+    try {
+      if (plan.shouldMove) await chrome.tabs.move(tab.id, { windowId: plan.windowId, index: -1 });
+      if (plan.restoreTabId !== null) {
+        const [active] = await chrome.tabs.query({ windowId: plan.windowId, active: true });
+        if (active?.id === tab.id) await chrome.tabs.update(plan.restoreTabId, { active: true });
+      }
+    } catch (error) {
+      console.warn('[bf] Popup background placement failed:', error.message);
+    }
+    await checkpoint;
+    // Keep the actual popup target (and window.opener), never close/recreate it.
+    const entry = await attachTab(tab.id, `popup-${tab.id}`, { origin: 'agent-created', ownerKey: plan.ownerKey, agentName: plan.agentName });
+    notifyRelayManualTabAttached(tab.id, entry);
+    if (plan.groupId !== null) {
+      tabGroupQueue = tabGroupQueue.then(async () => {
+        await chrome.tabs.group({ tabIds: [tab.id], groupId: plan.groupId });
+        // A user-attached opener's group remains shared with user attachments.
+        if (agentCreatedTabs.has(tab.id) && agentTabGroupIds.get(opener.id) === plan.groupId) {
+          agentTabGroupIds.set(tab.id, plan.groupId);
+        }
+        await persistAutoManageState();
+      }).catch((error) => console.warn('[bf] Popup grouping failed:', error.message));
+      await tabGroupQueue;
+    } else {
+      await queueSyncTabGroup([tab.id]);
+    }
+  } catch (error) {
+    console.warn('[bf] Popup adoption failed:', error.message);
+  } finally {
+    pendingAgentPopups.delete(tab.id);
+  }
+}
+
 function onTabRemoved(tabId) {
+  lastRealCommandByTab.delete(tabId);
   // Bookkeeping is cleared even for tabs we never attached: hydrated agent tabs
   // can close while unattached, and Chrome reuses tab ids, so a stale entry
   // would later misclassify or auto-close an unrelated tab.

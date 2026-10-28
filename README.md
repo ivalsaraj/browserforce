@@ -959,6 +959,8 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 
 `page.bringToFront()` never focuses a window. It selects the tab only inside a separate agent window; in a window shared with you it does nothing.
 
+Popups from agent-created tabs (or attached tabs driven by a real command in the last five seconds) are moved into the opener's window as background tabs, inherit its owner and current group, and enter auto-close bookkeeping. User-only popups stay unchanged. Playwright still receives `page.on('popup')` and context `page` events. No extra permissions are needed. Chrome creates popups before the extension event: brief tab/window flicker and a macOS Space jump can still occur. Popups without an `openerTabId` cannot be attributed and stay unchanged.
+
 MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new exec calls.
 
 
@@ -1245,3 +1247,33 @@ For practical debugging and operations flows, see [Actionable Use Cases](docs/US
 > **Need advanced operator playbooks?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for controlled-tab workflows, parallel swarm patterns, and production diagnostics.
 
 </details>
+
+### JavaScript dialogs
+
+While connected, BrowserForce records JavaScript dialogs and reports them with
+the next exec/browserforce result. Alerts and beforeunload dialogs are accepted;
+confirms and prompts are dismissed by default. Accept a confirmation or supply
+prompt text by arming a response before the action in the **same exec**:
+
+```js
+armDialog({ accept: true, promptText: 'answer' });
+await page.getByRole('button', { name: 'Continue' }).click();
+return getDialogs();
+```
+
+The response applies to the next confirm/prompt on the chosen page only and
+expires when that exec finishes, fails, or times out. Use this helper instead of
+adding another Playwright dialog listener. `getDialogs()` returns the last 100
+session records (`type`, `message`, `defaultValue`, `url`, `at`, `action`, and
+`error` on failure). Records survive idle reconnects; reset clears them. Text
+output appends each notice once. CLI JSON wraps affected results as
+`{ _bf_type: 'dialog_result', result, dialogs }`; one-shot binary output puts
+notices on stderr. MCP help includes a `dialogs` section.
+
+When MCP idle-disconnects after 15 seconds, a new dialog stays open for the user.
+The relay never handles dialogs without a CDP client, and dialogs opened during
+that gap are not guaranteed to be recorded or replayed on reconnect.
+
+API reference: [Playwright dialogs](https://playwright.dev/docs/dialogs) and
+[Dialog](https://playwright.dev/docs/api/class-dialog), checked against the
+lockfile's Playwright 1.60.0.
