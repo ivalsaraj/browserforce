@@ -75,7 +75,7 @@ Current behavior lock:
 - Separate windows are opt-in (`dedicatedWindow === true`, default off). They open with `focused: false` and Chrome's default size, but can still create a new macOS Space in full screen.
 - `parallelVisibilityMode` is retained but has no behavior effect: shared-window tabs are always background; dedicated-mode tabs stay active inside their window. Relay/MCP still report `foreground-tab`.
 
-`page.bringToFront()` activates a tab within its existing window without focusing that window.
+`page.bringToFront()` never focuses a window. It selects the tab only inside a separate agent window; in a window you share with agents it does nothing, so your selected tab never changes.
 
 MCP reads these preferences once per session and caches them. If you change popup settings mid-session, call `reset` so new execute calls pick up updated values.
 

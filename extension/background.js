@@ -726,8 +726,12 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName, pa
   if (blocked) throw new Error(blocked);
 
   if (method === 'Page.bringToFront' && !childSessionId) {
-    // CDP also focuses the window (and its macOS Space); tab activation does not.
-    await chrome.tabs.update(tabId, { active: true });
+    // CDP would also focus the window (and its macOS Space). Inside an agent's
+    // own window, selecting the tab is harmless; in a window shared with the
+    // user it would replace the tab they are looking at, so it is a no-op —
+    // the attached debugger keeps background tabs fully drivable anyway.
+    const tab = await chrome.tabs.get(tabId);
+    if (dedicatedWindowIds.has(tab.windowId)) await chrome.tabs.update(tabId, { active: true });
     return {};
   }
 

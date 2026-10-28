@@ -195,11 +195,14 @@ test('explicit dedicated mode keeps new tabs active in its established window', 
   assert.deepEqual(calls, [['tab', { url: 'https://example.com', active: true, windowId: 10 }]]);
 });
 
-async function runBringToFront({ childSessionId, blocked = null } = {}) {
+async function runBringToFront({ childSessionId, blocked = null, dedicatedIds = [] } = {}) {
   const { runInNewContext } = await import('node:vm');
   const calls = [];
   const chrome = {
-    tabs: { update: async (...args) => { calls.push(['activate', ...args]); } },
+    tabs: {
+      get: async (id) => ({ id, windowId: 10 }),
+      update: async (...args) => { calls.push(['activate', ...args]); },
+    },
     windows: { update: async () => { throw new Error('Must not focus a window'); } },
     debugger: { sendCommand: async (...args) => { calls.push(['cdp', ...args]); return { forwarded: true }; } },
   };
@@ -207,14 +210,18 @@ async function runBringToFront({ childSessionId, blocked = null } = {}) {
   const command = runInNewContext(`${source}; cdpCommand`, {
     chrome, checkRestriction: async () => blocked, handleGhostCursorInput: () => {}, ghostCursorController: {}, console,
     isGhostCursorEnabled: false, isGhostCursorClickSyncEnabled: false,
-    handleTabBadgeCommand: () => {}, tabBadgeController: {},
+    handleTabBadgeCommand: () => {}, tabBadgeController: {}, dedicatedWindowIds: new Set(dedicatedIds),
   });
   const result = await command({ tabId: 123, method: 'Page.bringToFront', childSessionId });
   return JSON.parse(JSON.stringify({ result, calls }));
 }
 
-test('top-level bringToFront activates only the tab and returns an empty result', async () => {
-  assert.deepEqual(await runBringToFront(), { result: {}, calls: [['activate', 123, { active: true }]] });
+test('bringToFront in an agent window selects only the tab, never focusing the window', async () => {
+  assert.deepEqual(await runBringToFront({ dedicatedIds: [10] }), { result: {}, calls: [['activate', 123, { active: true }]] });
+});
+
+test('bringToFront in a window shared with the user changes nothing', async () => {
+  assert.deepEqual(await runBringToFront(), { result: {}, calls: [] });
 });
 
 test('child-session bringToFront is forwarded without activating the tab', async () => {
