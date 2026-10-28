@@ -32,7 +32,7 @@ import {
   HELP_SECTION_NAMES,
 } from './help-docs.js';
 import { installProcessCrashGuard } from './process-crash-guard.js';
-import { agentCdpUrl } from './client-label.js';
+import { agentCdpUrl, ownerKeyForLabel } from './client-label.js';
 
 // ─── Browser Session Runtime ─────────────────────────────────────────────────
 // Browser connection, persistent userState, idle-disconnect lifecycle, console
@@ -62,9 +62,12 @@ const IDLE_BROWSER_DISCONNECT_MS = resolveNonNegativeInt(
 // preflightAttachedPageBeforeCdp() (via /extension/status) before this point is
 // reached. This connect must NOT prove readiness via the root / health check —
 // that is not proof an attached page exists.
+let sessionOwnerKey = null;
+
 async function connectBrowserOverRelay() {
   await ensureRelay();
   const cdpUrl = agentCdpUrl(await getCdpUrl());
+  sessionOwnerKey = ownerKeyForLabel(new URL(cdpUrl).searchParams.get('label'));
   const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
   return connectOverCdpWithBusyRetry({
     connect: (url) => chromium.connectOverCDP(url),
@@ -77,6 +80,7 @@ async function connectBrowserOverRelay() {
 const runtime = createBrowserSessionRuntime({
   connectBrowser: connectBrowserOverRelay,
   getRelayHttpUrl,
+  getOwnerKey: () => sessionOwnerKey,
   idleDisconnectMs: IDLE_BROWSER_DISCONNECT_MS,
   onConnected: () => process.stderr.write('[bf-mcp] Connected to relay\n'),
   // Execution deps for runtime.runCommand() (the browserforce command tool).
@@ -167,10 +171,10 @@ Skip help only for simple read-only tab discovery.
 
 TAB RULES:
 - attached/manual/current tab -> list with getBrowserforceStatus(); inspect with state.page = await getBrowserforcePageForTab().
-- all open tabs -> context.pages(); filter/cap unless full list asked.
-- inspect/read/check -> reuse existing tabs; do not create/navigate to find them.
+- all open tabs -> browserforce "tabs" shows yours vs owned by another agent; filter/cap unless full list asked.
+- inspect/read/check -> reuse user tabs or tabs marked yours. Open your own tab instead of reusing another agent's tab, when restrictions allow.
 
-Use state.page for ongoing work. Use intent:'open' only when the user asked to open/navigate.
+Use state.page for ongoing work. Use intent:'open' for explicit navigation or your own tab, when restrictions allow.
 For details call help(section).`;
 
 // Reset guidance — appended ONLY to connection/internal failures. Command
@@ -219,7 +223,7 @@ function registerExecTool(skillAppendix = '') {
         }, pluginRuntime.helpers, agentPreferences, browserforceRestrictions, pluginRuntime.skillRuntime);
         try {
           const result = await runCode(code, execCtx, timeout);
-          const formatted = formatResult(result);
+          const formatted = formatResult(result, { multiContent: true });
           const content = Array.isArray(formatted) ? [...formatted] : [formatted];
           const iifeHint = fireAndForgetIifeHint(code, result);
           if (iifeHint) content.push({ type: 'text', text: `[HINT: ${iifeHint}]` });

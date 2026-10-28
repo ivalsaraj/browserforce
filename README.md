@@ -12,7 +12,12 @@ Give AI agents controlled access to the browser you already use.
 
 Works with [OpenClaw](https://github.com/openclaw/openclaw), Claude, or any MCP-compatible agent.
 
-When you ask an agent to inspect an existing page, BrowserForce exposes open Chrome tabs through `context.pages()` first. It should only open a new tab when you explicitly ask it to open/navigate somewhere new, or when no suitable page exists and policy allows new tabs.
+When you ask an agent to inspect an existing page, BrowserForce lists open Chrome tabs with `browserforce tabs`, including agent ownership. Agents reuse user tabs or tabs marked `yours`; they open their own tab instead of reusing a tab owned by another agent, when policy allows new tabs.
+
+Emulation overrides such as a mobile viewport are cleared when their last owning
+agent disconnects. MCP remembers viewport sizes across its idle reconnects and
+restores them only on exactly identified tabs; during the idle gap and after the
+agent exits, Chrome returns to its normal desktop viewport.
 
 ## Why BrowserForce?
 
@@ -408,7 +413,7 @@ natural observe → act → observe loop:
 
 ```bash
 browserforce open https://example.com --as docs   # open a new tab (optionally named)
-browserforce tabs                             # list tabs: stable t<N> handles + names + active marker
+browserforce tabs                             # list tabs: stable t<N> handles + names + active marker + ownership
 browserforce use t2                           # switch the active tab (handle, name, or title/url text)
 browserforce snapshot                         # accessibility tree + @eN refs (shared session)
 browserforce click @e3                        # act on a ref from the snapshot
@@ -435,7 +440,9 @@ re-snapshot before the next ref interaction. Every command routes through the
 same guarded `runCode()` boundary as the MCP `exec` tool; add `--json` for a
 `{ success, data, error, warning }` envelope (`tabs --json` prints
 `{ tabs, total, omitted }`; each row is a superset of the old
-`index`/`title`/`url` shape). `tabs` lists the first 20 tabs — narrow with
+`index`/`title`/`url` shape). Agent-created tabs include ownership metadata and
+display `yours` or `owned by <name/short label>`; user rows stay unchanged.
+`tabs` lists the first 20 tabs — narrow with
 `--match <text>`, widen with `--limit <n>`, or list everything with `--all`.
 
 One-shot `-e` stays independent (state does not persist between `-e` calls) for
@@ -931,8 +938,10 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | ----------------------- | ------------------------------------------------------------------------ |
 | **Auto / Manual mode**  | Let the agent create tabs freely, or hand-pick which tabs it can access  |
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
-| **Parallel visibility** | `foreground-tab` keeps new tabs visible inside the agent's dedicated window |
-| **Tab grouping**        | Attached tabs stay grouped as `browserforce` inside their own Chrome window |
+| **Separate window**    | Off by default; opens a dedicated window when explicitly enabled. In full screen this can create a new macOS Space. |
+| **Parallel visibility** | Retained preference; no effect on tab placement |
+| **Ghost cursor**        | 24px inline SVG pointer with a tip hotspot, blue glow, and 240Hz spring motion, scored Bézier arcs, one arrival wiggle burst, matching favicon arrow, agent-name chip (`ghostCursorEnabled`, off by default), and optional click sync (`ghostCursorClickSync`, off by default, waits up to 1500ms for cursor arrival before `mousePressed`) |
+| **Tab grouping**        | Agent-created tabs use per-agent named groups; user-attached tabs use `browserforce` |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
@@ -940,13 +949,17 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Auto-close**          | Automatically close agent-created tabs after 5-60 minutes — **on by default (10 min)** |
 | **Custom instructions** | Pass text instructions to the agent (e.g. "don't click any buy buttons") |
 
-`parallelVisibilityMode` is currently enforced as `foreground-tab` (tabs visible within the agent's window). If `rotate-visible` is selected, BrowserForce normalizes to `foreground-tab` in this release.
+`parallelVisibilityMode` is retained for compatibility and currently has no effect. Both values create background tabs in shared windows and active tabs inside a dedicated window. Relay and MCP continue to normalize the reported value to `foreground-tab`.
 
 ### Execution Strategy Preferences
 
-- **Visible parallel (`foreground-tab`)**: New agent tabs open visibly in the agent's own dedicated window and stay there, leaving your working window untouched.
+- **Parallel mode**: With the separate-window setting off, new agent tabs open in the background of the pinned or last-focused normal Chrome window. A new window is created only if no normal window exists. Each agent has a named tab group per window; dragging a tab out leaves it out. Existing tabs are never moved between windows.
 - **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
-- **Rotate-visible demo mode (`rotate-visible`)**: Temporarily normalized to `foreground-tab` while the visibility lock is enforced.
+- **Visibility preference (`foreground-tab` / `rotate-visible`)**: Neither value overrides background placement or rotates tabs.
+
+`page.bringToFront()` never focuses a window. It selects the tab only inside a separate agent window; in a window shared with you it does nothing.
+
+Popups from tabs the agent drove with a real command in the last five seconds are moved into the opener's window as background tabs, inherit its owner and current group, and enter auto-close bookkeeping. Tabs you open yourself (Cmd-T, or links on an agent tab it is not driving) stay where Chrome put them. User-only popups stay unchanged. Playwright still receives `page.on('popup')` and context `page` events. No extra permissions are needed. Chrome creates popups before the extension event: brief tab/window flicker and a macOS Space jump can still occur. Popups without an `openerTabId` cannot be attributed and stay unchanged.
 
 MCP reads `executionMode` and `parallelVisibilityMode` once per MCP session and caches them. If you change popup settings mid-session, call `reset` to refresh settings for new exec calls.
 
@@ -1084,7 +1097,7 @@ In `multi-client` mode (default), slot arbitration is disabled. In `single-activ
 - **CORS:** wildcard `Access-Control-Allow-Origin` is an **allowlist** — only `/` (counts-only health) sends it. Every other route is denied cross-origin by default: `/json`, `/json/list` and `/json/version` embed the CDP auth token in `webSocketDebuggerUrl`, `/restrictions` and `/agent-preferences` return the user's settings including free-text instructions, and `/extension/status` and `/attached-tabs` expose tab URLs and titles. Extension pages are unaffected — they carry host permissions and bypass CORS.
 - **`/extension/status` vs `/json/list`:** `/json/list` returns CDP-discovery-shaped targets for Playwright; `/extension/status` returns relay-owned provenance — `manualAttachedTabs` are user-attached tabs (`origin: 'manual'`), while `attachedTabs` can also include `agent-created` and `relay-attached` tabs. Use `activeManualTargets`/`manualAttachedTabs` to confirm an attached page is ready for inspect/current-tab flows.
 
-Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window).
+Tip: add `&label=<name>` to the CDP URL to tag client connections in the logs viewer (MCP defaults to `browserforce-mcp-<8 hex>`, unique per process; set `BROWSERFORCE_CDP_CLIENT_LABEL` to make two agents share one window). The CLI uses `browserforce-cli-<name>` when `BROWSERFORCE_AGENT_NAME` is set, so separate CLI calls by one named agent own the same tabs; unnamed one-shot calls send no label.
 
 
 </details>
@@ -1234,3 +1247,51 @@ For practical debugging and operations flows, see [Actionable Use Cases](docs/US
 > **Need advanced operator playbooks?** Read the [User Guide](https://github.com/ivalsaraj/browserforce/blob/main/GUIDE.md) for controlled-tab workflows, parallel swarm patterns, and production diagnostics.
 
 </details>
+
+### JavaScript dialogs
+
+BrowserForce handles and records dialogs only during an active run on pages it
+drives: its active/`--tab` page, pages it creates, explicitly arms, or issues
+Playwright commands on. Unrelated user/agent pages are left alone. Handled dialogs
+are reported with the next exec/browserforce result. Alerts and beforeunload
+dialogs are accepted; confirms and prompts are dismissed by default. Accept a
+confirmation or supply prompt text by arming a response before the action in the
+**same exec**:
+
+```js
+armDialog({ accept: true, promptText: 'answer' });
+await page.getByRole('button', { name: 'Continue' }).click();
+return getDialogs();
+```
+
+To target another Page, use `armDialog({ accept: true, page: p })`, for example
+a Page returned by `const p = await context.newPage()`. Omit `page` to target the
+active/`--tab` page. The response applies to its next confirm/prompt only and
+expires when that exec finishes, fails, or times out. Use this helper instead of
+adding another Playwright dialog listener. `getDialogs()` returns the last 100
+session records (`type`, `message`, `defaultValue`, `url`, `at`, `action`, and
+`error` on failure). Records survive idle reconnects; reset clears them. Text
+output appends each notice once. CLI JSON wraps affected results as
+`{ _bf_type: 'dialog_result', result, dialogs }`; one-shot binary output puts
+notices on stderr. MCP help includes a `dialogs` section.
+
+Between runs, dialogs on previously driven pages stay pending (up to 100 pages).
+The next run driving that page handles its pending dialog with defaults before
+executing its action and emits the normal notice. An unrelated run leaves it
+alone. Pending Dialog objects are discarded on page close, disconnect, or reset;
+they are never rebound by URL to replacement Pages.
+
+One relay broadcasts dialog events to every client. Our listener prevents
+Playwright from auto-dismissing foreign dialogs. Older/foreign Playwright clients
+without this handler can still dismiss them, and concurrent runs intentionally
+driving the same page can still race.
+
+When MCP idle-disconnects after 15 seconds, a new dialog stays open for the user.
+The relay never handles dialogs without a CDP client, and dialogs opened during
+that gap are not guaranteed to be recorded or replayed on reconnect.
+
+API reference: [Playwright dialogs](https://playwright.dev/docs/dialogs) and
+[Dialog](https://playwright.dev/docs/api/class-dialog), checked against the
+lockfile's Playwright 1.60.0.
+
+Queued dialogs already resolved by another client are silently discarded when Chrome reports `No dialog is showing`; other handling failures remain visible. The driven-tab favicon has a page-side 15-second expiry renewed by agent activity, so it can restore after unexpected debugger loss. Suspended pages may delay that timer.

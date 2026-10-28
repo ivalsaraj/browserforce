@@ -108,8 +108,8 @@ for the current document and registers it for future navigations, coalesces pend
 movement updates, and awaits disable cleanup before detaching a debugger. Child-frame
 mouse sessions and failed input commands are ignored. The implementation lives in
 `extension/ghost-cursor.js` and is wired from `extension/background.js`.
-The cursor artwork is packaged at `extension/assets/ghost-cursor.png` and exposed
-to page renderers through the extension's web-accessible resources.
+The cursor artwork is an inline SVG inside the renderer, so pages never load an
+extension resource (Chrome refuses those to `about:blank` and opaque-origin documents).
 
 After changing extension code, reload the unpacked extension from
 `chrome://extensions` to restart the service worker and apply the change.

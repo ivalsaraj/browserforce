@@ -1,8 +1,10 @@
-import { buildBrowserforceTabGroupPlan } from './tab-group-sync-plan.js';
+import { buildBrowserforceTabGroupPlan, buildAgentTabGroupPlan } from './tab-group-sync-plan.js';
+import { resolveAgentPopupPlan, isAgentPopupCandidate } from './agent-popup-policy.js';
 import { resolveCreateWindowPlan } from './window-affinity.js';
 import { resolveAutoCloseMinutes, resolveDedicatedWindow } from './agent-defaults.js';
-import { hydrateAgentTabs, hydrateActivity, canCloseTab } from './auto-manage-state.js';
-import { createGhostCursorController, handleGhostCursorInput } from './ghost-cursor.js';
+import { hydrateAgentTabs, hydrateActivity, hydrateAgentTabNames, hydrateAgentTabGroupIds, canCloseTab } from './auto-manage-state.js';
+import { createGhostCursorController, handleGhostCursorInput, syncGhostCursorBeforeClick } from './ghost-cursor.js';
+import { createTabBadgeController, handleTabBadgeCommand } from './tab-badge.js';
 import { shouldReportTabUpdate, shouldReportTabRemoval } from './tab-update-policy.js';
 import { resolveOrphanedPause, isNonEmptyString } from './orphan-pause-policy.js';
 
@@ -20,7 +22,6 @@ const BADGE_COLORS = {
   connecting: '#B1ADA1',
   disconnected: '#B1ADA1',
 };
-const GHOST_CURSOR_IMAGE_URL = chrome.runtime.getURL('assets/ghost-cursor.png');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -51,18 +52,31 @@ let isSyncingTabGroup = false;
 const tabLastActivity = new Map();
 /** Tracks tabs created by the agent via createTab() (tabId → owning agent key) */
 const agentCreatedTabs = new Map();
+const agentTabNames = new Map();
+const agentTabGroupIds = new Map();
+const lastRealCommandByTab = new Map();
+const pendingAgentPopups = new Set();
+const activeTabByWindow = new Map();
+const previousActiveTabByWindow = new Map();
 /** Windows this extension opened AS dedicated agent windows (windowId set) */
 const dedicatedWindowIds = new Set();
 /** Auto-detach check interval handle */
 let autoManageInterval = null;
 let isGhostCursorEnabled = false;
+let isGhostCursorClickSyncEnabled = false;
 
 const ghostCursorController = createGhostCursorController({
   isEnabled: () => isGhostCursorEnabled,
   isTabAttached: (tabId) => attachedTabs.has(tabId),
   sendCommand: (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
-  cursorImageUrl: GHOST_CURSOR_IMAGE_URL,
   log: (error) => console.warn('[bf] Ghost cursor error:', error?.message || error),
+});
+
+const tabBadgeController = createTabBadgeController({
+  isTabAttached: (tabId) => attachedTabs.has(tabId),
+  getTabUrl: (tabId) => attachedTabs.get(tabId)?.targetInfo?.url || '',
+  sendCommand: (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
+  log: (error) => console.warn('[bf] Tab badge error:', error?.message || error),
 });
 
 /** storage.session key for auto-manage state (survives SW restarts, dies with the browser) */
@@ -76,6 +90,8 @@ async function persistAutoManageState() {
         // shape must stay rollback-readable. Owners ride alongside it.
         agentCreatedTabs: [...agentCreatedTabs.keys()],
         agentTabOwners: [...agentCreatedTabs],
+        agentTabNames: [...agentTabNames],
+        agentTabGroupIds: [...agentTabGroupIds],
         tabLastActivity: [...tabLastActivity],
         dedicatedWindowIds: [...dedicatedWindowIds],
       },
@@ -95,6 +111,8 @@ async function hydrateAutoManageState() {
     for (const [tabId, ownerKey] of hydrateAgentTabs(saved, openTabIds)) {
       agentCreatedTabs.set(tabId, ownerKey);
     }
+    for (const [tabId, name] of hydrateAgentTabNames(saved, agentCreatedTabs)) agentTabNames.set(tabId, name);
+    for (const [tabId, groupId] of hydrateAgentTabGroupIds(saved, agentCreatedTabs)) agentTabGroupIds.set(tabId, groupId);
     for (const [tabId, lastActivity] of hydrateActivity(saved, openTabIds)) {
       tabLastActivity.set(tabId, lastActivity);
     }
@@ -120,16 +138,27 @@ let restrictionExplained = false;
   // anything can attach tabs or serve listTabs.
   await hydrateAutoManageState();
 
-  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled']);
+  const stored = await chrome.storage.local.get(['relayUrl', 'ghostCursorEnabled', 'ghostCursorClickSync']);
   currentRelayUrl = stored.relayUrl || RELAY_URL_DEFAULT;
   isGhostCursorEnabled = !!stored.ghostCursorEnabled;
+  isGhostCursorClickSyncEnabled = !!stored.ghostCursorClickSync;
 
   // Register debugger listeners once (persists across reconnections)
   chrome.debugger.onEvent.addListener(onDebuggerEvent);
   chrome.debugger.onDetach.addListener(onDebuggerDetach);
 
   // Tab lifecycle
+  for (const tab of await chrome.tabs.query({ active: true })) activeTabByWindow.set(tab.windowId, tab.id);
+  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    if (pendingAgentPopups.has(tabId)) return;
+    const previous = activeTabByWindow.get(windowId);
+    if (previous !== tabId) previousActiveTabByWindow.set(windowId, previous);
+    activeTabByWindow.set(windowId, tabId);
+  });
+  chrome.tabs.onCreated.addListener(onTabCreated);
   chrome.windows.onRemoved.addListener((windowId) => {
+    activeTabByWindow.delete(windowId);
+    previousActiveTabByWindow.delete(windowId);
     if (dedicatedWindowIds.delete(windowId)) persistAutoManageState();
   });
   chrome.tabs.onRemoved.addListener(onTabRemoved);
@@ -330,6 +359,7 @@ async function executeCommand(msg) {
     case 'cdpCommand':
       // Passive = relay-tagged init-storm command; must not reset the idle clock.
       if (!msg.params.passive) tabLastActivity.set(msg.params.tabId, Date.now());
+      if (!msg.params.passive) lastRealCommandByTab.set(msg.params.tabId, { at: Date.now(), agentName: msg.params.agentName });
       return cdpCommand(msg.params);
     case 'getRestrictions':
       return new Promise((resolve) => {
@@ -364,14 +394,11 @@ async function getAgentExecutionSettings() {
 }
 
 async function getCurrentWindowId() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs[0] && typeof tabs[0].windowId === 'number') {
-    return tabs[0].windowId;
-  }
-
-  const win = await chrome.windows.getLastFocused();
-  if (win && typeof win.id === 'number') {
-    return win.id;
+  try {
+    const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+    if (Number.isInteger(win?.id) && win.type === 'normal') return win.id;
+  } catch {
+    // Chrome rejects when no normal browser window exists; create one then.
   }
 
   return undefined;
@@ -387,7 +414,7 @@ async function resolveCreateTabWindowPlan(params, dedicatedWindowEnabled) {
   if (Number.isInteger(requestedWindowId)) {
     try {
       const win = await chrome.windows.get(requestedWindowId);
-      isRequestedWindowValid = !!win && typeof win.id === 'number';
+      isRequestedWindowValid = Number.isInteger(win?.id) && win.type === 'normal';
     } catch {
       // The pinned window may have been closed; fall back per the plan.
       isRequestedWindowValid = false;
@@ -439,6 +466,7 @@ async function attachTab(tabId, sessionId, options = {}) {
     const ownerKey = typeof options.ownerKey === 'string' ? options.ownerKey : null;
     if (!agentCreatedTabs.has(tabId)) agentCreatedTabs.set(tabId, ownerKey);
     else if (ownerKey && !agentCreatedTabs.get(tabId)) agentCreatedTabs.set(tabId, ownerKey);
+    if (typeof options.agentName === 'string' && options.agentName) agentTabNames.set(tabId, options.agentName);
     // Seed the activity clock here too: this checkpoint is the only write before
     // the debugger attach, and membership persisted without an activity entry
     // means checkInactiveTabs() (which iterates tabLastActivity) never sees the
@@ -457,7 +485,7 @@ async function attachTab(tabId, sessionId, options = {}) {
     // re-attach must not exempt an agent tab from auto-close).
     const isDemotion = existing.origin === 'agent-created' && origin === 'relay-attached';
     if (ALLOWED_TAB_ORIGINS.has(options.origin) && !isDemotion) existing.origin = origin;
-    // Ensure attached tabs are always reconciled into the browserforce group.
+    // Reconcile user attachments without regrouping existing agent tabs.
     setTimeout(() => queueSyncTabGroup(), TAB_GROUP_SYNC_AFTER_ATTACH_MS);
     return existing;
   }
@@ -524,6 +552,7 @@ async function detachTab(tabId) {
   if (!attachedTabs.has(tabId)) return {};
 
   await ghostCursorController.disable(tabId);
+  await tabBadgeController.disable(tabId);
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -555,12 +584,12 @@ async function createTab(params) {
     throw new Error(`BLOCKED: ${msg}`);
   }
 
-  const agentSettings = await getAgentExecutionSettings();
-  const plan = await resolveCreateTabWindowPlan(params, resolveDedicatedWindow(settings));
+  const dedicatedWindowEnabled = resolveDedicatedWindow(settings);
+  const plan = await resolveCreateTabWindowPlan(params, dedicatedWindowEnabled);
 
   let tab;
   if (plan.action === 'new-window') {
-    // Dedicated agent window: open in the background so the user keeps focus.
+    // Chrome's default size is intentional; bounds do not prevent macOS Space jumps.
     const win = await chrome.windows.create({
       url: params.url || 'about:blank',
       focused: false,
@@ -568,23 +597,18 @@ async function createTab(params) {
     });
     tab = win?.tabs?.[0];
     if (!tab) throw new Error('Failed to create dedicated agent window');
-    if (Number.isInteger(win?.id)) {
+    if (dedicatedWindowEnabled && Number.isInteger(win?.id)) {
       dedicatedWindowIds.add(win.id);
       persistAutoManageState();
     }
   } else {
     const createOptions = {
       url: params.url || 'about:blank',
-      // Keep agent-created tabs visible; do not spawn separate windows.
-      active: true,
+      // Background tabs avoid changing the user's selected tab in shared windows.
+      active: dedicatedWindowEnabled,
     };
     if (typeof plan.windowId === 'number') {
       createOptions.windowId = plan.windowId;
-    }
-
-    // rotate-visible remains normalized to visible tab creation in current window.
-    if (agentSettings.parallelVisibilityMode === 'rotate-visible') {
-      createOptions.active = true;
     }
 
     tab = await chrome.tabs.create(createOptions);
@@ -597,9 +621,13 @@ async function createTab(params) {
   try {
     // attachTab already registered membership with the owner and persisted it;
     // re-setting here would resurrect a tab onTabRemoved cleared mid-await.
-    return await attachTab(tab.id, params.sessionId, { origin: 'agent-created', ownerKey });
+    const entry = await attachTab(tab.id, params.sessionId, { origin: 'agent-created', ownerKey, agentName: params.agentName });
+    await queueSyncTabGroup([tab.id]);
+    return entry;
   } catch (e) {
     agentCreatedTabs.delete(tab.id);
+    agentTabNames.delete(tab.id);
+    agentTabGroupIds.delete(tab.id);
     tabLastActivity.delete(tab.id);
     await persistAutoManageState();
     throw e;
@@ -614,7 +642,10 @@ async function closeTab(params) {
     throw new Error(`Tab ${tabId} is owned by another agent`);
   }
 
-  if (attachedTabs.has(tabId)) await ghostCursorController.disable(tabId);
+  if (attachedTabs.has(tabId)) {
+    await ghostCursorController.disable(tabId);
+    await tabBadgeController.disable(tabId);
+  }
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -703,10 +734,20 @@ function buildRestrictionError(action, reason, settings, { lockedUrl } = {}) {
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
 
-async function cdpCommand({ tabId, method, params, childSessionId, agentName }) {
+async function cdpCommand({ tabId, method, params, childSessionId, agentName, passive }) {
   // Check restrictions before forwarding
   const blocked = await checkRestriction(method, params, tabId);
   if (blocked) throw new Error(blocked);
+
+  if (method === 'Page.bringToFront' && !childSessionId) {
+    // CDP would also focus the window (and its macOS Space). Inside an agent's
+    // own window, selecting the tab is harmless; in a window shared with the
+    // user it would replace the tab they are looking at, so it is a no-op —
+    // the attached debugger keeps background tabs fully drivable anyway.
+    const tab = await chrome.tabs.get(tabId);
+    if (dedicatedWindowIds.has(tab.windowId)) await chrome.tabs.update(tabId, { active: true });
+    return {};
+  }
 
   // Special handling: Runtime.enable needs the disable-then-enable trick
   // to force Chrome to re-emit executionContextCreated events
@@ -723,6 +764,23 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
     ? { tabId, sessionId: childSessionId }
     : { tabId };
 
+  if (isGhostCursorEnabled && isGhostCursorClickSyncEnabled) {
+    try {
+      await syncGhostCursorBeforeClick({
+        method,
+        childSessionId,
+        tabId,
+        params,
+        agentName,
+        controller: ghostCursorController,
+        isClickSyncEnabled: isGhostCursorEnabled && isGhostCursorClickSyncEnabled,
+        log: (error) => console.warn('[bf] Ghost cursor click-sync error:', error?.message || error),
+      });
+    } catch (error) {
+      console.warn('[bf] Ghost cursor click-sync adapter error:', error?.message || error);
+    }
+  }
+
   const result = await chrome.debugger.sendCommand(debuggee, method, params || {});
   try {
     handleGhostCursorInput({
@@ -736,6 +794,19 @@ async function cdpCommand({ tabId, method, params, childSessionId, agentName }) 
     });
   } catch (error) {
     console.warn('[bf] Ghost cursor input adapter error:', error?.message || error);
+  }
+  try {
+    handleTabBadgeCommand({
+      method,
+      childSessionId,
+      passive,
+      tabId,
+      controller: tabBadgeController,
+      isTabAttached: (id) => attachedTabs.has(id),
+      log: (error) => console.warn('[bf] Tab badge command error:', error?.message || error),
+    });
+  } catch (error) {
+    console.warn('[bf] Tab badge adapter error:', error?.message || error);
   }
   return result || {};
 }
@@ -751,6 +822,9 @@ function onDebuggerEvent(source, method, params) {
   }
   if (method === 'Target.detachedFromTarget' && isNonEmptyString(params?.sessionId)) {
     childSessions.delete(params.sessionId);
+  }
+  if (method === 'Page.frameNavigated' && !source.sessionId && !params?.frame?.parentId) {
+    tabBadgeController.markNavigated(source.tabId, { pageUrl: params?.frame?.url || '' });
   }
 
   const entry = attachedTabs.get(source.tabId);
@@ -813,8 +887,11 @@ function onDebuggerDetach(source, reason) {
         params: { tabId, reason },
       });
       void ghostCursorController.cleanup(tabId);
+      void tabBadgeController.cleanup(tabId);
       tabLastActivity.delete(tabId);
       agentCreatedTabs.delete(tabId);
+      agentTabNames.delete(tabId);
+      agentTabGroupIds.delete(tabId);
     }
     attachedTabs.clear();
     childSessions.clear();
@@ -850,11 +927,72 @@ function synthesizeTargetId(tabId) {
   return generation === 1 ? `tab-${tabId}` : `tab-${tabId}-${generation}`;
 }
 
+async function onTabCreated(tab) {
+  if (!isAgentPopupCandidate({
+    tab,
+    isAttached: attachedTabs.has(tab.openerTabId),
+    lastRealCommandAt: lastRealCommandByTab.get(tab.openerTabId)?.at,
+  })) return;
+  pendingAgentPopups.add(tab.id);
+  try {
+    const opener = await chrome.tabs.get(tab.openerTabId);
+    const activeId = activeTabByWindow.get(opener.windowId);
+    const recent = lastRealCommandByTab.get(opener.id);
+    const plan = resolveAgentPopupPlan({
+      tab, opener,
+      isAttached: attachedTabs.has(opener.id),
+      lastRealCommandAt: recent?.at,
+      ownerKey: agentCreatedTabs.get(opener.id),
+      agentName: agentTabNames.get(opener.id) || recent?.agentName,
+      selectedTabId: activeId === tab.id ? previousActiveTabByWindow.get(opener.windowId) : activeId,
+    });
+    if (!plan) return;
+    // Membership precedes awaits so nested popups inherit it and failures still auto-close.
+    agentCreatedTabs.set(tab.id, plan.ownerKey);
+    if (plan.agentName) agentTabNames.set(tab.id, plan.agentName);
+    tabLastActivity.set(tab.id, Date.now());
+    const checkpoint = persistAutoManageState();
+    try {
+      if (plan.shouldMove) await chrome.tabs.move(tab.id, { windowId: plan.windowId, index: -1 });
+      if (plan.restoreTabId !== null) {
+        const [active] = await chrome.tabs.query({ windowId: plan.windowId, active: true });
+        if (active?.id === tab.id) await chrome.tabs.update(plan.restoreTabId, { active: true });
+      }
+    } catch (error) {
+      console.warn('[bf] Popup background placement failed:', error.message);
+    }
+    await checkpoint;
+    // Keep the actual popup target (and window.opener), never close/recreate it.
+    const entry = await attachTab(tab.id, `popup-${tab.id}`, { origin: 'agent-created', ownerKey: plan.ownerKey, agentName: plan.agentName });
+    notifyRelayManualTabAttached(tab.id, entry);
+    if (plan.groupId !== null) {
+      tabGroupQueue = tabGroupQueue.then(async () => {
+        await chrome.tabs.group({ tabIds: [tab.id], groupId: plan.groupId });
+        // A user-attached opener's group remains shared with user attachments.
+        if (agentCreatedTabs.has(tab.id) && agentTabGroupIds.get(opener.id) === plan.groupId) {
+          agentTabGroupIds.set(tab.id, plan.groupId);
+        }
+        await persistAutoManageState();
+      }).catch((error) => console.warn('[bf] Popup grouping failed:', error.message));
+      await tabGroupQueue;
+    } else {
+      await queueSyncTabGroup([tab.id]);
+    }
+  } catch (error) {
+    console.warn('[bf] Popup adoption failed:', error.message);
+  } finally {
+    pendingAgentPopups.delete(tab.id);
+  }
+}
+
 function onTabRemoved(tabId) {
+  lastRealCommandByTab.delete(tabId);
   // Bookkeeping is cleared even for tabs we never attached: hydrated agent tabs
   // can close while unattached, and Chrome reuses tab ids, so a stale entry
   // would later misclassify or auto-close an unrelated tab.
   const hadAgentEntry = agentCreatedTabs.delete(tabId);
+  agentTabNames.delete(tabId);
+  agentTabGroupIds.delete(tabId);
   const hadActivity = tabLastActivity.delete(tabId);
   if (hadAgentEntry || hadActivity) persistAutoManageState();
 
@@ -880,14 +1018,17 @@ function onTabUpdated(tabId, changeInfo) {
   const isAttached = attachedTabs.has(tabId);
   if (!shouldReportTabUpdate({ isAttached, changeInfo })) return;
 
-  // Reconcile group membership/title if user or Chrome moved this attached tab.
+  // Reconcile user attachments; agent tabs are grouped only by the create path.
   if (isAttached && changeInfo.groupId !== undefined && !isSyncingTabGroup) {
     queueSyncTabGroup();
   }
 
   if (isAttached) {
     const entry = attachedTabs.get(tabId);
-    if (changeInfo.url !== undefined) entry.targetInfo.url = changeInfo.url;
+    if (changeInfo.url !== undefined) {
+      entry.targetInfo.url = changeInfo.url;
+      tabBadgeController.markNavigated(tabId, { pageUrl: changeInfo.url });
+    }
     if (changeInfo.title !== undefined) entry.targetInfo.title = changeInfo.title;
   }
 
@@ -923,6 +1064,8 @@ function cleanupTab(tabId) {
   forgetChildSessions(tabId);
   tabLastActivity.delete(tabId);
   agentCreatedTabs.delete(tabId);
+  agentTabNames.delete(tabId);
+  agentTabGroupIds.delete(tabId);
   persistAutoManageState();
 }
 
@@ -1001,6 +1144,10 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     ));
     await Promise.allSettled(operations);
   }
+
+  if (changes.ghostCursorClickSync) {
+    isGhostCursorClickSyncEnabled = !!changes.ghostCursorClickSync.newValue;
+  }
 });
 
 // Start timer on load if settings are configured
@@ -1011,20 +1158,22 @@ chrome.storage.local.get(['autoDetachMinutes', 'autoCloseMinutes'], (settings) =
 });
 
 /**
- * Syncs the 'browserforce' Chrome tab group to reflect currently attached tabs.
- * Modeled after playwriter's syncTabGroup — always queries by title, never caches group ID.
+ * Reconciles user attachments separately from the once-only grouping of new agent tabs.
  */
-async function syncTabGroup() {
+async function syncTabGroup(newAgentTabIds = []) {
   isSyncingTabGroup = true;
   try {
     const connectedTabIds = Array.from(attachedTabs.keys());
-    const existingGroups = await chrome.tabGroups.query({ title: 'browserforce' });
+    const existingGroups = await chrome.tabGroups.query({});
     const allTabs = await chrome.tabs.query({});
     const plan = buildBrowserforceTabGroupPlan({
       attachedTabIds: connectedTabIds,
       allTabs,
-      existingGroups,
+      existingGroups: existingGroups.filter((group) => group.title === 'browserforce'),
+      agentTabIds: [...agentCreatedTabs.keys()],
+      agentGroupIds: [...agentTabGroupIds.values()],
     });
+    const agentPlan = buildAgentTabGroupPlan({ agentTabs: agentCreatedTabs, agentTabNames, agentTabGroupIds, newAgentTabIds, allTabs, existingGroups });
 
     for (const group of plan.groupsToClear) {
       if (group.tabIdsToUngroup.length === 0) continue;
@@ -1068,6 +1217,21 @@ async function syncTabGroup() {
         await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
       }
     }
+    for (const group of agentPlan) {
+      try {
+        const groupId = await chrome.tabs.group(group.existingGroupId == null
+          ? { tabIds: group.tabsToAdd, createProperties: { windowId: group.windowId } }
+          : { tabIds: group.tabsToAdd, groupId: group.existingGroupId });
+        for (const tabId of group.tabsToAdd) {
+          if (agentCreatedTabs.has(tabId)) agentTabGroupIds.set(tabId, groupId);
+        }
+        await chrome.tabGroups.update(groupId, { title: group.title, color: group.color });
+      } catch (e) {
+        // A user may close a tab/group while Chrome is applying the plan.
+        console.warn('[bf] Agent tab group changed during sync:', e.message);
+      }
+    }
+    if (agentPlan.length) await persistAutoManageState();
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);
   } finally {
@@ -1075,10 +1239,11 @@ async function syncTabGroup() {
   }
 }
 
-function queueSyncTabGroup() {
-  tabGroupQueue = tabGroupQueue.then(syncTabGroup).catch((e) => {
+function queueSyncTabGroup(newAgentTabIds = []) {
+  tabGroupQueue = tabGroupQueue.then(() => syncTabGroup(newAgentTabIds)).catch((e) => {
     console.warn('[bf] syncTabGroup error:', e.message);
   });
+  return tabGroupQueue;
 }
 
 function send(msg) {

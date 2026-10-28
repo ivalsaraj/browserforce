@@ -77,8 +77,9 @@
         <div class="settings-group">
           <label class="checkbox-row">
             <input type="checkbox" id="bf-dedicated-window">
-            <span>Open agent tabs in a dedicated window</span>
+            <span>Open agent tabs in a separate window</span>
           </label>
+          <small>Creates a new Space when Chrome is in full screen.</small>
         </div>
       </section>
 
@@ -88,6 +89,10 @@
           <label class="checkbox-row">
             <input type="checkbox" id="bf-ghost-cursor">
             <span>Show ghost cursor for agent actions</span>
+          </label>
+          <label id="bf-ghost-cursor-click-sync-row" class="checkbox-row" hidden>
+            <input type="checkbox" id="bf-ghost-cursor-click-sync" disabled>
+            <span>Sync clicks with cursor arrival</span>
           </label>
         </div>
       </section>

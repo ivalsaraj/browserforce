@@ -12,16 +12,23 @@ export const PROCESS_CLIENT_LABEL =
   process.env.BROWSERFORCE_CDP_CLIENT_LABEL ||
   `browserforce-mcp-${randomBytes(4).toString('hex')}`;
 
-export function withClientLabel(cdpUrl) {
+export function withClientLabel(cdpUrl, label = PROCESS_CLIENT_LABEL) {
   try {
     const url = new URL(cdpUrl);
     if (!url.searchParams.get('label')) {
-      url.searchParams.set('label', PROCESS_CLIENT_LABEL);
+      url.searchParams.set('label', label);
     }
     return url.toString();
   } catch {
     return cdpUrl;
   }
+}
+
+// Match the relay's explicit-label normalization, including custom labels.
+export function ownerKeyForLabel(label) {
+  if (typeof label !== 'string') return null;
+  const cleaned = label.trim().replace(/[^\w .:@/-]/g, '').slice(0, 80);
+  return cleaned ? `label:${cleaned}` : null;
 }
 
 // Display name shown on the ghost cursor so a user with several agents driving
@@ -39,14 +46,23 @@ export function withAgentName(cdpUrl) {
   }
 }
 
+// The CLI's identity. A named agent gets the same label on every one-shot call
+// and on its session daemon, so all of them own the same tabs and share one
+// window pin. Unnamed one-shot calls stay unlabeled: each call is its own owner
+// and the window it opens tabs in is unchanged. The name is the identity, so two
+// agents sharing a name share ownership and window.
+export function cliClientLabel(env = process.env) {
+  if (env.BROWSERFORCE_CDP_CLIENT_LABEL) return env.BROWSERFORCE_CDP_CLIENT_LABEL;
+  const name = env.BROWSERFORCE_AGENT_NAME?.trim();
+  return name ? `browserforce-cli-${name}` : null;
+}
+
 // The one place that decides which wrappers a connect URL gets. Hand-composing
 // the two wrappers at each call site gave three places the composition could
 // drift, and nothing a test could check there beyond the presence of some text.
 //
-// durableLabel: false is for bin.js's one-shot path, which deliberately sends no
-// affinity label — adding one would change which Chrome window one-shot commands
-// open tabs in. agentName is display-only and never keys affinity, so it is safe
-// on every path.
-export function agentCdpUrl(cdpUrl, { durableLabel = true } = {}) {
-  return withAgentName(durableLabel ? withClientLabel(cdpUrl) : cdpUrl);
+// label: null sends no affinity label (bin.js's unnamed one-shot path). agentName
+// is display-only and never keys affinity, so it is safe on every path.
+export function agentCdpUrl(cdpUrl, { label = PROCESS_CLIENT_LABEL } = {}) {
+  return withAgentName(label ? withClientLabel(cdpUrl, label) : cdpUrl);
 }

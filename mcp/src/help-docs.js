@@ -20,7 +20,8 @@ browserforce "snapshot --tab app"
 browserforce "snapshot --tab docs"
 browserforce "click @e2 --tab app"
 
-- tabs lists stable t<N> handles, names, and the active marker. Handles never shift when other tabs close — target tabs by handle or name, never by list position.
+- tabs lists stable t<N> handles, names, the active marker, and agent ownership (yours or owned by a name/short label). Handles never shift when other tabs close — target tabs by handle or name, never by list position.
+- Open your own tab for testing or navigation. Do not reuse a tab owned by another agent.
 - "tabs" lists the first 20 tabs and reports how many it omitted. Narrow with --match <text>, widen with --limit <n>, or list everything with --all.
 - use <t handle|name|text> soft-matches names, handles, and title/url text; ambiguity fails with candidates instead of guessing.
 - Name conflicts fail by default. Use --replace only when you intentionally want to move a name to another tab.
@@ -37,10 +38,10 @@ browserforce "click @e2 --tab app"
 - For attached/manual/current-tab listing, call getBrowserforceStatus() first; use status.manualAttachedTabs and status.activeManualTargets.
 - Fast path: const status = await getBrowserforceStatus(); return status.manualAttachedTabs;
 - To inspect the attached tab, use: state.page = await getBrowserforcePageForTab();
-- For all open tabs, use context.pages(); filter and cap results unless the user explicitly asks for the full list.
-- For inspect/read/check/review tasks, reuse existing pages. Do not call context.newPage() or page.goto() just to find a tab that may already be open.
+- Run browserforce "tabs" to see ownership before choosing a page; context.pages() alone does not show ownership. Filter and cap results unless the user explicitly asks for the full list.
+- For inspect/read/check/review tasks, reuse user tabs or tabs marked yours. If the matching tab is owned by another agent, open your own tab when restrictions allow.
 - Set state.page to the chosen existing page and keep using state.page for follow-up work.
-- Use intent:'open' only when the user asked to open or navigate. If the requested tab is absent, report that clearly instead of silently opening a replacement.
+- Use intent:'open' for explicit navigation or to open your own copy of another agent's tab, when restrictions allow. If a requested user tab is absent, report that clearly instead of silently opening a replacement.
 - In manual/no-new-tabs mode, ask the user to attach/share a tab only when status.manualAttachedTabs is empty and no matching existing page is available.`,
   },
   'page-setup': {
@@ -50,7 +51,8 @@ browserforce "click @e2 --tab app"
 
 - Read browserforceRestrictions and browserforceSettings before planning actions.
 - Use state.page for ongoing work; the default page variable is only a fallback.
-- If state.page closed, choose another non-closed page from context.pages() before creating a new tab.
+- If state.page closed, run browserforce "tabs" and choose a user tab or one marked yours, or open your own when restrictions allow.
+- Viewport overrides clear on disconnect. MCP restores a saved viewport only to an exactly identified tab after its idle reconnect; other raw emulation overrides must be set again when needed.
 - Respect readOnly, noNewTabs, mode:'manual', lockUrl, and instructions.
 - For explicit open/navigation work, create a tab only when restrictions allow it, then waitForPageLoad() and verify with snapshot().`,
   },
@@ -79,6 +81,24 @@ browserforce "click @e2 --tab app"
 - Use pageMarkdown() for article-like content.
 - Use screenshots only when the user requested visuals or layout evidence.
 - Before screenshots of SPAs, wait for load plus a short visual settle or a page-specific ready signal so captures are high signal and low noise.`,
+  },
+  dialogs: {
+    title: 'JavaScript Dialogs',
+    summary: 'Dialog records, safe defaults, and one-shot responses before an action.',
+    text: `# JavaScript Dialogs
+
+- Only an active run handles and records dialogs on pages it drives: its active/--tab page, pages it creates, explicitly arms, or issues Playwright commands on. Unrelated user/agent pages are left alone. alert and beforeunload are accepted; confirm and prompt are dismissed by default. Notices append to the next exec/browserforce result.
+- To accept the next confirm/prompt on the active page, arm it BEFORE the triggering action in the same exec:
+  armDialog({ accept: true });
+  await page.getByRole('button', { name: 'Delete' }).click();
+- To target another Page: const p = await context.newPage(); armDialog({ accept: true, page: p }); then trigger its dialog in the same exec. Omit page for the active/--tab page.
+- For a prompt: armDialog({ accept: true, promptText: 'answer' }); then trigger it in the same exec. The response is page-scoped, consumed once, and cleared on completion, error, or timeout. It never carries into a later exec. alert/beforeunload always accept and do not consume a confirm/prompt arm.
+- Use getDialogs() for the last 100 session records: type, message, defaultValue, url, at, action, and error when handling failed. Notices are delivered once; records remain available across idle reconnects. Reset clears them.
+- Prefer armDialog over adding your own dialog listeners; two handlers can race to handle the same dialog.
+- Between runs, a dialog on a previously driven page stays pending (up to 100 pages). The next run driving that page handles it with defaults before its action and emits a notice. Other runs leave it alone.
+- One relay broadcasts to every client. Our listener prevents Playwright auto-dismissal on foreign pages; other clients without this handler can still dismiss them.
+- While MCP is idle-disconnected (15 seconds), dialogs are left open for the user. The relay does not auto-handle or record them without a CDP client. Reconnect and inspect the page; do not assume a dialog created during the gap was handled or recorded.
+- CLI JSON results with notices use { _bf_type: 'dialog_result', result, dialogs }; text output appends the notice. One-shot binary output keeps notices on stderr.`,
   },
   logs: {
     title: 'Logs And Debugging',
@@ -223,6 +243,7 @@ export const HELP_SECTION_NAMES = Object.freeze([
   'navigation',
   'snapshot',
   'logs',
+  'dialogs',
   'cdp',
   'plugins',
   'errors',

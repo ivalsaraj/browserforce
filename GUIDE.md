@@ -65,21 +65,27 @@ Popup settings include:
 
 - `executionMode`: `parallel` or `sequential`
 - `parallelVisibilityMode`: `foreground-tab` or `rotate-visible`
+- `ghostCursorEnabled`: `false` (default) or `true` — 24px inline SVG in-page ghost cursor with a tip hotspot and blue glow; 240Hz springs, scored Bézier arcs for long moves, speed narrowing, one arrival wiggle burst, and an agent-label chip (`prefers-reduced-motion: reduce` respected)
+- `ghostCursorClickSync`: `false` (default) or `true` — when enabled alongside `ghostCursorEnabled`, animates the ghost cursor to the click point and waits for arrival (bounded by 1500ms) before forwarding `mousePressed` to Chrome
 
 Current behavior lock:
 
-- Agent-created tabs open in the agent's own dedicated window by default, visible within it.
-- Attached tabs stay in a `browserforce` group within their own Chrome window.
-- A dedicated background window is created per agent process by default (`dedicatedWindow`, on unless turned off).
-- `rotate-visible` is treated as `foreground-tab` in this release.
+- With separate windows off, agent-created tabs open in the background of the valid pinned or last-focused normal window; a window is created only when none exists.
+- Agent-created tabs use a named group per owner per window. User-attached tabs keep the `browserforce` group. Existing tabs never move between windows, and tabs dragged out of an agent group stay out.
+- Separate windows are opt-in (`dedicatedWindow === true`, default off). They open with `focused: false` and Chrome's default size, but can still create a new macOS Space in full screen.
+- `parallelVisibilityMode` is retained but has no behavior effect: shared-window tabs are always background; dedicated-mode tabs stay active inside their window. Relay/MCP still report `foreground-tab`.
+
+`page.bringToFront()` never focuses a window. It selects the tab only inside a separate agent window; in a window you share with agents it does nothing, so your selected tab never changes.
+
+Popups from tabs the agent drove with a real command in the last five seconds are moved into the opener's window as background tabs, inherit its owner and current group, and enter auto-close bookkeeping. Tabs you open yourself (Cmd-T, or links on an agent tab it is not driving) stay where Chrome put them. User-only popups stay unchanged. Playwright still receives `page.on('popup')` and context `page` events. No extra permissions are needed. Chrome creates popups before the extension event: brief tab/window flicker and a macOS Space jump can still occur. Popups without an `openerTabId` cannot be attributed and stay unchanged.
 
 MCP reads these preferences once per session and caches them. If you change popup settings mid-session, call `reset` so new execute calls pick up updated values.
 
 ### Operational examples
 
-- Visible parallel in the agent's dedicated window: `executionMode=parallel`, `parallelVisibilityMode=foreground-tab`
+- Background parallel tabs: `executionMode=parallel`, separate windows off
 - Sequential low-detection run: `executionMode=sequential`
-- Rotate-visible demo toggle: `parallelVisibilityMode=rotate-visible` (currently normalized to `foreground-tab`)
+- Either visibility preference value: no tab rotation or placement override
 
 ## BrowserForce Tab Swarms // Parallel Tabs Processing
 
@@ -253,3 +259,51 @@ If MCP startup fails with `connection closed: initialize response`:
 1. Ensure args include `"mcp"`.
 2. If running from local clone, run `pnpm install`.
 3. Validate manually: `npx -y browserforce@latest mcp`.
+
+### JavaScript dialogs
+
+BrowserForce handles and records dialogs only during an active run on pages it
+drives: its active/`--tab` page, pages it creates, explicitly arms, or issues
+Playwright commands on. Unrelated user/agent pages are left alone. Handled dialogs
+are reported with the next exec/browserforce result. Alerts and beforeunload
+dialogs are accepted; confirms and prompts are dismissed by default. Accept a
+confirmation or supply prompt text by arming a response before the action in the
+**same exec**:
+
+```js
+armDialog({ accept: true, promptText: 'answer' });
+await page.getByRole('button', { name: 'Continue' }).click();
+return getDialogs();
+```
+
+To target another Page, use `armDialog({ accept: true, page: p })`, for example
+a Page returned by `const p = await context.newPage()`. Omit `page` to target the
+active/`--tab` page. The response applies to its next confirm/prompt only and
+expires when that exec finishes, fails, or times out. Use this helper instead of
+adding another Playwright dialog listener. `getDialogs()` returns the last 100
+session records (`type`, `message`, `defaultValue`, `url`, `at`, `action`, and
+`error` on failure). Records survive idle reconnects; reset clears them. Text
+output appends each notice once. CLI JSON wraps affected results as
+`{ _bf_type: 'dialog_result', result, dialogs }`; one-shot binary output puts
+notices on stderr. MCP help includes a `dialogs` section.
+
+Between runs, dialogs on previously driven pages stay pending (up to 100 pages).
+The next run driving that page handles its pending dialog with defaults before
+executing its action and emits the normal notice. An unrelated run leaves it
+alone. Pending Dialog objects are discarded on page close, disconnect, or reset;
+they are never rebound by URL to replacement Pages.
+
+One relay broadcasts dialog events to every client. Our listener prevents
+Playwright from auto-dismissing foreign dialogs. Older/foreign Playwright clients
+without this handler can still dismiss them, and concurrent runs intentionally
+driving the same page can still race.
+
+When MCP idle-disconnects after 15 seconds, a new dialog stays open for the user.
+The relay never handles dialogs without a CDP client, and dialogs opened during
+that gap are not guaranteed to be recorded or replayed on reconnect.
+
+API reference: [Playwright dialogs](https://playwright.dev/docs/dialogs) and
+[Dialog](https://playwright.dev/docs/api/class-dialog), checked against the
+lockfile's Playwright 1.60.0.
+
+Queued dialogs already resolved by another client are silently discarded when Chrome reports `No dialog is showing`; other handling failures remain visible. The driven-tab favicon has a page-side 15-second expiry renewed by agent activity, so it can restore after unexpected debugger loss. Suspended pages may delay that timer.

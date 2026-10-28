@@ -14,24 +14,24 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         AI Agent Layer                               │
 │                                                                      │
-│  ┌─────────────────────────────┐  ┌───────────────────────────────┐ │
+│  ┌─────────────────────────────┐  ┌────────────────────────────────┐ │
 │  │  MCP Client (Claude, etc.)  │  │  Direct Playwright Client     │ │
 │  │  Uses browserforce/exec     │  │  chromium.connectOverCDP()    │ │
-│  └──────────┬──────────────────┘  └──────────┬────────────────────┘ │
+│  └──────────┬──────────────────┘  └──────────┬─────────────────────┘ │
 │             │ MCP/stdio                      │ CDP/WebSocket        │
-└─────────────┼────────────────────────────────┼──────────────────────┘
+└─────────────┼────────────────────────────────┼───────────────────────┘
               │                                │
               ▼                                │
-┌──────────────────────────────────┐           │
+┌───────────────────────────────────┐           │
 │  MCP Server (mcp/src/index.js)   │           │
 │  - 4 tools: browserforce + exec  │           │
 │    + reset + help                │           │
 │  - Playwright-core CDP client    ├───────────┘
 │  - Auto-discovers relay token    │
-└──────────────┬───────────────────┘
+└──────────────┬────────────────────┘
                │ CDP over WebSocket
                ▼
-┌──────────────────────────────────┐
+┌───────────────────────────────────┐
 │  Relay Server (relay/src/index.js)│
 │  - ws://127.0.0.1:19222          │
 │  - /extension (single ext slot)  │
@@ -39,24 +39,24 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 │  - Intercepts Target.* commands  │
 │  - Forwards all else to ext      │
 │  - Tracks sessions + children    │
-└──────────────┬───────────────────┘
+└──────────────┬────────────────────┘
                │ WebSocket
                ▼
-┌──────────────────────────────────┐
+┌───────────────────────────────────┐
 │  Chrome Extension (MV3 SW)       │
 │  - background.js service worker  │
 │  - chrome.debugger.attach/send   │
 │  - Auto-reconnect + keepalive    │
 │  - Tab lifecycle tracking        │
-└──────────────┬───────────────────┘
+└──────────────┬────────────────────┘
                │ chrome.debugger API
                ▼
-┌──────────────────────────────────┐
+┌───────────────────────────────────┐
 │  Real Chrome Browser             │
 │  - User's logged-in sessions     │
 │  - All cookies and localStorage  │
 │  - Real tabs with real content   │
-└──────────────────────────────────┘
+└───────────────────────────────────┘
 ```
 
 ## Protocol Reference
@@ -70,7 +70,7 @@ BrowserForce bridges AI agents to a user's real Chrome browser via a transparent
 | `listTabs` | — | List all eligible browser tabs |
 | `attachTab` | `{ tabId, sessionId }` | Attach debugger to tab |
 | `detachTab` | `{ tabId }` | Detach debugger |
-| `createTab` | `{ url, sessionId, windowId?, ownerKey? }` | Create and attach new tab (`windowId` pins the agent's window; `ownerKey` records the owning agent) |
+| `createTab` | `{ url, sessionId, windowId?, ownerKey?, agentName? }` | Create and attach new tab (`windowId` pins the agent's window; `ownerKey` records the owning agent; `agentName` is an optional display-only name, also used to title the agent's tab group) |
 | `closeTab` | `{ tabId, ownerKey? }` | Close tab (refused when `ownerKey` names a different agent than the tab's owner) |
 | `cdpCommand` | `{ tabId, method, params, childSessionId?, passive?, agentName? }` | Forward CDP command (`passive` excludes init-storm commands from the idle clock; `agentName` is the display-only name of the driving agent, present only when that client named itself) |
 | `ping` | — | Keepalive (every 5s) |
@@ -155,7 +155,7 @@ When a user clicks "Cancel" on Chrome's automation infobar, Chrome detaches the 
 
 ### Agent Window Affinity
 
-Agent-created tabs are pinned to the Chrome **window** the agent created them in, not the user's current focus. The relay seeds `agentWindowByAffinityKey` from the `windowId` of the first real (non-init) command in `_forwardToTab()` as a **weak** pin, which is never passed to `createTab`; only a pin a create actually established is sent. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the current focused window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowPlan()`, which returns a `{ action }` plan (`use-window` / `new-window` / `current-window`) that `createTab` executes.
+Agent-created tabs are pinned to the Chrome **window** the agent created them in, not the user's current focus. The relay seeds `agentWindowByAffinityKey` from the `windowId` of the first real (non-init) command in `_forwardToTab()` as a **weak** pin, which is never passed to `createTab`; only a pin a create actually established is sent. The extension validates the window still exists (`chrome.windows.get`) and, if it was closed, falls back to the user's last-focused normal window; the relay re-pins to whatever window the extension actually used. Window resolution is centralized in the pure, synchronous `extension/window-affinity.js` `resolveCreateWindowPlan()`, which returns a `{ action }` plan (`use-window` / `new-window` / `current-window`) that `createTab` executes.
 
 **Affinity keying (label-durable):** the map key is `label:<explicit label>` when the client connected with an explicit `?label=` query param (MCP sends `label=browserforce-mcp-<8 hex>`), else the ephemeral connection id. Label-keyed pins **survive disconnects** — this is what stops MCP's 15s idle-disconnect/reset cycle from spawning a new dedicated window per reconnect. Connection-keyed pins are deleted on client close. Only *explicit* labels are durable: `_deriveClientLabel()` always returns a display label (UA fallbacks like `cdp-client`), which must never key durable affinity — durability is decided by `meta.affinityLabel` from `_explicitClientLabel(req)`. Consequence (deliberate): two clients sharing a label share an agent window. Leak guard: `MAX_AFFINITY_ENTRIES = 50`, FIFO eviction via `_pinAgentWindow()`.
 
@@ -167,7 +167,36 @@ Agent-created tabs are pinned to the Chrome **window** the agent created them in
 
 **Do not** treat the current Chrome focus as stable agent ownership — use the stored `windowId`. Residual limitation: with truly concurrent first creates tabs can land in different windows; a create now re-pins unconditionally, so the last completing create's window wins. Playwright awaits `newPage()` sequentially, so no per-client serialization queue is added.
 
-**Dedicated window (default ON):** When the `dedicatedWindow` setting (popup toggle) is on and a create has no valid pinned window, `resolveCreateWindowPlan()` returns `{ action: 'new-window' }` and the extension opens a fresh **background** (`focused: false`) Chrome window for the agent's created tabs, instead of a tab in the user's current window. Affinity then pins to that window so later created tabs join it. If the dedicated window is closed mid-session, the next create spawns a **new** dedicated window rather than falling back to the user's window. Scope is agent-**created** tabs only — manually attached tabs are never moved. Default is **ON**; an unset setting reads as enabled.
+**Dedicated window (opt-in, default OFF):** When the `dedicatedWindow` setting (popup toggle) is on and a create has no valid pinned window, `resolveCreateWindowPlan()` returns `{ action: 'new-window' }` and the extension opens a fresh **background** (`focused: false`) Chrome window for the agent's created tabs, instead of a tab in the user's current window. Affinity then pins to that window so later created tabs join it. If the dedicated window is closed mid-session, the next create spawns a **new** dedicated window rather than falling back to the user's window. Scope is agent-**created** tabs only — manually attached tabs are never moved. Only `settings.dedicatedWindow === true` enables it; an unset setting is **OFF**. Chrome uses its default window size with `focused: false`; do not add bounds. On macOS full screen, even this can create a new Space and switch to it.
+
+**Shared-window placement:** With dedicated mode off, create in a valid pinned normal window or the last-focused normal window (`getLastFocused({ windowTypes: ['normal'] })`), always with `active: false`. Create a background normal window only when none exists. `parallelVisibilityMode` is a retained preference with no placement effect: both values use background tabs in shared windows and active tabs in dedicated mode. Never move existing tabs between windows.
+
+**Per-agent tab groups:** Newly created tabs are grouped once per owner key per window, titled with optional `createTab.agentName` (fallback: `Agent <last four owner-key characters>`, else `BrowserForce`) and a deterministic owner color. `agentTabNames` and assigned `agentTabGroupIds` persist alongside membership/owners. Only the create path submits new ids to the pure `buildAgentTabGroupPlan`; later syncs never regroup old tabs, so user drag/ungroup actions survive reconnects and worker restarts. Group identity comes from an assigned group still containing that owner's tabs, never a matching title. User-attached tabs keep the separate `browserforce` group; agent-created tabs and their groups are excluded from that reconciliation.
+
+**Focus requests:** Top-level `Page.bringToFront` is intercepted after restriction checks and answered with `{}`. It selects the tab (`chrome.tabs.update(tabId, { active: true })`) only inside a window the extension opened as a dedicated agent window; in a window shared with the user it is a no-op, because selecting the agent's tab there replaces the tab the user is looking at (the takeover that originally motivated the dedicated window). Background tabs stay fully drivable because the debugger is attached. Never forward it to the debugger or focus a Chrome window: that can switch the user's macOS Space. Child-session commands are forwarded unchanged.
+
+### Agent Popups Stay in the Background
+
+- `tabs.onCreated` + `openerTabId` adopts a popup only when its opener is
+  attached and had a real (non-passive) command in the last five seconds
+  (`isAgentPopupCandidate`), agent-created openers included. Attachment/init
+  alone never qualifies, and Chrome's New Tab page never does.
+- **Symptom:** Cmd-T on an agent tab opened a tab that lost focus to the agent
+  tab and joined its group. **Cause:** Chrome sets `openerTabId` for Cmd-T too,
+  and agent-created openers used to qualify forever. **Wrong fix:** checking
+  only the URL; a user clicking a `target=_blank` link on an idle agent tab has
+  the same shape. Recent agent activity is the only signal.
+- Move the new popup tab into its opener's window, restore the previous selected
+  tab before attaching the debugger, and join the opener's current group. Inherit
+  the opener's owner/name (a user-attached opener has no owner); checkpoint agent
+  membership/activity for auto-close. Never move the opener or user-only popups.
+- Reuse `manualTabAttached` with `origin: 'agent-created'` to announce the real
+  popup immediately. Preserve/remap Chrome's `targetInfo.openerId` to the relay
+  target id, or Playwright sees a page but never emits `page.on('popup')`.
+- No new permissions. Chrome creates the tab/window before this event, so a brief
+  selection/window flash or macOS Space jump remains possible. Do not promise
+  zero flicker or focus windows to compensate. Missing `openerTabId` cannot be
+  attributed safely and is left alone.
 
 ### Tab Identity Survives Reconnect
 
@@ -228,6 +257,14 @@ This is **not** an isolation boundary: `_autoAttachAllTabs` loops the global
 target map and every CDP client can still see and drive every tab. Never
 document it as a sandbox.
 
+`/json/list` carries agent-created tabs' `origin`, optional `ownerKey`, and the
+latest display `agentName` seen for that owner. The shared `tabs` renderer marks
+them as `yours` or `owned by <name/short label>`; user-tab rows stay unchanged.
+MCP compares against its actual connection label (including the environment
+override). Open your own tab instead of reusing another agent's tab.
+Exact duplicate-URL probes can return Chrome ids; optional `chromeTargetId`
+correlates them to HTTP owner metadata.
+
 ### Durable Auto-Close (agent tab bookkeeping)
 
 Auto-close of agent-created tabs is **ON by default** (10 minutes idle,
@@ -239,7 +276,7 @@ as `0` and the default would silently override the user's choice.
 
 Auto-close/auto-detach state must survive MV3 service worker restarts and Playwright's reconnect init storm:
 
-- **Persistence shape**: in memory `agentCreatedTabs` is a `Map<tabId, ownerKey|null>`. `AUTO_MANAGE_STATE_KEY` holds four fields: `agentCreatedTabs` (a bare tab-id array — kept in this shape so an older extension build can still hydrate membership after a rollback), `agentTabOwners` (`[tabId, ownerKey]` pairs), `tabLastActivity`, and `dedicatedWindowIds`. Hydration runs through the pure `extension/auto-manage-state.js` helpers, which validate every entry before destructuring: a malformed member previously threw and aborted the whole hydrate, silently disabling auto-close for every restored tab. `agentCreatedTabs` + `tabLastActivity` are checkpointed to `chrome.storage.session` under `AUTO_MANAGE_STATE_KEY` (`persistAutoManageState()` / `hydrateAutoManageState()` in `extension/background.js`). Session storage survives SW restarts and dies with the browser — the correct lifetime. Membership changes persist immediately; the activity clock checkpoints once per `checkInactiveTabs()` sweep, never per CDP command.
+- **Persistence shape**: in memory `agentCreatedTabs` is a `Map<tabId, ownerKey|null>`. `AUTO_MANAGE_STATE_KEY` holds these fields: `agentCreatedTabs` (a bare tab-id array — kept in this shape so an older extension build can still hydrate membership after a rollback), `agentTabOwners` (`[tabId, ownerKey]` pairs), `agentTabNames` (`[tabId, name]` pairs), `agentTabGroupIds` (`[tabId, assignedGroupId]` pairs), `tabLastActivity`, and `dedicatedWindowIds`. Hydration runs through the pure `extension/auto-manage-state.js` helpers, which validate every entry before destructuring: a malformed member previously threw and aborted the whole hydrate, silently disabling auto-close for every restored tab. `agentCreatedTabs` + `tabLastActivity` are checkpointed to `chrome.storage.session` under `AUTO_MANAGE_STATE_KEY` (`persistAutoManageState()` / `hydrateAutoManageState()` in `extension/background.js`). Session storage survives SW restarts and dies with the browser — the correct lifetime. Membership changes persist immediately; the activity clock checkpoints once per `checkInactiveTabs()` sweep, never per CDP command.
 - **Passive flag contract**: the relay tags forwarded `INIT_ONLY_METHODS` `cdpCommand` payloads with `passive: true`; the extension skips the `tabLastActivity` bump for them. Only real commands count as activity. The flag is optional — old relay/extension pairings degrade to the previous behavior.
 - **Provenance no-demote**: `agent-created` origin must never be demoted to `relay-attached` (that would exempt the tab from auto-close). The extension surfaces `origin: 'agent-created'` in `listTabs` for hydrated agent tabs; the relay accepts it in `_autoAttachAllTabs()` discovery (never `manual` from discovery) and `_ensureDebuggerAttached()` preserves `manual`/`agent-created` on lazy attach. `attachTab` re-registers agent-created tabs into `agentCreatedTabs`.
 - **Alarm-driven sweep**: the `bf-reconnect` alarm also runs `checkInactiveTabs()` — `setInterval` dies with the SW; alarms don't.
@@ -291,17 +328,80 @@ setting.
 **Known gap:** `Fetch` interception left behind by `page.route` after its owner
 disconnects is not handled yet.
 
+### Emulation Overrides Die With Their Agent
+
+- **Rule**: `EMULATION_OVERRIDE_RESETS` in `relay/src/index.js` is the single
+  setter-to-reset map. Track holders per tab/setter only when forwarding main
+  or alias commands to an attached debugger; synthetic init responses own
+  nothing. An explicit clear removes only its caller's holding.
+- **Rule**: On disconnect, reset an override only after its last connected
+  holder leaves. Resets are passive housekeeping, failures log without
+  throwing, and removing a target drops its override records.
+- **MCP idle reconnect**: `browser-session-runtime.js` saves non-null viewport
+  sizes by exact relay target identity before idle disconnect and re-applies
+  them to rematched pages before the next command. Never pair by position or
+  stale cached URLs. The user's desktop viewport returns during the idle gap
+  and after the agent exits; only viewport size is restored on reconnect.
+- **Limit**: User-agent overrides are excluded because CDP documents no reset.
+
 ### Ghost Cursor
 
 The optional ghost cursor is controlled by the local-storage key
 `ghostCursorEnabled` and defaults to disabled. `extension/ghost-cursor.js` owns the
-renderer, action mapping, and per-tab serialized queue; `extension/background.js`
-owns live setting state and debugger lifecycle. Only successful top-level
-`Input.dispatchMouseEvent` commands enqueue cosmetic updates, so child sessions,
+physics-driven renderer, pure animation helpers (`stepSpring`, `selectBezierArc`,
+`generateBezierCandidates`, `scoreBezierPath`, `isArcInsideViewport`, `hasCursorArrived`,
+`computeWiggleAngleDeg`, `computeSpeedNarrowing`, `computeVisibilityEffect`),
+action mapping, and per-tab serialized queue; `extension/background.js` owns live
+setting state and debugger lifecycle. Only successful top-level
+`Input.dispatchMouseEvent` commands enqueue cursor updates, so child sessions,
 unsupported input, and failed browser commands cannot affect the cursor. Disable
 must complete the renderer teardown and registered-script removal before normal
 debugger detach; post-detach cleanup only invalidates queued work and must not send
 new debugger commands.
+
+**Physics & motion.** All channels use response/damping-fraction springs with
+mass 1 and semi-implicit Euler at `1/240s`. Each frame advances real elapsed time,
+carrying fractional steps; catch-up caps at 1 second and resynchronizes.
+- **Channels**: position `.19s/.90`, rotation `.12s/.90`, short tilt `.055s/.82`,
+  squash `.12s/.86`, stretch `.20s/.85`, visibility `.42s/.86`, short progress
+  `.19s/.94`, long progress `pathResponse/.90`. Snap only when velocity and force
+  are at most `.06` and error is at most 1 percent.
+- **Long moves (`>196px`)**: score 20 candidates (two single cubics with handle
+  scales `1/.65`, plus 18 two-segment arcs). Departure and arrival handles align
+  with the resting tip direction. Sample 24 points per segment and choose the
+  lowest score staying 20px inside the viewport, or lowest overall if none fit.
+  Scoring includes length, excess travel, turning, opposition, and an arc penalty.
+  Curviness clamps excess length/chord plus total turning/(2pi) into `[0,1]`.
+  The path response combines length, curviness and opposition; a progress spring
+  drives the path and tight position springs follow it. Rotation follows tangent
+  plus 90 degrees through the shortest angle from the start of travel.
+  Retargeting preserves live position and velocity.
+- **Short moves (`<=196px`)**: straight scoots, base rotation at rest, a separate
+  directional tilt spring (up to 70 degrees), and a `.15` sine-envelope squash
+  along the move axis. Width narrows with speed/5500 down to 65 percent.
+- **Arrival**: progress at least `.999`, progress speed below `.01`, distance at
+  most `.85px`, and each position velocity at most `12px/s`. Snap to the exact
+  hotspot and resolve `waitForArrival()`.
+- **Wiggle**: one 1.41s sine-windowed burst on first appearance and each arrival,
+  with amplitude 12.5 degrees and period .66s; never loop while idle.
+- **Visibility**: first input while invisible snaps to its position before the
+  visibility spring fades/scales/blurs in. Opacity is `v`, scale `.4+.6v`, blur
+  `5*(1-v)px`. Fade out after 5 seconds idle. Stop animation frames once settled.
+- **Optional click sync (`ghostCursorClickSync`, default `false`)**: exposed in the
+  popup under the ghost-cursor toggle (only shown/enabled when the ghost cursor is
+  on). When ON and the ghost cursor is enabled, `cdpCommand` awaits
+  `syncGhostCursorBeforeClick()` before forwarding a top-level
+  `Input.dispatchMouseEvent` of type `mousePressed` to Chrome, moving the cursor
+  to the click point and waiting for `waitForArrival()` bounded by
+  `CLICK_SYNC_MAX_WAIT_MS` (`1500ms`) so a stuck animation never blocks a click.
+  When OFF (or absent), the cursor remains purely post-command cosmetic.
+- **Artwork & hotspot**: inline 24px SVG, black fill and white outline, static
+  two-radius blue glow. The up-pointing art rests at -44 degrees and transforms
+  around its tip `(12, 1.6)`; translate the box by `(-12, -1.6)` so rotation and
+  scaling cannot displace the click point. Keep the chip outside the arrow.
+- **Reduced motion & frames**: reduced motion jumps to the target and disables
+  wiggle. Subframes never mount a cursor. Inline art needs no asset URL or
+  origin-specific fallback.
 
 **Agent label.** A client that connects with `?agentName=` (from
 `BROWSERFORCE_AGENT_NAME`, via `agentCdpUrl()` in `mcp/src/client-label.js`) gets
@@ -331,6 +431,12 @@ chip's `textContent`.
   accidental page CSS (broad `div`/`span` rules, global RTL, inherited fonts),
   not against a page using `!important`. The existing arrow has the identical
   exposure, so hardening the chip alone would buy nothing.
+- **The name is the CLI's owner identity.** `cliClientLabel()` turns
+  `BROWSERFORCE_AGENT_NAME` into the affinity label `browserforce-cli-<name>`
+  for one-shot `bin.js` and for sessiond (whose `getOwnerKey` uses the same
+  label), so separate CLI calls own the same tabs and share one window pin. An
+  unnamed one-shot call sends no label: each call is its own owner. MCP keeps
+  its random per-process label. Same name means shared ownership, by design.
 - **Attribution is per CDP connection, not per CLI call.** MCP (one connection
   per process) and one-shot `bin.js` label correctly. `cli/sessiond.js` holds one
   shared long-lived connection and takes its name from whichever environment
@@ -341,6 +447,18 @@ chip's `textContent`.
   mounted leaves a frozen chip naming an agent that is no longer driving. Turn
   the ghost cursor off in the popup before downgrading (disable removes the
   whole outer element), or reload the affected tabs.
+
+### Tab Badge
+
+The badge imports the approved SVG path and resting angle from `ghost-cursor.js`
+and draws it with `Path2D`, scaled into its existing bottom-right geometry.
+Keep the white outline width in canvas pixels when scaling the path.
+
+While an agent is actively driving an attached tab, BrowserForce overlays a small black cursor arrow with a white outline on the bottom-right of the tab's favicon and restores the original favicon when the agent stops (`extension/tab-badge.js`, `test/agent/tab-badge.test.js`):
+
+- **Trigger**: any real (non-`passive`) top-level `cdpCommand` on an attached tab marks it `driven` (independent of `ghostCursorEnabled`; no setting). After `TAB_BADGE_IDLE_MS` (`15s`) with no real command, or on `detachTab` / `closeTab` / `onDebuggerDetach`, the original icon is restored.
+- **Composition**: fetches the page's current icon via `chrome-extension://<id>/_favicon/?pageUrl=<encoded>&size=32` (using the extension's `favicon` permission) and composites it with the cursor badge on a `32x32` `OffscreenCanvas` into a PNG data URL, falling back to a badge on a neutral square if unavailable.
+- **DOM & restore contract**: injected via `Runtime.evaluate` (`window.__browserforceTabBadge`). Snapshots existing `link[rel~=icon]` `href`/`type` attributes (or notes none existed), reuses `#__browserforce_tab_badge_icon__` idempotently, and keeps a `MutationObserver` that re-asserts the badge if the page rewrites its favicon (e.g. Gmail/Slack unread counts) while driven. On restore, disconnects the observer and restores the original `link[rel~=icon]` attributes (or removes `#__browserforce_tab_badge_icon__` if none existed). Top-level navigations mark the tab so the badge is re-applied on the next real command.
 
 ### Test Isolation: writeCdpUrl Flag
 
@@ -456,6 +574,43 @@ Exposed BrowserForce helpers and the persistent `state` object are wrapped by `g
 - **Limitation (sync CPU loop after `await`)**: `vm.runInContext(..., { timeout })` bounds only the **synchronous window up to the first `await`** (so `while (true) {}` is interrupted). A CPU-bound synchronous loop scheduled **after** an `await` (e.g. `await Promise.resolve(); while (true) {}`) runs as a microtask the vm `timeout` does not bound and can block the event loop so the outer abort timer never fires. Interrupting that requires worker/isolate execution, a deliberate Non-Goal. Do **not** "fix" it with `vm.createContext(..., { microtaskMode: 'afterEvaluate' })`: that breaks host-promise awaits (every real `await page.*()` would never resume and would time out).
 - **Location**: `mcp/src/exec-engine.js` — `runCode()`, `createRunController()`, `createRunTimers()`, `guardObject()`, `shouldGuardObject()`, `abortableDelay()`.
 
+### JS Dialogs
+
+- Keep one dialog listener on every existing/new page, including foreign pages.
+  One relay broadcasts every dialog event to every CDP client. Playwright 1.60
+  auto-dismisses when no page/context dialog listener exists (beforeunload is
+  accepted). A listener that does nothing leaves the dialog for its owner/user.
+  **Known limitation:** older/foreign Playwright clients without our handler
+  still auto-dismiss; concurrent runs intentionally driving one page can race.
+- Handle and record only while a run is active and drives that page: its
+  active/pinned `--tab` page, a page it creates with `context.newPage()`, explicitly
+  arms, or issues Playwright commands on. `dialogs.js` uses async run scope and
+  observes Playwright 1.60's client connection send path without proxying raw
+  Page/Context identity. Page/Frame/Locator/input commands qualify; registering
+  listeners and discovering unrelated pages do not grant ownership.
+- Between runs, retain at most 100 pending Dialog objects for previously driven
+  pages, without history/notices or handling. Before the next run drives that
+  page, apply defaults and emit the normal notice. Drop pending objects on close,
+  disconnect, or reset; never rebind them to replacement Pages by URL.
+- Accept alert/beforeunload; dismiss confirm/prompt unless pre-armed.
+  `armDialog({ accept, promptText?, page? })` targets the explicit Page or defaults
+  to the exec's active/pinned page; it overrides its next confirm/prompt only.
+  `runCode` supplies the abort signal; clear ownership and unused arms on
+  completion/error/timeout. Never carry an accept into a later run or expose the
+  unguarded controller to snippets. A pending dialog from an earlier run uses
+  defaults before the new run can arm a response.
+- `getDialogs()` retains the last 100 handled records (type, message,
+  defaultValue, url, at, action/error). Append notices once, including on command
+  errors and non-exec commands. Text renderers unwrap
+  `{ _bf_type: 'dialog_result', result, dialogs }`; preserve binary/image content.
+  CLI JSON keeps that envelope. Records/notices survive idle reconnects; reset
+  clears them.
+- With no `/cdp` client, leave `Page.javascriptDialogOpening` alone. The relay
+  must neither accept nor dismiss for the human. Dialogs created during the idle
+  gap are not guaranteed to replay on reconnect.
+- Playwright API baseline: 1.60.0 (lockfile); see its official dialogs guide and
+  Dialog API. Use the helper instead of competing Playwright dialog listeners.
+
 ## Accessibility Snapshot Engine
 
 - **Rule**: The snapshot tree comes from `mcp/src/aria-snapshot-engine.js` (CDP `Accessibility.getFullAXTree` + `DOM.getFlattenedDocument`, cross-referenced by `backendNodeId`). There is **no DOM-walker fallback** — an empty AX tree throws a descriptive error after one retry. `mcp/src/snapshot.js` keeps only shared constants/helpers + `createSmartDiff`/`parseSearchPattern`.
@@ -536,7 +691,8 @@ rewrites JS (`getByRole('button')` became `getByRole(button)` →
 - No new dependencies for client arbitration or standby behavior.
 - Tab ownership is metadata-only: agent-created tabs record an owning agent key, and an explicit `closeTab` from a different agent is refused. It is NOT a capability fence — every CDP client can still navigate any target, and auto-close remains per-tab idle time rather than per owner.
 - No extension protocol changes beyond the `ownerKey` field on
-  `createTab`/`closeTab` and **optional, additive, display-only fields on
+  `createTab`/`closeTab`, optional display-only `agentName` on `createTab`, and
+  **optional, additive, display-only fields on
   `cdpCommand`** that an older extension ignores (`passive`, `agentName`). No new
   message types, no required fields, no structural change — that is what this
   non-goal protects. A field that an old extension can ignore and a new
@@ -578,6 +734,8 @@ When reviewing changes to this project:
 |------|-------|---------|
 | `relay/src/index.js` | ~800 | `RelayServer` class — CDP proxy, session management, HTTP endpoints |
 | `extension/background.js` | ~430 | Service worker — WS connection, `chrome.debugger` bridge, reconnection |
+| `extension/ghost-cursor.js` | ~1050 | Physics-driven ghost cursor renderer, pure animation math, optional pre-click sync, per-tab serialized queue |
+| `extension/tab-badge.js` | ~500 | Driven-tab favicon badge state machine, `_favicon` + `OffscreenCanvas` composition, `MutationObserver`-backed icon injection/restore |
 | `extension/manifest.json` | 20 | MV3 manifest — permissions: debugger, tabs, storage, alarms |
 | `extension/popup.html/js/css` | ~100 | Status UI — connection state, relay URL config, available tabs list |
 | `mcp/src/index.js` | ~400 | MCP server — browserforce + exec + reset + help tools via Playwright-core `connectOverCDP` |
@@ -614,3 +772,10 @@ Run with: `node --test relay/test/relay-server.test.js` and `node --test mcp/tes
 6. **Test writeCdpUrl**: Never call `relay.start()` in tests without `{ writeCdpUrl: false }` — it overwrites the production cdp-url file.
 
 7. **No fixed chat session IDs**: BrowserForce Agent chat must always use explicit user-selected/generated session IDs and persisted session history. Never bind side-panel chat to a single hardcoded ID.
+
+### Review regression guards
+
+- Unexpected debugger detach clears the badge controller but cannot send a DOM restore. Keep the page-side badge expiry, renewed by real commands via `touch()`, so favicon restoration survives detach; suspended pages can delay timers.
+- A previously driven idle client can queue a dialog another client handles. Suppress only the queued-dialog `No dialog is showing` response, removing its provisional record; genuine failures and current-run dialogs still report errors.
+
+- Badge API reuse requires `touch`; restore an older API before replacement so its original favicon is not mistaken for the badge during upgrade.

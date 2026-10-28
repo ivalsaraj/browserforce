@@ -36,15 +36,5 @@
   },
   "side_panel": {
     "default_path": "agent-panel.html"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "assets/ghost-cursor.png"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
-    }
-  ]
+  }
 }

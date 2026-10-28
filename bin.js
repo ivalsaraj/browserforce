@@ -105,11 +105,10 @@ async function connectBrowser() {
   const pwPath = mReq.resolve('playwright-core');
   const { default: pw } = await import(pwPath);
   const { chromium } = pw;
-  const { agentCdpUrl } = await import('./mcp/src/client-label.js');
-  // durableLabel: false — the one-shot path sends no affinity label, so which
-  // window it opens tabs in is unchanged; only the display-only agent name is
-  // added.
-  const cdpUrl = agentCdpUrl(await getCdpUrl(), { durableLabel: false });
+  const { agentCdpUrl, cliClientLabel } = await import('./mcp/src/client-label.js');
+  // Labeled only when the agent named itself, so its one-shot calls share one
+  // owner identity; unnamed calls send no label and keep their old window choice.
+  const cdpUrl = agentCdpUrl(await getCdpUrl(), { label: cliClientLabel() });
   const baseUrl = getRelayHttpUrlFromCdpUrl(cdpUrl);
   await assertExtensionConnected({ baseUrl });
   return chromium.connectOverCDP(cdpUrl);

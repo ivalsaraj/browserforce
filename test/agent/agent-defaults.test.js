@@ -29,9 +29,9 @@ test('a malformed stored value falls back to the default', () => {
   }
 });
 
-test('dedicated window defaults ON when never chosen', () => {
-  assert.equal(resolveDedicatedWindow({}), true);
-  assert.equal(resolveDedicatedWindow(undefined), true);
+test('dedicated window defaults OFF when never chosen', () => {
+  assert.equal(resolveDedicatedWindow({}), false);
+  assert.equal(resolveDedicatedWindow(undefined), false);
 });
 
 test('dedicated window respects an explicit off', () => {
@@ -45,4 +45,11 @@ test('popup mirrors the same auto-close default (it cannot import modules)', () 
   assert.ok(m, 'popup.js must declare DEFAULT_AUTO_CLOSE_MINUTES');
   assert.equal(Number(m[1]), DEFAULT_AUTO_CLOSE_MINUTES,
     'popup default must match extension/agent-defaults.js');
+});
+
+
+test('dedicated window requires an explicit boolean true', () => {
+  for (const dedicatedWindow of [null, 'true', 1, {}, [], false]) {
+    assert.equal(resolveDedicatedWindow({ dedicatedWindow }), false);
+  }
 });
