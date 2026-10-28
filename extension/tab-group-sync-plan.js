@@ -111,44 +111,36 @@ export function buildBrowserforceTabGroupPlan({ attachedTabIds = [], allTabs = [
   return { groupsToClear, windows };
 }
 
-const AGENT_GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
-const OWNER_TITLE_SUFFIX_LENGTH = 4;
-
 export function buildAgentTabGroupPlan({
   agentTabs = new Map(),
-  agentTabNames = new Map(),
   agentTabGroupIds = new Map(),
   newAgentTabIds = [],
   allTabs = [],
   existingGroups = [],
 } = {}) {
   const tabById = new Map(allTabs.map((tab) => [tab.id, tab]));
-  const groupById = new Map(existingGroups.map((group) => [group.id, group]));
-  const ownersByWindow = new Map();
+  const plans = [];
+  // Persisted assignments distinguish our groups from groups the user moved tabs into.
+  for (const group of existingGroups) {
+    const hasAssignedMember = allTabs.some((tab) => (
+      tab.windowId === group.windowId && tab.groupId === group.id
+      && agentTabs.has(tab.id) && agentTabGroupIds.get(tab.id) === group.id
+    ));
+    if (hasAssignedMember) {
+      plans.push({ windowId: group.windowId, existingGroupId: group.id, tabsToAdd: [] });
+    }
+  }
   // Only the create path submits new ids. Reconnects and group-change events
-  // never regroup old tabs, so a user's drag/ungroup wins even after SW restart.
+  // can rename managed groups but never regroup old tabs, so user moves win.
   for (const tabId of new Set(newAgentTabIds)) {
     const tab = tabById.get(tabId);
     if (!tab || !agentTabs.has(tabId) || !Number.isInteger(tab.windowId) || tab.groupId >= 0) continue;
-    const owner = agentTabs.get(tabId);
-    if (!ownersByWindow.has(tab.windowId)) ownersByWindow.set(tab.windowId, new Map());
-    const owners = ownersByWindow.get(tab.windowId);
-    if (!owners.has(owner)) owners.set(owner, []);
-    owners.get(owner).push(tabId);
-  }
-  const plans = [];
-  for (const [windowId, owners] of ownersByWindow) {
-    for (const [owner, tabsToAdd] of owners) {
-      const member = allTabs.find((tab) => (
-        tab.windowId === windowId && agentTabs.has(tab.id) && agentTabs.get(tab.id) === owner
-        && agentTabGroupIds.get(tab.id) === tab.groupId && groupById.get(tab.groupId)?.windowId === windowId
-      ));
-      const namedTabId = [...tabsToAdd, ...agentTabs.keys()].find((id) => agentTabs.get(id) === owner && agentTabNames.has(id));
-      const title = agentTabNames.get(namedTabId) || (owner ? `Agent ${owner.slice(-OWNER_TITLE_SUFFIX_LENGTH)}` : 'BrowserForce');
-      let hash = 0;
-      for (const char of owner || '') hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
-      plans.push({ windowId, existingGroupId: member?.groupId ?? null, tabsToAdd, title, color: AGENT_GROUP_COLORS[hash % AGENT_GROUP_COLORS.length] });
+    let plan = plans.find((candidate) => candidate.windowId === tab.windowId);
+    if (!plan) {
+      plan = { windowId: tab.windowId, existingGroupId: null, tabsToAdd: [] };
+      plans.push(plan);
     }
+    plan.tabsToAdd.push(tabId);
   }
   return plans;
 }

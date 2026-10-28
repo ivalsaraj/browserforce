@@ -1173,7 +1173,7 @@ async function syncTabGroup(newAgentTabIds = []) {
       agentTabIds: [...agentCreatedTabs.keys()],
       agentGroupIds: [...agentTabGroupIds.values()],
     });
-    const agentPlan = buildAgentTabGroupPlan({ agentTabs: agentCreatedTabs, agentTabNames, agentTabGroupIds, newAgentTabIds, allTabs, existingGroups });
+    const agentPlan = buildAgentTabGroupPlan({ agentTabs: agentCreatedTabs, agentTabGroupIds, newAgentTabIds, allTabs, existingGroups });
 
     for (const group of plan.groupsToClear) {
       if (group.tabIdsToUngroup.length === 0) continue;
@@ -1219,19 +1219,22 @@ async function syncTabGroup(newAgentTabIds = []) {
     }
     for (const group of agentPlan) {
       try {
-        const groupId = await chrome.tabs.group(group.existingGroupId == null
-          ? { tabIds: group.tabsToAdd, createProperties: { windowId: group.windowId } }
-          : { tabIds: group.tabsToAdd, groupId: group.existingGroupId });
-        for (const tabId of group.tabsToAdd) {
-          if (agentCreatedTabs.has(tabId)) agentTabGroupIds.set(tabId, groupId);
+        let groupId = group.existingGroupId;
+        if (group.tabsToAdd.length > 0) {
+          groupId = await chrome.tabs.group(groupId == null
+            ? { tabIds: group.tabsToAdd, createProperties: { windowId: group.windowId } }
+            : { tabIds: group.tabsToAdd, groupId });
+          for (const tabId of group.tabsToAdd) {
+            if (agentCreatedTabs.has(tabId)) agentTabGroupIds.set(tabId, groupId);
+          }
         }
-        await chrome.tabGroups.update(groupId, { title: group.title, color: group.color });
+        await chrome.tabGroups.update(groupId, { title: 'browserforce', color: TAB_GROUP_COLOR });
       } catch (e) {
         // A user may close a tab/group while Chrome is applying the plan.
         console.warn('[bf] Agent tab group changed during sync:', e.message);
       }
     }
-    if (agentPlan.length) await persistAutoManageState();
+    if (agentPlan.some((group) => group.tabsToAdd.length > 0)) await persistAutoManageState();
   } catch (e) {
     console.warn('[bf] syncTabGroup error:', e.message);
   } finally {

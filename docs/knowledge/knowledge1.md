@@ -29,3 +29,12 @@ entry rejection in `relay/src/cdp-log.js`, plus regression coverage in
 **Rule**: Bound persistent diagnostic logs during writes; process-restart cleanup
 is not a retention policy.
 **Files**: `relay/src/cdp-log.js`, `relay/test/relay-server.test.js`
+
+## 2026-10-28 — [CORRECTION] Keep browser group labels independent of agent identity (@Valsaraj)
+
+**Scope**: extension
+**Problem**: One logical agent could produce multiple `Agent ####` groups after MCP process replacement; the user requested a common `browserforce` label, even when multiple groups exist.
+**Root Cause**: Group selection, titles and colors depended on the connection owner's identity.
+**Fix**: `extension/tab-group-sync-plan.js` selects a shared group per window from persisted assignments with live members. `extension/background.js` names both grouping paths `browserforce` with the existing orange color and handles rename-only plans without grouping empty tab lists.
+**Rule**: Keep visual group labels independent of agent ownership; never repair grouping by collapsing internal owner identities or regrouping user-moved tabs.
+**Files**: `extension/tab-group-sync-plan.js`, `extension/background.js`, `test/agent/tab-group-sync-plan.test.js`

@@ -207,3 +207,10 @@
 ## 2026-10-28 — Prepare npm 1.3.0
 
 - Package and bundled extension version set to 1.3.0 for merged PR #31: background agent tabs, ownership, cursor feedback, and dialog lifecycle fixes.
+
+## 2026-10-28 — Shared browserforce tab-group labels
+
+- New agent-created tabs share a managed group per window across owner IDs and MCP process restarts. All managed groups use the existing `browserforce` label and orange color.
+- Existing assigned groups are renamed in place; duplicate groups may remain. User moves/ungrouping and manual-attachment reconciliation stay unchanged.
+- Ownership, display names, cleanup and window affinity remain independent of visual grouping. Regression coverage exercises the planner and background executor, including rename-only and restored-assignment cases.
+- Live Chrome verification awaits the required user extension reload.

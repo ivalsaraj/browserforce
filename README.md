@@ -941,7 +941,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Separate window**    | Off by default; opens a dedicated window when explicitly enabled. In full screen this can create a new macOS Space. |
 | **Parallel visibility** | Retained preference; no effect on tab placement |
 | **Ghost cursor**        | 24px inline SVG pointer with a tip hotspot, blue glow, and 240Hz spring motion, scored Bézier arcs, one arrival wiggle burst, matching favicon arrow, agent-name chip (`ghostCursorEnabled`, off by default), and optional click sync (`ghostCursorClickSync`, off by default, waits up to 1500ms for cursor arrival before `mousePressed`) |
-| **Tab grouping**        | Agent-created tabs use per-agent named groups; user-attached tabs use `browserforce` |
+| **Tab grouping**        | New agent tabs share a `browserforce` group per window; user-attached tabs also use `browserforce` |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |
 | **Read-only**           | Observe only — no clicks, no typing, no interactions                     |
@@ -953,7 +953,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 
 ### Execution Strategy Preferences
 
-- **Parallel mode**: With the separate-window setting off, new agent tabs open in the background of the pinned or last-focused normal Chrome window. A new window is created only if no normal window exists. Each agent has a named tab group per window; dragging a tab out leaves it out. Existing tabs are never moved between windows.
+- **Parallel mode**: With the separate-window setting off, new agent tabs open in the background of the pinned or last-focused normal Chrome window. A new window is created only if no normal window exists. New tabs from all agents share a `browserforce` group per window; dragging a tab out leaves it out. Existing agent groups receive the same label and may remain separate. Existing tabs are never moved between windows.
 - **Sequential mode (`executionMode = sequential`)**: Useful for lower-noise, step-by-step workflows on sensitive sites.
 - **Visibility preference (`foreground-tab` / `rotate-visible`)**: Neither value overrides background placement or rotates tabs.
 

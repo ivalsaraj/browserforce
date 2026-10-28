@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-27
 **Author:** Valsaraj
-**Status:** Historical design; current behavior is documented in AGENTS.md. Shared-window tabs now open in the background in per-agent groups; the dedicated-window option remains available.
+**Status:** Historical design; current behavior is documented in AGENTS.md. Shared-window tabs now open in the background in shared `browserforce` groups; the dedicated-window option remains available.
 
 ## Problem
 
@@ -146,7 +146,7 @@ affinity (existing `sentPinned` re-pin path).
 - **Manual mode / `noNewTabs`:** tab creation is already blocked, so the feature
   is a clean no-op there. No conflict.
 - **`browserforce` tab-group sync (`syncTabGroup`):** still runs; inside the
-  dedicated window agent-created tabs now use per-agent groups, separate from user-attached tabs.
+  dedicated window agent-created tabs now share `browserforce` groups, reconciled separately from user-attached tabs.
 
 ## Testing
 

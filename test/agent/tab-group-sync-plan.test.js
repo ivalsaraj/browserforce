@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { buildBrowserforceTabGroupPlan, buildAgentTabGroupPlan } from '../../extension/tab-group-sync-plan.js';
 
 test('keeps attached tabs grouped within their own Chrome window', () => {
@@ -105,30 +107,27 @@ const agentInput = {
   existingGroups: [{ id: 50, windowId: 10 }],
 };
 
-test('adds new tabs to a group per owner in their existing window', () => {
+test('new tabs from different owners share an existing managed group', () => {
   const plan = buildAgentTabGroupPlan(agentInput);
-  assert.equal(plan.length, 2);
-  assert.deepEqual(plan[0], { windowId: 10, existingGroupId: 50, tabsToAdd: [2], title: 'Codex', color: plan[0].color });
-  assert.equal(plan[1].existingGroupId, null);
-  assert.equal(plan[1].title, 'Claude');
-  assert.deepEqual(plan[1].tabsToAdd, [3]);
+  assert.deepEqual(plan, [{ windowId: 10, existingGroupId: 50, tabsToAdd: [2, 3] }]);
 });
 
-test('owner groups remain distinct when display names match', () => {
+test('display names do not split the shared group', () => {
   const plan = buildAgentTabGroupPlan({ ...agentInput, agentTabNames: new Map([[1, 'Agent'], [2, 'Agent'], [3, 'Agent']]) });
-  assert.equal(plan[1].existingGroupId, null);
+  assert.equal(plan.length, 1);
 });
 
-test('group title falls back to the owner suffix or BrowserForce', () => {
+test('unnamed and unlabeled agents share the same group', () => {
   const plan = buildAgentTabGroupPlan({ ...agentInput, agentTabNames: new Map(), agentTabs: new Map([[2, 'label:abcd1234'], [3, null]]) });
-  assert.equal(plan[0].title, 'Agent 1234');
-  assert.equal(plan[1].title, 'BrowserForce');
+  assert.deepEqual(plan, [{ windowId: 10, existingGroupId: null, tabsToAdd: [2, 3] }]);
 });
 
-test('group color is deterministic for an owner across windows', () => {
+test('new tabs in different windows stay in separate groups', () => {
   const plan = buildAgentTabGroupPlan({ ...agentInput, newAgentTabIds: [1, 2], allTabs: [{ id: 1, windowId: 11, groupId: -1 }, { id: 2, windowId: 10, groupId: -1 }] });
-  assert.equal(plan[0].color, plan[1].color);
-  assert.ok(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'].includes(plan[0].color));
+  assert.deepEqual(plan, [
+    { windowId: 11, existingGroupId: null, tabsToAdd: [1] },
+    { windowId: 10, existingGroupId: null, tabsToAdd: [2] },
+  ]);
 });
 
 test('never regroups an old tab the user removed, including after restart', () => {
@@ -144,6 +143,98 @@ test('a new window gets a new group after the previous window closed', () => {
   const plan = buildAgentTabGroupPlan({ ...agentInput, newAgentTabIds: [2], allTabs: [{ id: 2, windowId: 20, groupId: -1 }] });
   assert.equal(plan[0].windowId, 20);
   assert.equal(plan[0].existingGroupId, null);
+});
+
+test('existing managed groups get rename-only plans without moving old tabs', () => {
+  const plan = buildAgentTabGroupPlan({
+    ...agentInput,
+    newAgentTabIds: [],
+    agentTabGroupIds: new Map([[1, 50], [3, 60]]),
+    allTabs: agentInput.allTabs.map((tab) => tab.id === 3 ? { ...tab, groupId: 60 } : tab),
+    existingGroups: [{ id: 50, windowId: 10 }, { id: 60, windowId: 10 }],
+  });
+  assert.deepEqual(plan, [
+    { windowId: 10, existingGroupId: 50, tabsToAdd: [] },
+    { windowId: 10, existingGroupId: 60, tabsToAdd: [] },
+  ]);
+});
+
+test('a matching group title without an assigned live member is not adopted', () => {
+  const plan = buildAgentTabGroupPlan({
+    ...agentInput,
+    agentTabGroupIds: new Map(),
+    existingGroups: [{ id: 50, windowId: 10, title: 'browserforce' }],
+  });
+  assert.deepEqual(plan, [{ windowId: 10, existingGroupId: null, tabsToAdd: [2, 3] }]);
+});
+
+test('closed and already-grouped new tabs do not create another group', () => {
+  assert.deepEqual(buildAgentTabGroupPlan({
+    agentTabs: new Map([[1, 'owner']]), newAgentTabIds: [1, 2],
+    allTabs: [{ id: 1, windowId: 10, groupId: 70 }],
+  }), []);
+});
+
+const background = readFileSync(new URL('../../extension/background.js', import.meta.url), 'utf8');
+const syncSource = background.slice(background.indexOf('async function syncTabGroup('), background.indexOf('function queueSyncTabGroup('));
+
+async function runSync(input = agentInput, newIds = input.newAgentTabIds) {
+  const calls = [];
+  const agentTabGroupIds = new Map(input.agentTabGroupIds);
+  const sync = runInNewContext(`${syncSource}; syncTabGroup`, {
+    attachedTabs: new Map(input.allTabs.map((tab) => [tab.id, {}])),
+    agentCreatedTabs: input.agentTabs, agentTabNames: input.agentTabNames,
+    agentTabGroupIds, buildAgentTabGroupPlan, buildBrowserforceTabGroupPlan,
+    TAB_GROUP_COLOR: 'orange', isSyncingTabGroup: false,
+    persistAutoManageState: async () => calls.push(['persist']),
+    console: { warn: (...args) => calls.push(['warn', ...args]) },
+    chrome: {
+      tabs: {
+        query: async () => input.allTabs,
+        ungroup: async (ids) => calls.push(['ungroup', ids]),
+        group: async (options) => {
+          calls.push(['group', options]);
+          assert.ok(options.tabIds.length > 0, 'Chrome rejects an empty tabIds list');
+          return options.groupId ?? 99;
+        },
+      },
+      tabGroups: {
+        query: async () => input.existingGroups,
+        update: async (id, options) => calls.push(['update', id, options]),
+      },
+    },
+  });
+  await sync(newIds);
+  return { calls: JSON.parse(JSON.stringify(calls)), agentTabGroupIds };
+}
+
+test('background names a shared group browserforce and checkpoints new assignments', async () => {
+  const { calls, agentTabGroupIds } = await runSync();
+  assert.deepEqual(calls, [
+    ['group', { tabIds: [2, 3], groupId: 50 }],
+    ['update', 50, { title: 'browserforce', color: 'orange' }],
+    ['persist'],
+  ]);
+  assert.deepEqual([...agentTabGroupIds], [[1, 50], [2, 50], [3, 50]]);
+});
+
+test('background renames a restored group without regrouping any tab', async () => {
+  const { calls } = await runSync(agentInput, []);
+  assert.deepEqual(calls, [
+    ['update', 50, { title: 'browserforce', color: 'orange' }],
+  ]);
+});
+
+test('the next owner reuses the group assignment after restart', async () => {
+  const first = await runSync();
+  const { calls } = await runSync({
+    ...agentInput,
+    agentTabs: new Map([...agentInput.agentTabs, [4, 'label:new-process']]),
+    agentTabGroupIds: first.agentTabGroupIds,
+    allTabs: [...agentInput.allTabs.map((tab) => ({ ...tab, groupId: 50 })), { id: 4, windowId: 10, groupId: -1 }],
+    newAgentTabIds: [4],
+  });
+  assert.deepEqual(calls[0], ['group', { tabIds: [4], groupId: 50 }]);
 });
 
 test('shared browserforce grouping excludes agent tabs and their groups', () => {

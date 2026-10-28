@@ -25,3 +25,10 @@
   coordinates, and unsupported event types.
 - Normal detach awaits renderer disable and registered-script removal. Unexpected
   detach cleanup invalidates state without issuing another debugger command.
+
+### Tab groups: shared label, separate owners
+
+**Source**: `knowledge1.md`, 2026-10-28
+**Wrong**: Derive visible group labels from ephemeral owner IDs, or change ownership to merge groups.
+**Correct**: Use `browserforce` for every managed group; reuse assigned groups across owners only while a live member still matches its persisted assignment. Rename old groups without moving old tabs.
+**Why**: MCP restarts change owner IDs. Browser organization must remain consistent while close checks, cleanup and user grouping choices keep their existing semantics.
