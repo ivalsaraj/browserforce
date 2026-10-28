@@ -1,25 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createDialogState } from '../src/dialogs.js';
 import { buildExecContext, runCode, formatResult } from '../src/exec-engine.js';
 import { createBrowserSessionRuntime } from '../src/browser-session-runtime.js';
 import { executeBrowserforceCommand, renderBrowserforceCommandText } from '../src/browserforce-command-registry.js';
 
+async function fireDialog(page, actions, type = 'confirm', message = 'Delete item?', { fail = false } = {}) {
+  const dialog = {
+    type: () => type, message: () => message, defaultValue: () => type === 'prompt' ? 'original' : '',
+    accept: async (text) => { if (fail) throw new Error('page closed'); actions.push(['accept', text]); },
+    dismiss: async () => { if (fail) throw new Error('page closed'); actions.push(['dismiss']); },
+  };
+  await Promise.all(page.listeners('dialog').map((listener) => listener(dialog)));
+}
+
 function fixture() {
   const page = Object.assign(new EventEmitter(), { isClosed: () => false, url: () => 'https://dialog.test' });
   const context = Object.assign(new EventEmitter(), { pages: () => [page] });
+  const connection = { sendMessageToServer: async () => {} };
+  context._connection = connection;
+  page._type = 'Page';
+  page._connection = connection;
+  const addPage = () => {
+    const other = Object.assign(new EventEmitter(), { _type: 'Page', _connection: connection, isClosed: () => false, url: () => 'https://other.test' });
+    context.pages = () => [page, other];
+    context.emit('page', other);
+    return other;
+  };
+  context.newPage = async () => addPage();
   const exec = () => buildExecContext(page, context, {});
   const actions = [];
-  const fire = async (type, message = 'Delete item?', { fail = false } = {}) => {
-    const dialog = {
-      type: () => type, message: () => message, defaultValue: () => type === 'prompt' ? 'original' : '',
-      accept: async (text) => { if (fail) throw new Error('page closed'); actions.push(['accept', text]); },
-      dismiss: async () => { if (fail) throw new Error('page closed'); actions.push(['dismiss']); },
-    };
-    await Promise.all(page.listeners('dialog').map((listener) => listener(dialog)));
-  };
+  const fire = (...args) => fireDialog(page, actions, ...args);
   page.fire = fire;
-  return { page, context, exec, actions, fire };
+  return { page, context, exec, actions, fire, addPage };
 }
 
 for (const type of ['alert', 'beforeunload', 'confirm', 'prompt']) {
@@ -42,15 +56,14 @@ test('armDialog accepts a prompt once with text and then falls back to dismissal
   assert.deepEqual(f.actions, [['accept', 'answer'], ['dismiss']]);
 });
 
-test('arming on one page cannot accept another page dialog', async () => {
+test('an explicit page arm accepts that page without affecting another driven page', async () => {
   const f = fixture();
-  const other = Object.assign(new EventEmitter(), { isClosed: () => false, url: () => 'https://other.test' });
+  const other = f.addPage();
+  other.fire = () => fireDialog(other, f.actions);
   const exec = f.exec();
-  f.context.emit('page', other);
-  const actions = [];
-  await runCode('armDialog({accept:true});', exec, 1000);
-  await other.listeners('dialog')[0]({ type: () => 'confirm', message: () => 'Other', defaultValue: () => '', accept: async () => actions.push('accept'), dismiss: async () => actions.push('dismiss') });
-  assert.deepEqual(actions, ['dismiss']);
+  exec.other = other;
+  await runCode("armDialog({accept:true, page:other}); await page.fire('confirm'); await other.fire();", exec, 1000);
+  assert.deepEqual(f.actions, [['dismiss'], ['accept', undefined]]);
 });
 
 test('unused arms expire when an exec finishes', async () => {
@@ -64,6 +77,8 @@ test('timeout cancels an already armed response', async () => {
   const f = fixture();
   await assert.rejects(runCode('armDialog({accept:true}); await new Promise(() => {});', f.exec(), 20), /timed out/);
   await f.fire('confirm');
+  assert.deepEqual(f.actions, []);
+  await runCode('return 1;', f.exec(), 1000);
   assert.deepEqual(f.actions, [['dismiss']]);
 });
 
@@ -78,6 +93,8 @@ test('late continuation cannot arm a response after timeout', async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(f.page.late, /timed out/);
   await f.fire('confirm');
+  assert.deepEqual(f.actions, []);
+  await runCode('return 1;', f.exec(), 1000);
   assert.deepEqual(f.actions, [['dismiss']]);
 });
 
@@ -107,8 +124,10 @@ test('dialogs between runs surface once on the next browserforce result', async 
   const f = fixture();
   const browser = Object.assign(new EventEmitter(), { isConnected: () => true, contexts: () => [f.context] });
   const runtime = createBrowserSessionRuntime({ connectBrowser: async () => browser, buildExecContext, runCode, initialPageDiscoveryTimeoutMs: 0 });
-  await runtime.ensureBrowser();
+  await runtime.runCommand({ code: 'return 1;' });
   await f.fire('confirm');
+  assert.deepEqual(f.actions, []);
+  assert.deepEqual(f.exec().getDialogs(), []);
   const response = await executeBrowserforceCommand({ command: 'eval return 42', runtime });
   assert.match(response.text, /42[\s\S]*Dialog \(confirm\).*dismissed/);
   const next = await executeBrowserforceCommand({ command: 'eval return 43', runtime });
@@ -146,21 +165,21 @@ test('a command failure still includes the handled dialog notice', async () => {
   await assert.rejects(runCode("await page.fire('confirm'); throw new Error('action failed');", f.exec(), 1000), /action failed[\s\S]*Dialog \(confirm\).*dismissed/);
 });
 
-test('dialog notices survive an idle disconnect and reach a non-exec command', async () => {
+test('an idle pending dialog is not reported by a non-exec command', async () => {
   const f = fixture();
   const browser = Object.assign(new EventEmitter(), { isConnected: () => true, contexts: () => [f.context] });
   const runtime = createBrowserSessionRuntime({ connectBrowser: async () => browser, buildExecContext, runCode, initialPageDiscoveryTimeoutMs: 0 });
-  await runtime.ensureBrowser();
+  await runtime.runCommand({ code: 'return 1;' });
   await f.fire('confirm');
-  browser.emit('disconnected');
   const response = await executeBrowserforceCommand({ command: 'help', runtime });
-  assert.match(response.text, /Dialog \(confirm\).*dismissed/);
+  assert.doesNotMatch(response.text, /Dialog \(confirm\)/);
+  assert.deepEqual(f.actions, []);
 });
 
 test('dialog history is bounded and returned records cannot change saved history', async () => {
   const f = fixture();
   const exec = f.exec();
-  for (let i = 0; i < 105; i += 1) await f.fire('alert', `notice ${i}`);
+  await runCode("for (let i = 0; i < 105; i += 1) await page.fire('alert', `notice ${i}`);", exec, 1000);
   const history = exec.getDialogs();
   assert.equal(history.length, 100);
   assert.equal(history[0].message, 'notice 5');
@@ -173,8 +192,7 @@ test('a new runtime connection retains records and reset clears them', async () 
   let currentContext = f.context;
   const browser = Object.assign(new EventEmitter(), { isConnected: () => true, contexts: () => [currentContext], close: async () => browser.emit('disconnected') });
   const runtime = createBrowserSessionRuntime({ connectBrowser: async () => browser, buildExecContext, runCode, initialPageDiscoveryTimeoutMs: 0 });
-  await runtime.ensureBrowser();
-  await f.fire('alert');
+  await runtime.runCommand({ code: "await page.fire('alert');" });
   browser.emit('disconnected');
   const next = fixture();
   currentContext = next.context;
@@ -203,4 +221,144 @@ test('a dialog arm in one active run does not affect a second page in another ru
   await firstRun;
   assert.deepEqual(actions, ['dismiss']);
   assert.deepEqual(f.actions, [['accept', undefined]]);
+});
+
+test('only the client with an active run driving the page handles a broadcast dialog', async () => {
+  const f = fixture();
+  const owner = createDialogState();
+  const foreign = createDialogState();
+  owner.setupPage(f.page);
+  foreign.setupPage(f.page);
+  const signal = new AbortController().signal;
+  await foreign.withRun(signal, { page: f.addPage() }, () =>
+    owner.withRun(signal, { page: f.page }, () => f.fire('confirm')));
+  assert.deepEqual(f.actions, [['dismiss']]);
+  assert.equal(owner.getDialogs().length, 1);
+  assert.deepEqual(foreign.getDialogs(), []);
+  assert.deepEqual(foreign.takeNotices(), []);
+});
+
+test('a user page never driven by the run is left alone without history', async () => {
+  const f = fixture();
+  const exec = f.exec();
+  exec.userPage = f.addPage();
+  // Fire on the original user page while the run is pinned to another tab.
+  const pinned = buildExecContext(exec.userPage, f.context, {}, { pinnedPage: exec.userPage });
+  pinned.fireUserDialog = f.fire;
+  await runCode("await fireUserDialog('confirm');", pinned, 1000);
+  assert.deepEqual(f.actions, []);
+  assert.deepEqual(exec.getDialogs(), []);
+});
+
+test('a run-created page is driven without changing the active page', async () => {
+  const f = fixture();
+  const newPage = f.addPage();
+  f.context.newPage = async () => newPage;
+  newPage.fire = () => fireDialog(newPage, f.actions);
+  await runCode('const p = await context.newPage(); await p.fire();', f.exec(), 1000);
+  assert.deepEqual(f.actions, [['dismiss']]);
+});
+
+test('an action on a non-active page claims it for the current run', async () => {
+  const f = fixture();
+  const other = f.addPage();
+  f.context._connection.sendMessageToServer = () => fireDialog(other, f.actions);
+  const exec = f.exec();
+  exec.other = other;
+  await fireDialog(other, f.actions);
+  assert.deepEqual(f.actions, []);
+  await runCode("await other._connection.sendMessageToServer({_page:other}, 'evaluateExpression', {});", exec, 1000);
+  assert.deepEqual(f.actions, [['dismiss']]);
+});
+
+test('an idle client observing the same page does not handle or record the owner dialog', async () => {
+  const f = fixture();
+  const foreign = createDialogState();
+  foreign.setupPage(f.page);
+  await runCode("armDialog({accept:true}); await page.fire('confirm');", f.exec(), 1000);
+  assert.deepEqual(f.actions, [['accept', undefined]]);
+  assert.deepEqual(foreign.getDialogs(), []);
+  assert.deepEqual(foreign.takeNotices(), []);
+});
+
+test('a pending dialog waits for a run driving its own page', async () => {
+  const f = fixture();
+  await runCode('return 1;', f.exec(), 1000);
+  await f.fire('confirm');
+  const other = f.addPage();
+  await runCode('return 2;', buildExecContext(other, f.context, {}, { pinnedPage: other }), 1000);
+  assert.deepEqual(f.actions, []);
+  const result = await runCode('armDialog({accept:true}); return 3;', f.exec(), 1000);
+  assert.deepEqual(f.actions, [['dismiss']]);
+  assert.equal(result.dialogs.length, 1);
+});
+
+test('error completion releases page ownership and unused arms', async () => {
+  const f = fixture();
+  await assert.rejects(runCode("armDialog({accept:true}); throw new Error('stop');", f.exec(), 1000), /stop/);
+  await f.fire('confirm');
+  assert.deepEqual(f.actions, []);
+  await runCode('return 1;', f.exec(), 1000);
+  assert.deepEqual(f.actions, [['dismiss']]);
+});
+
+test('alert and beforeunload do not consume a confirm arm', async () => {
+  const f = fixture();
+  await runCode("armDialog({accept:true}); await page.fire('alert'); await page.fire('beforeunload'); await page.fire('confirm');", f.exec(), 1000);
+  assert.deepEqual(f.actions, [['accept', undefined], ['accept', undefined], ['accept', undefined]]);
+});
+
+test('pending dialogs are bounded to the latest 100 previously driven pages', async () => {
+  const state = createDialogState();
+  const pages = Array.from({ length: 101 }, () => Object.assign(new EventEmitter(), { url: () => 'https://pending.test' }));
+  const actions = [];
+  for (const page of pages) {
+    state.setupPage(page);
+    await state.withRun(new AbortController().signal, { page }, () => {});
+    await fireDialog(page, actions);
+  }
+  assert.deepEqual(actions, []);
+  await state.withRun(new AbortController().signal, { page: pages[0] }, () => {});
+  assert.deepEqual(actions, []);
+  await state.withRun(new AbortController().signal, { page: pages[1] }, () => {});
+  assert.deepEqual(actions, [['dismiss']]);
+});
+
+test('closed pages discard pending dialogs', async () => {
+  const f = fixture();
+  const exec = f.exec();
+  await runCode('return 1;', exec, 1000);
+  await f.fire('confirm');
+  f.page.emit('close');
+  await runCode('return 2;', exec, 1000);
+  assert.deepEqual(f.actions, []);
+});
+
+test('an explicit arm accepts a guarded Page saved in state', async () => {
+  const f = fixture();
+  const other = f.addPage();
+  other.fire = () => fireDialog(other, f.actions);
+  const exec = buildExecContext(f.page, f.context, { other });
+  await runCode('armDialog({accept:true,page:state.other}); await state.other.fire();', exec, 1000);
+  assert.deepEqual(f.actions, [['accept', undefined]]);
+});
+
+test('invalid explicit page targets fail before arming', async () => {
+  const f = fixture();
+  for (const page of [null, {}, { on() {}, isClosed: () => true }]) {
+    const exec = f.exec();
+    exec.target = page;
+    await assert.rejects(runCode('armDialog({accept:true,page:target});', exec, 1000), /open Page/);
+  }
+});
+
+test('the open command owns the page while navigating', async () => {
+  const f = fixture();
+  const created = f.addPage();
+  created.goto = () => fireDialog(created, f.actions);
+  f.context.newPage = async () => created;
+  const browser = Object.assign(new EventEmitter(), { isConnected: () => true, contexts: () => [f.context] });
+  const runtime = createBrowserSessionRuntime({ connectBrowser: async () => browser, initialPageDiscoveryTimeoutMs: 0 });
+  await runtime.openNewPage({ url: 'https://created.test' });
+  assert.deepEqual(f.actions, [['dismiss']]);
 });

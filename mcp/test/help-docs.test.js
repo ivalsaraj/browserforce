@@ -124,4 +124,8 @@ test('dialogs help teaches safe defaults, same-exec arming, and the disconnected
   assert.match(text, /confirm.*prompt.*dismiss/i);
   assert.match(text, /disconnected.*left open/i);
   assert.match(text, /getDialogs/);
+  assert.match(text, /page: p/);
+  assert.match(text, /active run/);
+  assert.match(text, /pending/);
+  assert.match(text, /other clients|foreign clients/);
 });

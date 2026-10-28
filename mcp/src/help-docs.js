@@ -87,13 +87,16 @@ browserforce "click @e2 --tab app"
     summary: 'Dialog records, safe defaults, and one-shot responses before an action.',
     text: `# JavaScript Dialogs
 
-- While connected, BrowserForce records JavaScript dialogs and appends a short notice to the next exec/browserforce result. alert and beforeunload are accepted; confirm and prompt are dismissed by default.
+- Only an active run handles and records dialogs on pages it drives: its active/--tab page, pages it creates, explicitly arms, or issues Playwright commands on. Unrelated user/agent pages are left alone. alert and beforeunload are accepted; confirm and prompt are dismissed by default. Notices append to the next exec/browserforce result.
 - To accept the next confirm/prompt on the active page, arm it BEFORE the triggering action in the same exec:
   armDialog({ accept: true });
   await page.getByRole('button', { name: 'Delete' }).click();
+- To target another Page: const p = await context.newPage(); armDialog({ accept: true, page: p }); then trigger its dialog in the same exec. Omit page for the active/--tab page.
 - For a prompt: armDialog({ accept: true, promptText: 'answer' }); then trigger it in the same exec. The response is page-scoped, consumed once, and cleared on completion, error, or timeout. It never carries into a later exec. alert/beforeunload always accept and do not consume a confirm/prompt arm.
 - Use getDialogs() for the last 100 session records: type, message, defaultValue, url, at, action, and error when handling failed. Notices are delivered once; records remain available across idle reconnects. Reset clears them.
 - Prefer armDialog over adding your own dialog listeners; two handlers can race to handle the same dialog.
+- Between runs, a dialog on a previously driven page stays pending (up to 100 pages). The next run driving that page handles it with defaults before its action and emits a notice. Other runs leave it alone.
+- One relay broadcasts to every client. Our listener prevents Playwright auto-dismissal on foreign pages; other clients without this handler can still dismiss them.
 - While MCP is idle-disconnected (15 seconds), dialogs are left open for the user. The relay does not auto-handle or record them without a CDP client. Reconnect and inspect the page; do not assume a dialog created during the gap was handled or recorded.
 - CLI JSON results with notices use { _bf_type: 'dialog_result', result, dialogs }; text output appends the notice. One-shot binary output keeps notices on stderr.`,
   },

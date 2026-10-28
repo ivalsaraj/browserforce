@@ -26,6 +26,7 @@ const MAX_LABEL_OVERLAY_REFS = 300;
 const EXEC_CONSOLE_MAX_ENTRIES = 200;
 const ATTACHED_PAGE_LOOKUP_TIMEOUT_MS = 5000;
 const ATTACHED_PAGE_LOOKUP_POLL_MS = 50;
+const dialogActivePageByExec = new WeakMap();
 
 // Canonical "is this page handle still usable" predicate: it must exist, expose
 // isClosed(), and not be closed. Wrapped in try/catch so a detached/destroyed
@@ -921,7 +922,7 @@ export function buildExecContext(
     };
   }
 
-  return {
+  const execContext = {
     ...wrappedPluginHelpers,           // plugin helpers spread first — built-ins always win
     browserforceSettings,
     browserforceRestrictions,
@@ -933,7 +934,7 @@ export function buildExecContext(
     getBrowserforceStatus, getBrowserforcePageForTab,
     screenshotWithAccessibilityLabels, cleanHTML, pageMarkdown,
     pluginCatalog, pluginHelp,
-    armDialog: (options, signal) => dialogState.armDialog(activePage(), options, signal),
+    armDialog: (options, signal) => dialogState.armDialog(options?.page === undefined ? activePage() : unwrapGuard(options.page), options, signal),
     getDialogs: dialogState.getDialogs,
     console: execConsole,
     getExecConsoleLogs,
@@ -941,6 +942,10 @@ export function buildExecContext(
     fetch, URL, URLSearchParams, Buffer, setTimeout, clearTimeout,
     TextEncoder, TextDecoder,
   };
+  dialogActivePageByExec.set(execContext, () => {
+    try { return activePage(); } catch { return null; }
+  });
+  return execContext;
 }
 
 function wrapExecuteCode(code) {
@@ -1192,10 +1197,13 @@ export async function runCode(code, execCtx, timeoutMs) {
 
   let userPromise;
   try {
-    userPromise = vm.runInContext(wrapExecuteCode(code), vmContext, {
+    const execute = () => vm.runInContext(wrapExecuteCode(code), vmContext, {
       timeout: timeoutMs,
       displayErrors: true,
     });
+    userPromise = dialogState
+      ? dialogState.withRun(run.signal, { page: execCtx.page, activePage: dialogActivePageByExec.get(execCtx) }, execute)
+      : execute();
   } catch (err) {
     run.abort();
     throw reportError(normalizeRunError(err, timeoutMs));
@@ -1219,7 +1227,7 @@ export async function runCode(code, execCtx, timeoutMs) {
       }),
     ]);
   } catch (error) {
-    throw reportError(error);
+    throw reportError(normalizeRunError(error, timeoutMs));
   } finally {
     if (timeoutId) globalThis.clearTimeout(timeoutId);
     if (!isComplete) run.abort();

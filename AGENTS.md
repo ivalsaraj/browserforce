@@ -571,21 +571,38 @@ Exposed BrowserForce helpers and the persistent `state` object are wrapped by `g
 
 ### JS Dialogs
 
-- The shared runtime installs one dialog handler on every existing/new page;
-  `buildExecContext` also installs it for one-shot CLI exec. `dialogs.js` records
-  the last 100 dialogs (type, message, defaultValue, url, at, action/error).
-  Accept alert/beforeunload; dismiss confirm/prompt unless pre-armed.
-- `armDialog({ accept, promptText? })` targets the exec's active/pinned page and
-  overrides its next confirm/prompt only. `runCode` supplies the abort signal;
-  clear unused arms on completion/error/timeout. Never persist an armed accept
-  into another run or expose the unguarded state controller to snippets.
-- Append pending notices once, including on command errors and non-exec commands.
-  Text renderers unwrap `{ _bf_type: 'dialog_result', result, dialogs }`; preserve
-  binary/image content. CLI JSON keeps that envelope. Dialog records/notices
-  survive idle reconnects, while reset clears them.
-- With no `/cdp` client, leave `Page.javascriptDialogOpening` alone. A human may
-  be using the attached tab; the relay must neither accept nor dismiss for them.
-  Dialogs created during the idle gap are not guaranteed to replay on reconnect.
+- Keep one dialog listener on every existing/new page, including foreign pages.
+  One relay broadcasts every dialog event to every CDP client. Playwright 1.60
+  auto-dismisses when no page/context dialog listener exists (beforeunload is
+  accepted). A listener that does nothing leaves the dialog for its owner/user.
+  **Known limitation:** older/foreign Playwright clients without our handler
+  still auto-dismiss; concurrent runs intentionally driving one page can race.
+- Handle and record only while a run is active and drives that page: its
+  active/pinned `--tab` page, a page it creates with `context.newPage()`, explicitly
+  arms, or issues Playwright commands on. `dialogs.js` uses async run scope and
+  observes Playwright 1.60's client connection send path without proxying raw
+  Page/Context identity. Page/Frame/Locator/input commands qualify; registering
+  listeners and discovering unrelated pages do not grant ownership.
+- Between runs, retain at most 100 pending Dialog objects for previously driven
+  pages, without history/notices or handling. Before the next run drives that
+  page, apply defaults and emit the normal notice. Drop pending objects on close,
+  disconnect, or reset; never rebind them to replacement Pages by URL.
+- Accept alert/beforeunload; dismiss confirm/prompt unless pre-armed.
+  `armDialog({ accept, promptText?, page? })` targets the explicit Page or defaults
+  to the exec's active/pinned page; it overrides its next confirm/prompt only.
+  `runCode` supplies the abort signal; clear ownership and unused arms on
+  completion/error/timeout. Never carry an accept into a later run or expose the
+  unguarded controller to snippets. A pending dialog from an earlier run uses
+  defaults before the new run can arm a response.
+- `getDialogs()` retains the last 100 handled records (type, message,
+  defaultValue, url, at, action/error). Append notices once, including on command
+  errors and non-exec commands. Text renderers unwrap
+  `{ _bf_type: 'dialog_result', result, dialogs }`; preserve binary/image content.
+  CLI JSON keeps that envelope. Records/notices survive idle reconnects; reset
+  clears them.
+- With no `/cdp` client, leave `Page.javascriptDialogOpening` alone. The relay
+  must neither accept nor dismiss for the human. Dialogs created during the idle
+  gap are not guaranteed to replay on reconnect.
 - Playwright API baseline: 1.60.0 (lockfile); see its official dialogs guide and
   Dialog API. Use the helper instead of competing Playwright dialog listeners.
 
