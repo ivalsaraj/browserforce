@@ -65,8 +65,8 @@ Popup settings include:
 
 - `executionMode`: `parallel` or `sequential`
 - `parallelVisibilityMode`: `foreground-tab` or `rotate-visible`
-- `ghostCursorEnabled`: `false` (default) or `true` — spring-driven in-page ghost cursor with curved Bézier arcs for long moves, speed narrowing, idle wiggle, and an agent-label chip (`prefers-reduced-motion: reduce` respected)
-- `ghostCursorClickSync`: `false` (default) or `true` — when enabled alongside `ghostCursorEnabled`, animates the ghost cursor to the click point and waits for arrival (bounded by 600ms) before forwarding `mousePressed` to Chrome
+- `ghostCursorEnabled`: `false` (default) or `true` — 24px inline SVG in-page ghost cursor with a tip hotspot and blue glow; 240Hz springs, scored Bézier arcs for long moves, speed narrowing, one arrival wiggle burst, and an agent-label chip (`prefers-reduced-motion: reduce` respected)
+- `ghostCursorClickSync`: `false` (default) or `true` — when enabled alongside `ghostCursorEnabled`, animates the ghost cursor to the click point and waits for arrival (bounded by 1500ms) before forwarding `mousePressed` to Chrome
 
 Current behavior lock:
 

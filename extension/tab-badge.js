@@ -4,6 +4,8 @@
 // keeps it asserted via MutationObserver against dynamic favicon rewrites, and
 // restores the original favicon after an idle period or debugger detach.
 
+import { CURSOR_ARROW_PATH, CURSOR_SIZE_PX, RESTING_TILT_DEG } from './ghost-cursor.js';
+
 export const TAB_BADGE_IDLE_MS = 15_000;
 export const TAB_BADGE_CANVAS_SIZE_PX = 32;
 export const TAB_BADGE_LINK_ID = '__browserforce_tab_badge_icon__';
@@ -11,7 +13,7 @@ export const TAB_BADGE_API_KEY = '__browserforceTabBadge';
 
 export const TAB_BADGE_FALLBACK_BG_COLOR = '#e5e7eb';
 export const TAB_BADGE_FALLBACK_BORDER_COLOR = '#9ca3af';
-export const TAB_BADGE_FILL_COLOR = '#111827';
+export const TAB_BADGE_FILL_COLOR = '#000';
 export const TAB_BADGE_OUTLINE_COLOR = '#ffffff';
 
 // Deterministic 1x1 PNG data URL fallback used only when OffscreenCanvas is
@@ -78,22 +80,6 @@ export function computeTabBadgeGeometry(canvasSize = TAB_BADGE_CANVAS_SIZE_PX) {
   const originY = size - badgeSize;
   const outlineWidth = Math.max(2, Math.round(size * 0.095));
 
-  // Normalized cursor arrow vertices within [0, 1] x [0, 1] of the badge box.
-  const unitPolygon = [
-    { x: 0.12, y: 0.08 }, // tip
-    { x: 0.12, y: 0.84 }, // bottom-left wing
-    { x: 0.34, y: 0.66 }, // inner-left notch
-    { x: 0.50, y: 0.94 }, // stem bottom-left
-    { x: 0.66, y: 0.86 }, // stem bottom-right
-    { x: 0.50, y: 0.58 }, // inner-right notch
-    { x: 0.84, y: 0.58 }, // right wing
-  ];
-
-  const polygon = unitPolygon.map((pt) => ({
-    x: Number((originX + pt.x * badgeSize).toFixed(2)),
-    y: Number((originY + pt.y * badgeSize).toFixed(2)),
-  }));
-
   return {
     canvasSize: size,
     iconRect: { x: 0, y: 0, width: size, height: size },
@@ -105,7 +91,10 @@ export function computeTabBadgeGeometry(canvasSize = TAB_BADGE_CANVAS_SIZE_PX) {
     },
     badgeRect: { x: originX, y: originY, width: badgeSize, height: badgeSize },
     outlineWidth,
-    polygon,
+    arrowPath: CURSOR_ARROW_PATH,
+    arrowScale: badgeSize / CURSOR_SIZE_PX,
+    arrowRotationRadians: RESTING_TILT_DEG * Math.PI / 180,
+    arrowCenter: { x: originX + badgeSize / 2, y: originY + badgeSize / 2 },
   };
 }
 
@@ -144,21 +133,21 @@ export function renderTabBadgeOnContext(
     ctx.strokeRect?.(sq.x, sq.y, sq.width, sq.height);
   }
 
-  ctx.beginPath?.();
-  geometry.polygon.forEach((pt, idx) => {
-    if (idx === 0) ctx.moveTo?.(pt.x, pt.y);
-    else ctx.lineTo?.(pt.x, pt.y);
-  });
-  ctx.closePath?.();
-
+  const arrow = new Path2D(geometry.arrowPath);
+  ctx.save();
+  ctx.translate(geometry.arrowCenter.x, geometry.arrowCenter.y);
+  ctx.rotate(geometry.arrowRotationRadians);
+  ctx.scale(geometry.arrowScale, geometry.arrowScale);
+  ctx.translate(-CURSOR_SIZE_PX / 2, -CURSOR_SIZE_PX / 2);
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  ctx.lineWidth = geometry.outlineWidth;
+  // Keep the existing badge outline width in canvas pixels after scaling the art.
+  ctx.lineWidth = geometry.outlineWidth / geometry.arrowScale;
   ctx.strokeStyle = TAB_BADGE_OUTLINE_COLOR;
-  ctx.stroke?.();
-
+  ctx.stroke(arrow);
   ctx.fillStyle = TAB_BADGE_FILL_COLOR;
-  ctx.fill?.();
+  ctx.fill(arrow);
+  ctx.restore();
 
   return { drewBaseImage, geometry };
 }
