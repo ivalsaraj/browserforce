@@ -383,14 +383,21 @@ export function createBrowserSessionRuntime(deps = {}) {
           }
         }
       } catch { /* context not ready yet — capture will attach lazily */ }
+      // Best-effort: a tab closed or a relay hiccup must cost only its viewport,
+      // never fail the reconnect the agent's next command is waiting on.
       if (viewportsByTargetId.size && relayBackendActive()) {
-        const identified = await listIdentifiedPages({ browserReady: true });
-        for (const { page, targetId } of identified) {
-          const viewport = viewportsByTargetId.get(targetId);
-          if (viewport) {
-            await page.setViewportSize(viewport);
+        try {
+          const identified = await listIdentifiedPages({ browserReady: true });
+          for (const { page, targetId } of identified) {
+            const viewport = viewportsByTargetId.get(targetId);
+            if (!viewport) continue;
             viewportsByTargetId.delete(targetId);
+            await page.setViewportSize(viewport).catch((e) => {
+              process.stderr.write(`[bf] viewport restore failed for ${targetId}: ${e.message}\n`);
+            });
           }
+        } catch (e) {
+          process.stderr.write(`[bf] viewport restore skipped: ${e.message}\n`);
         }
       }
     })();

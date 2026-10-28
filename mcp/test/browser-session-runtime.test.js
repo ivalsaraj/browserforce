@@ -797,6 +797,34 @@ for (const match of ['unique', 'exact', 'unmatched']) {
   });
 }
 
+test('idle reconnect succeeds when restoring a viewport fails', async () => {
+  const clock = makeFakeClock();
+  const urls = ['https://a.test/', 'https://b.test/'];
+  const pages = urls.map((url, i) => ({ ...makeTabPage({ url }), _targetId: `exact-${i}`, viewportSize: () => null }));
+  pages[0].viewportSize = () => ({ width: 390, height: 844 });
+  const runtime = createBrowserSessionRuntime({
+    connectBrowser: async () => makeFakeBrowser({ pages, cdpTargetId: (i) => pages[i]._targetId }),
+    getRelayHttpUrl: () => 'http://relay.test',
+    fetch: makeRelayFetch(() => urls.map((url, i) => ({ id: `T${i}`, url, title: '' }))),
+    idleDisconnectMs: 15000,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    initialPageDiscoveryTimeoutMs: 1,
+  });
+  await runtime.listTabRows();
+  clock.fireAll();
+  await new Promise((resolve) => setImmediate(resolve));
+  pages.splice(0, pages.length, ...urls.map((url, i) => ({
+    ...makeTabPage({ url }), _targetId: `exact-${i}`, viewportSize: () => null,
+    async setViewportSize() { throw new Error('Target page, context or browser has been closed'); },
+  })));
+
+  await runtime.ensureBrowser();
+
+  assert.equal(runtime.isConnected(), true);
+  await runtime.reset();
+});
+
 /** A page whose title() never settles — the real relay behaviour on a lazily-attached tab. */
 function makeUntitleablePage(url) {
   return { ...makeTabPage({ url }), title: async () => new Promise(() => {}) };
