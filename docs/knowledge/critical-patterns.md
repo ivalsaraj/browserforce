@@ -32,3 +32,10 @@
 **Wrong**: Derive visible group labels from ephemeral owner IDs, or change ownership to merge groups.
 **Correct**: Use `browserforce` for every managed group; reuse assigned groups across owners only while a live member still matches its persisted assignment. Rename old groups without moving old tabs.
 **Why**: MCP restarts change owner IDs. Browser organization must remain consistent while close checks, cleanup and user grouping choices keep their existing semantics.
+
+### Input ordering survives cursor synchronization
+
+**Source**: `knowledge1.md`, 2026-10-29
+**Wrong**: Await cursor arrival only for mousePressed while independently forwarding mouseReleased.
+**Correct**: Queue native mouse commands per tab before asynchronous checks or synchronization, continue after failures, and clear only the settled tail.
+**Why**: An up-before-down sequence silently prevents real clicks even when locator actions return successfully.

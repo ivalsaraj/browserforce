@@ -218,3 +218,9 @@
 ## 2026-10-29 — Prepare npm 1.3.1
 
 - Bumped the package and bundled extension from 1.3.0 to 1.3.1 for the shared `browserforce` group labels. No dependency or lockfile changes.
+
+## 2026-10-29 — Ordered native mouse commands
+
+- Real DOM input logging showed trusted mouseup arriving before mousedown while click-sync delayed the press; no click fired.
+- Added a per-tab FIFO before async mouse forwarding. Other tabs and non-mouse CDP stay independent; failure continuation and tail cleanup are tested.
+- The regression failed before the fix, then all three cases passed. After authenticated extension reload, both real button clicks changed labels, with correct trusted down/up/click ordering.

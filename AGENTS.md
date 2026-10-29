@@ -395,6 +395,7 @@ carrying fractional steps; catch-up caps at 1 second and resynchronizes.
   to the click point and waiting for `waitForArrival()` bounded by
   `CLICK_SYNC_MAX_WAIT_MS` (`1500ms`) so a stuck animation never blocks a click.
   When OFF (or absent), the cursor remains purely post-command cosmetic.
+- **Mouse command order:** `mouseCommandQueues` serializes native `Input.dispatchMouseEvent` commands per tab before restriction checks and cursor synchronization. Playwright can send press/release concurrently; delaying only the press lets release overtake it and silently suppresses the click. Keep other tabs and non-mouse CDP independent. A failed command must not poison the queue, and only its current tail may clear the entry.
 - **Artwork & hotspot**: inline 24px SVG, black fill and white outline, static
   two-radius blue glow. The up-pointing art rests at -44 degrees and transforms
   around its tip `(12, 1.6)`; translate the box by `(-12, -1.6)` so rotation and
@@ -471,6 +472,10 @@ While an agent is actively driving an attached tab, BrowserForce overlays a smal
 - `single-active`: opt-in mode that allows only one active `/cdp` client connection at a time.
 
 In `single-active`, contention returns HTTP `409 Conflict` for additional `/cdp` connects while the slot is busy. Slot state is exposed at `GET /client-slot` (`mode`, `busy`, `activeClientId`, `connectedAt`).
+
+### Authorized extension reload
+
+- The relay supports authenticated `POST /extension/reload`, already used by the CLI installer. Use the existing local bearer token internally; never print it. This reloads only the extension, not Chrome or its tabs. Confirm acknowledgement and reconnection before testing changed code. MCP `reset` reconnects CDP bindings and does not reload extension files.
 
 ### MCP Standby Polling
 

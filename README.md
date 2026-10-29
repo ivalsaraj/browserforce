@@ -940,7 +940,7 @@ Click the extension icon to configure restrictions. Your browser, your rules:
 | **Execution mode**      | `parallel` for independent work, `sequential` for one-at-a-time workflows |
 | **Separate window**    | Off by default; opens a dedicated window when explicitly enabled. In full screen this can create a new macOS Space. |
 | **Parallel visibility** | Retained preference; no effect on tab placement |
-| **Ghost cursor**        | 24px inline SVG pointer with a tip hotspot, blue glow, and 240Hz spring motion, scored Bézier arcs, one arrival wiggle burst, matching favicon arrow, agent-name chip (`ghostCursorEnabled`, off by default), and optional click sync (`ghostCursorClickSync`, off by default, waits up to 1500ms for cursor arrival before `mousePressed`) |
+| **Ghost cursor**        | 24px inline SVG pointer with a tip hotspot, blue glow, and 240Hz spring motion, scored Bézier arcs, one arrival wiggle burst, matching favicon arrow, agent-name chip (`ghostCursorEnabled`, off by default), and optional click sync (`ghostCursorClickSync`, off by default, waits up to 1500ms for cursor arrival before `mousePressed`; native mouse events remain ordered per tab) |
 | **Tab grouping**        | New agent tabs share a `browserforce` group per window; user-attached tabs also use `browserforce` |
 | **Lock URL**            | Prevent the agent from navigating away from the current page             |
 | **No new tabs**         | Block the agent from opening new tabs                                    |

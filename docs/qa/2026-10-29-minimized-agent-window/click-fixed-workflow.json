@@ -1,0 +1,140 @@
+{
+  "startedAt": 1793266478910,
+  "finishedAt": 1793266481724,
+  "reports": [
+    {
+      "index": 1,
+      "targetId": "8777638AC1600A12DBCB1EAB2D19C48B",
+      "tabId": 367189006,
+      "windowId": 367189005,
+      "capabilities": {
+        "origin": "null",
+        "visibility": "visible",
+        "logicalFocus": true,
+        "windowApiAvailable": false
+      },
+      "programmaticControl": true,
+      "inputEvidence": {
+        "events": [
+          {
+            "type": "pointerdown",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mousedown",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          },
+          {
+            "type": "pointerup",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mouseup",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          },
+          {
+            "type": "click",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          }
+        ],
+        "box": {
+          "x": 8,
+          "y": 79.875,
+          "width": 191.625,
+          "height": 21.5
+        },
+        "hit": "probe"
+      },
+      "raf": true,
+      "label": "Background action completed",
+      "clickError": null,
+      "screenshot": "/tmp/browserforce-minimized-probe-1.png",
+      "screenshotError": null,
+      "native": null,
+      "errors": []
+    },
+    {
+      "index": 2,
+      "targetId": "5A5BE029AA5982D29219B84D3A1E579F",
+      "tabId": 367189010,
+      "windowId": 367189005,
+      "capabilities": {
+        "origin": "null",
+        "visibility": "visible",
+        "logicalFocus": true,
+        "windowApiAvailable": false
+      },
+      "programmaticControl": true,
+      "inputEvidence": {
+        "events": [
+          {
+            "type": "pointerdown",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mousedown",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          },
+          {
+            "type": "pointerup",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mouseup",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          },
+          {
+            "type": "click",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          }
+        ],
+        "box": {
+          "x": 8,
+          "y": 79.875,
+          "width": 191.625,
+          "height": 21.5
+        },
+        "hit": "probe"
+      },
+      "raf": true,
+      "label": "Background action completed",
+      "clickError": null,
+      "screenshot": "/tmp/browserforce-minimized-probe-2.png",
+      "screenshotError": null,
+      "native": null,
+      "errors": []
+    }
+  ],
+  "error": null,
+  "reusedWindow": true
+}

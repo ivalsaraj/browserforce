@@ -1,0 +1,20 @@
+{
+  "rawSamples": 400,
+  "rawSha256": "d1baa9e0da8a00963529bbe808d44c0ad93f9a4824223f5b09c9c37bc4aa90a8",
+  "rawFile": "/tmp/browserforce-minimized-native-clickfixed.json",
+  "transitionsDuringCreateDriveClose": [
+    {
+      "secondsFromStart": -0.148,
+      "state": [
+        1,
+        "com.t3tools.t3code",
+        6036
+      ]
+    }
+  ],
+  "largeNewOnscreenWindows": [],
+  "largeWindowThreshold": {
+    "width": 400,
+    "height": 200
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "startedAt": 1793265007340,
+  "finishedAt": 1793265010118,
+  "reports": [
+    {
+      "index": 1,
+      "targetId": "D9B0A6A0A5132ECE5D1B5BA41CD17FD5",
+      "tabId": 367188978,
+      "windowId": 367188977,
+      "capabilities": {
+        "origin": "null",
+        "visibility": "visible",
+        "logicalFocus": true,
+        "windowApiAvailable": false
+      },
+      "programmaticControl": true,
+      "inputEvidence": {
+        "events": [
+          {
+            "type": "pointerup",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mouseup",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          },
+          {
+            "type": "pointerdown",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mousedown",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          }
+        ],
+        "box": {
+          "x": 8,
+          "y": 79.875,
+          "width": 153.1015625,
+          "height": 21.5
+        },
+        "hit": "probe"
+      },
+      "raf": true,
+      "label": "Run background action",
+      "clickError": null,
+      "screenshot": "/tmp/browserforce-minimized-probe-1.png",
+      "screenshotError": null,
+      "native": null,
+      "errors": []
+    },
+    {
+      "index": 2,
+      "targetId": "7C4910FE1C715B346D6DDB87A678C050",
+      "tabId": 367188982,
+      "windowId": 367188977,
+      "capabilities": {
+        "origin": "null",
+        "visibility": "visible",
+        "logicalFocus": true,
+        "windowApiAvailable": false
+      },
+      "programmaticControl": true,
+      "inputEvidence": {
+        "events": [
+          {
+            "type": "pointerup",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mouseup",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          },
+          {
+            "type": "pointerdown",
+            "target": "probe",
+            "x": 84.55000305175781,
+            "y": 90.62000274658203,
+            "trusted": true
+          },
+          {
+            "type": "mousedown",
+            "target": "probe",
+            "x": 84,
+            "y": 90,
+            "trusted": true
+          }
+        ],
+        "box": {
+          "x": 8,
+          "y": 79.875,
+          "width": 153.1015625,
+          "height": 21.5
+        },
+        "hit": "probe"
+      },
+      "raf": true,
+      "label": "Run background action",
+      "clickError": null,
+      "screenshot": "/tmp/browserforce-minimized-probe-2.png",
+      "screenshotError": null,
+      "native": null,
+      "errors": []
+    }
+  ],
+  "error": null,
+  "reusedWindow": true
+}

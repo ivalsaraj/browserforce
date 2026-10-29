@@ -47,6 +47,7 @@ const childSessions = new Map();
 /** Serializes tab group operations to avoid races (same pattern as playwriter) */
 let tabGroupQueue = Promise.resolve();
 let isSyncingTabGroup = false;
+const mouseCommandQueues = new Map();
 
 /** Tracks last CDP activity per attached tab (tabId → timestamp ms) */
 const tabLastActivity = new Map();
@@ -734,7 +735,22 @@ function buildRestrictionError(action, reason, settings, { lockedUrl } = {}) {
 
 // ─── CDP Command Forwarding ──────────────────────────────────────────────────
 
-async function cdpCommand({ tabId, method, params, childSessionId, agentName, passive }) {
+async function cdpCommand(command) {
+  if (command.method !== 'Input.dispatchMouseEvent') return forwardCdpCommand(command);
+
+  // Cursor arrival and restriction checks are asynchronous; release must not overtake press.
+  const previous = mouseCommandQueues.get(command.tabId) || Promise.resolve();
+  // A failed command already reports to its caller; later input must still run.
+  const pending = previous.catch(() => {}).then(() => forwardCdpCommand(command));
+  mouseCommandQueues.set(command.tabId, pending);
+  try {
+    return await pending;
+  } finally {
+    if (mouseCommandQueues.get(command.tabId) === pending) mouseCommandQueues.delete(command.tabId);
+  }
+}
+
+async function forwardCdpCommand({ tabId, method, params, childSessionId, agentName, passive }) {
   // Check restrictions before forwarding
   const blocked = await checkRestriction(method, params, tabId);
   if (blocked) throw new Error(blocked);

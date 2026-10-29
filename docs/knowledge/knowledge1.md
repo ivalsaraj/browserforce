@@ -38,3 +38,12 @@ is not a retention policy.
 **Fix**: `extension/tab-group-sync-plan.js` selects a shared group per window from persisted assignments with live members. `extension/background.js` names both grouping paths `browserforce` with the existing orange color and handles rename-only plans without grouping empty tab lists.
 **Rule**: Keep visual group labels independent of agent ownership; never repair grouping by collapsing internal owner identities or regrouping user-moved tabs.
 **Files**: `extension/tab-group-sync-plan.js`, `extension/background.js`, `test/agent/tab-group-sync-plan.test.js`
+
+## 2026-10-29 — [BUG] Mouse release overtook click-synchronized press (@Valsaraj)
+
+**Scope**: extension
+**Problem**: Locator clicks returned without activating controls; trusted DOM events showed mouseup before mousedown on the correct element.
+**Root Cause**: Relay messages execute concurrently. Asynchronous restriction checks and click-sync delay could hold mousePressed while mouseReleased reached Chrome first.
+**Fix**: Added a per-tab FIFO before all mouse-command async work; failures propagate while later commands continue, and only the current tail deletes its queue entry.
+**Rule**: Serialize native mouse commands, not just cosmetic cursor updates, when an adapter delays dispatch.
+**Files**: `extension/background.js`, `test/agent/mouse-command-order.test.js`, `docs/qa/2026-10-29-mouse-command-order.md`
