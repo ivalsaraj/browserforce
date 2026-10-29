@@ -214,3 +214,7 @@
 - Existing assigned groups are renamed in place; duplicate groups may remain. User moves/ungrouping and manual-attachment reconciliation stay unchanged.
 - Ownership, display names, cleanup and window affinity remain independent of visual grouping. Regression coverage exercises the planner and background executor, including rename-only and restored-assignment cases.
 - Live Chrome verification awaits the required user extension reload.
+
+## 2026-10-29 — Prepare npm 1.3.1
+
+- Bumped the package and bundled extension from 1.3.0 to 1.3.1 for the shared `browserforce` group labels. No dependency or lockfile changes.
