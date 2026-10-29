@@ -242,3 +242,8 @@
 - Controlled fullscreen trial preserved Space267 and Chrome front window20224 through two tabs, bringToFront and cleanup; rAF and screenshots worked.
 - After the separate mouse-order fix, both real clicks, rAF ticks and screenshots passed in two tabs sharing one agent window. With T3 Code foreground, Space1 and front window6036 stayed unchanged.
 - All49 package test commands passed. QA records separate native/functional runs and their limits. Original selected-tab identity and native group-title UI were not independently inspected.
+
+## 2026-10-29 — Prepare npm 1.3.2
+
+- Registry verification confirmed published 1.3.1/latest matches the earlier prepared group-label release archive.
+- Bumped package and bundled extension to 1.3.2 for the separately committed mouse-order and minimized-window fixes. Native/public-link smoke and all 49 package test commands passed before release preparation; publication awaits the user's adoption decision after the requested trial.
