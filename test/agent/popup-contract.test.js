@@ -61,8 +61,8 @@ test('popup exposes a default-off ghost-cursor toggle wired to storage', () => {
 });
 
 
-test('dedicated window copy explains full-screen Spaces and defaults off', () => {
-  assert.match(html, /new Space.*full.screen/i);
+test('dedicated window copy explains minimized macOS fullscreen startup and defaults off', () => {
+  assert.match(html, /macOS.*start minimized.*full.screen/i);
   assert.match(popupJs, /dedicatedWindowCb\.checked = s\.dedicatedWindow === true/);
 });
 

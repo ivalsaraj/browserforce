@@ -124,14 +124,20 @@ test('shared-window creates stay background regardless of visibility preference'
   assert.match(bg, /win\.type === 'normal'/);
 });
 
-async function runCreateWithWindows({ windows, requestedWindowId, settings = {}, dedicatedIds = [] }) {
+async function runCreateWithWindows({ windows, requestedWindowId, settings = {}, dedicatedIds = [], platform = 'mac' }) {
   const { runInNewContext } = await import('node:vm');
   const { resolveCreateWindowPlan } = await import('../../extension/window-affinity.js');
   const { resolveDedicatedWindow } = await import('../../extension/agent-defaults.js');
   const calls = [];
   const chrome = {
+    runtime: { getPlatformInfo: async () => ({ os: platform }) },
     storage: { local: { get: (_keys, callback) => callback({ dedicatedWindow: false, ...settings }) } },
     windows: {
+      getAll: async (options) => {
+        assert.equal(platform, 'mac', 'fullscreen detection is macOS-only');
+        assert.deepEqual(JSON.parse(JSON.stringify(options)), { windowTypes: ['normal'] });
+        return windows.filter((win) => win.type === 'normal');
+      },
       get: async (id) => windows.find((win) => win.id === id),
       getLastFocused: async (options) => {
         assert.deepEqual(JSON.parse(JSON.stringify(options)), { windowTypes: ['normal'] });
@@ -190,8 +196,32 @@ test('explicit dedicated mode retains Chrome default size and background window 
   assert.deepEqual(calls, [['window', { url: 'https://example.com', focused: false, type: 'normal' }]]);
 });
 
-test('explicit dedicated mode keeps new tabs active in its established window', async () => {
-  const calls = await runCreateWithWindows({ windows: [{ id: 10, type: 'normal' }], requestedWindowId: 10, dedicatedIds: [10], settings: { dedicatedWindow: true } });
+test('a new dedicated window starts minimized during macOS fullscreen', async () => {
+  const calls = await runCreateWithWindows({
+    windows: [{ id: 10, type: 'normal', state: 'fullscreen' }], settings: { dedicatedWindow: true },
+  });
+  assert.deepEqual(calls, [['window', { url: 'https://example.com', type: 'normal', state: 'minimized' }]]);
+});
+
+test('another fullscreen window in the same profile also triggers minimized creation', async () => {
+  const calls = await runCreateWithWindows({
+    windows: [{ id: 10, type: 'normal', state: 'normal' }, { id: 20, type: 'normal', state: 'fullscreen' }],
+    settings: { dedicatedWindow: true },
+  });
+  assert.deepEqual(calls, [['window', { url: 'https://example.com', type: 'normal', state: 'minimized' }]]);
+});
+
+test('fullscreen on other platforms preserves background window creation', async () => {
+  for (const platform of ['win', 'linux']) {
+    const calls = await runCreateWithWindows({
+      windows: [{ id: 10, type: 'normal', state: 'fullscreen' }], settings: { dedicatedWindow: true }, platform,
+    });
+    assert.deepEqual(calls, [['window', { url: 'https://example.com', type: 'normal', focused: false }]]);
+  }
+});
+
+test('explicit dedicated mode reuses an established minimized window for the next tab', async () => {
+  const calls = await runCreateWithWindows({ windows: [{ id: 10, type: 'normal', state: 'minimized' }], requestedWindowId: 10, dedicatedIds: [10], settings: { dedicatedWindow: true } });
   assert.deepEqual(calls, [['tab', { url: 'https://example.com', active: true, windowId: 10 }]]);
 });
 

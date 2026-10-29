@@ -39,3 +39,10 @@
 **Wrong**: Await cursor arrival only for mousePressed while independently forwarding mouseReleased.
 **Correct**: Queue native mouse commands per tab before asynchronous checks or synchronization, continue after failures, and clear only the settled tail.
 **Why**: An up-before-down sequence silently prevents real clicks even when locator actions return successfully.
+
+### Dedicated windows: isolation and native focus are separate requirements
+
+**Source**: `knowledge1.md`, 2026-10-29
+**Wrong**: Disable isolation to avoid a Space jump, or claim no focus theft from `focused:false` or a mocked test.
+**Correct**: Preserve the user's separate-window choice and verify the actual native foreground window and Space in real Chrome. Explicit normal state and initial bounds alone failed the live test; do not treat them as a proven fix.
+**Why**: A regular browser-window type does not specify display state, and Chrome page focus can be emulated.

@@ -47,3 +47,13 @@ is not a retention policy.
 **Fix**: Added a per-tab FIFO before all mouse-command async work; failures propagate while later commands continue, and only the current tail deletes its queue entry.
 **Rule**: Serialize native mouse commands, not just cosmetic cursor updates, when an adapter delays dispatch.
 **Files**: `extension/background.js`, `test/agent/mouse-command-order.test.js`, `docs/qa/2026-10-29-mouse-command-order.md`
+
+## 2026-10-29 — [CORRECTION] Separate window type from display state and native focus (@Valsaraj)
+
+**Scope**: extension
+**Problem**: Turning separate-window mode off puts agent tabs in the user's working window, defeating the requested isolation. The existing separate-window request also reproduced a native Space switch.
+**Root Cause**: `type: 'normal'` chooses a tabbed window, not its display state. A `focused: false` request alone did not establish native no-interruption behavior. The older timeline's universal bounds/state claim is not supported by its retained mocked-test logs.
+**Outcome**: Explicit normal state plus 1,000 × 700 bounds passed unit checks but failed after confirmed reload: the native window initially matched the request, then converted to fullscreen and switched Space35 → 242 → 35. Reverted the failed request change. Minimized creation and explicit user-adopted windows remain untested alternatives requiring a UX choice and native verification.
+**Rule**: Verify native focus and active Space independently of request parameters and page focus emulation; do not replace isolation with shared-window placement to hide a focus problem.
+**Files**: `extension/background.js`, `test/agent/background-window-plan.test.js`, `docs/qa/2026-10-29-normal-agent-window.md`
+**Supersedes**: docs/knowledge/timeline2.md, 2026-10-28 — Agent tabs stop stealing the user's screen (only the unsupported universal live-test claim).

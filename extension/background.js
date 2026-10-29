@@ -590,11 +590,13 @@ async function createTab(params) {
 
   let tab;
   if (plan.action === 'new-window') {
-    // Chrome's default size is intentional; bounds do not prevent macOS Space jumps.
+    const shouldMinimize = (await chrome.runtime.getPlatformInfo()).os === 'mac'
+      && (await chrome.windows.getAll({ windowTypes: ['normal'] })).some((win) => win.state === 'fullscreen');
     const win = await chrome.windows.create({
       url: params.url || 'about:blank',
-      focused: false,
       type: 'normal',
+      // focused:false uses ShowInactive, which ignores the minimized show state.
+      ...(shouldMinimize ? { state: 'minimized' } : { focused: false }),
     });
     tab = win?.tabs?.[0];
     if (!tab) throw new Error('Failed to create dedicated agent window');

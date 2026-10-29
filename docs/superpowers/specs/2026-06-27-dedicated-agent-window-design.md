@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-27
 **Author:** Valsaraj
-**Status:** Historical design; current behavior is documented in AGENTS.md. Shared-window tabs now open in the background in shared `browserforce` groups; the dedicated-window option remains available.
+**Status:** Historical design; current behavior is documented in AGENTS.md. Shared agent tabs use `browserforce` groups. New windows start minimized on macOS when Chrome has a full-screen window; the native verification and its limits are recorded in docs/qa/2026-10-29-minimized-agent-window.md.
 
 ## Problem
 

@@ -1,0 +1,140 @@
+{
+  "result": "FAIL",
+  "requested": {
+    "state": "normal",
+    "focused": false,
+    "width": 1000,
+    "height": 700
+  },
+  "observedPageGeometry": {
+    "outerWidth": 1470,
+    "outerHeight": 835
+  },
+  "spaceTransitions": [
+    {
+      "secondsFromStart": -0.298,
+      "space": 35
+    },
+    {
+      "secondsFromStart": 0.408,
+      "space": 242
+    },
+    {
+      "secondsFromStart": 3.033,
+      "space": 35
+    }
+  ],
+  "frontWindowTransitions": [
+    {
+      "secondsFromStart": -0.298,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        190
+      ]
+    },
+    {
+      "secondsFromStart": 0.117,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        null
+      ]
+    },
+    {
+      "secondsFromStart": 0.178,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        18878
+      ]
+    },
+    {
+      "secondsFromStart": 0.27,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        190
+      ]
+    },
+    {
+      "secondsFromStart": 0.338,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        18878
+      ]
+    },
+    {
+      "secondsFromStart": 2.414,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        null
+      ]
+    },
+    {
+      "secondsFromStart": 2.472,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        18918
+      ]
+    },
+    {
+      "secondsFromStart": 3.033,
+      "appAndFrontWindow": [
+        "com.google.Chrome",
+        190
+      ]
+    }
+  ],
+  "nativeFrameSizes": [
+    {
+      "secondsFromStart": 0.058,
+      "bounds": {
+        "Height": 0,
+        "Width": 0,
+        "X": 0,
+        "Y": 0
+      }
+    },
+    {
+      "secondsFromStart": 0.117,
+      "bounds": {
+        "Height": 700,
+        "Width": 1000,
+        "X": 0,
+        "Y": 33
+      }
+    },
+    {
+      "secondsFromStart": 0.178,
+      "bounds": {
+        "Height": 835,
+        "Width": 1470,
+        "X": 1448,
+        "Y": 121
+      }
+    },
+    {
+      "secondsFromStart": 2.414,
+      "bounds": {
+        "Height": 923,
+        "Width": 1470,
+        "X": 0,
+        "Y": 33
+      }
+    },
+    {
+      "secondsFromStart": 2.527,
+      "bounds": {
+        "Height": 700,
+        "Width": 1000,
+        "X": 0,
+        "Y": 33
+      }
+    }
+  ],
+  "interaction": {
+    "expected": "Background action completed",
+    "actual": "Test background interaction"
+  },
+  "rawSamples": 300,
+  "rawSha256": "7897261cf228913bf16b159732e120db962ffcd89046b4d05aeb58bae950de41",
+  "rawFile": "/tmp/browserforce-normal-window-candidate-native.json",
+  "cleanup": "Owned test page/window closed in finally; native Space returned to35."
+}

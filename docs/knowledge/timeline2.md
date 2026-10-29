@@ -224,3 +224,21 @@
 - Real DOM input logging showed trusted mouseup arriving before mousedown while click-sync delayed the press; no click fired.
 - Added a per-tab FIFO before async mouse forwarding. Other tabs and non-mouse CDP stay independent; failure continuation and tail cleanup are tested.
 - The regression failed before the fix, then all three cases passed. After authenticated extension reload, both real button clicks changed labels, with correct trusted down/up/click ordering.
+
+## 2026-10-29 — Explicit normal agent-window request
+
+- Reproduced the existing separate-window path through BrowserForce with native active-Space samples: 35 → 232 → 35 during one test creation/cleanup.
+- Tested explicit normal state, focused false and a 1,000 × 700 initial size. After confirmed reload, the native frame initially matched the request but then converted to fullscreen and switched Space35 → 242 → 35. The failed request change was reverted; affinity, ownership, shared-mode behavior and focus interception stay unchanged.
+- Recorded the failure, screenshot and native observations; removed the unsupported source comment and corrected evergreen guidance. The next minimized/adopted-window strategy awaits the user's UX choice. No verified window fix is published.
+
+## 2026-10-29 — Minimized agent-window trial
+
+- The user approved testing minimized startup after the normal-state/size request still switched native Spaces.
+- On macOS with a full-screen normal window in the connected profile, the new-window path requests minimized state without focus/bounds fields. Desktop and other platforms keep their existing request. Pins, owners, grouping and cleanup are unchanged.
+- Two targeted creation cases were red before implementation; 81 focused checks passed afterward. Live focus, Space, rendering and tab-reuse checks remain pending user reload. No native success or publication is claimed.
+
+## 2026-10-29 — Native minimized-window verification
+
+- Controlled fullscreen trial preserved Space267 and Chrome front window20224 through two tabs, bringToFront and cleanup; rAF and screenshots worked.
+- After the separate mouse-order fix, both real clicks, rAF ticks and screenshots passed in two tabs sharing one agent window. With T3 Code foreground, Space1 and front window6036 stayed unchanged.
+- All49 package test commands passed. QA records separate native/functional runs and their limits. Original selected-tab identity and native group-title UI were not independently inspected.

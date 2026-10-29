@@ -1,0 +1,20 @@
+{
+  "rawSamples": 450,
+  "rawSha256": "84a87cd2062afe2ea1320a7ae926ffc3eb6594f5a9f4dfbafb4b8d7b58bc1402",
+  "rawFile": "/tmp/browserforce-minimized-native-2.json",
+  "transitionsDuringCreateDriveClose": [
+    {
+      "secondsFromStart": -0.165,
+      "state": [
+        267,
+        "com.google.Chrome",
+        20224
+      ]
+    }
+  ],
+  "largeNewOnscreenWindows": [],
+  "largeWindowThreshold": {
+    "width": 400,
+    "height": 200
+  }
+}
